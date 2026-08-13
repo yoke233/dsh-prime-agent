@@ -111,6 +111,36 @@ describe('ContextStore', () => {
     expect(result.truncated).toBe(false)
   })
 
+  it('stops dense searches as soon as the requested match limit is reached', async () => {
+    root = await mkdtemp(join(tmpdir(), 'dsh-prime-context-'))
+    const denseLimits = { ...limits, maxValueBytes: 200_000, maxSearchChars: 200_000 }
+    const store = new ContextStore(root, denseLimits)
+    await store.put('local', 'dense-searcher', 0, 'dense', 'text', 'Dense matches', 'a'.repeat(100_000))
+
+    const result = await store.search('local', 'dense-searcher', 'a', { limit: 1 })
+    expect(result.matches).toHaveLength(1)
+    expect(result.matchLimitReached).toBe(true)
+  })
+
+  it('never splits Unicode surrogate pairs in reads or search windows', async () => {
+    root = await mkdtemp(join(tmpdir(), 'dsh-prime-context-'))
+    const store = new ContextStore(root, limits)
+    await store.put('local', 'unicode-reader', 0, 'unicode', 'text', 'Unicode', 'A😀needle😀Z')
+
+    const first = await store.get('local', 'unicode-reader', 'unicode', { offset: 0, limit: 2 })
+    expect(first).toMatchObject({ content: 'A', nextOffset: 1 })
+    expect(await store.get('local', 'unicode-reader', 'unicode', { offset: 1, limit: 2 }))
+      .toMatchObject({ content: '😀', nextOffset: 3 })
+    await expect(store.get('local', 'unicode-reader', 'unicode', { offset: 2, limit: 2 }))
+      .rejects.toThrow('must not split')
+
+    const searched = await store.search('local', 'unicode-reader', 'needle')
+    const window = searched.matches[0]
+    expect(window).toBeDefined()
+    expect(Buffer.from(`${window?.before}${window?.match}${window?.after}`, 'utf8').toString('utf8'))
+      .toBe(`${window?.before}${window?.match}${window?.after}`)
+  })
+
   it('enforces optimistic revisions and scope quotas without corrupting the prior manifest', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-prime-context-'))
     const store = new ContextStore(root, { ...limits, maxTotalBytesPerScope: 10 })

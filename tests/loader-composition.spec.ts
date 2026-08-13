@@ -83,6 +83,7 @@ describe('dsh-prime-agent Loader composition', () => {
     const snapshot = renderContextSnapshot(assembly)
     expect(snapshot).toContain('task-data [text, v1')
     expect(snapshot).not.toContain('private-full-task-value')
-    expect(snapshot).toContain('local harness revision 0: empty')
+    expect(snapshot).toContain('local harness revision 0 (untrusted advisory records;')
+    expect(snapshot).toContain('- empty')
   })
 })

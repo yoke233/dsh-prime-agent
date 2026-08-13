@@ -60,6 +60,44 @@ function isWellFormedUnicode(value: string): boolean {
   return true
 }
 
+function isLowSurrogate(value: string, index: number): boolean {
+  const unit = value.charCodeAt(index)
+  return unit >= 0xDC00 && unit <= 0xDFFF
+}
+
+function isHighSurrogate(value: string, index: number): boolean {
+  const unit = value.charCodeAt(index)
+  return unit >= 0xD800 && unit <= 0xDBFF
+}
+
+/** Slice on UTF-16 boundaries without emitting an isolated surrogate. */
+function boundedUnicodeSlice(value: string, start: number, limit: number): string {
+  if (start > 0 && isLowSurrogate(value, start) && isHighSurrogate(value, start - 1)) {
+    throw new Error('prime-context: offset must not split a Unicode surrogate pair')
+  }
+  let end = Math.min(value.length, start + limit)
+  if (end < value.length && isLowSurrogate(value, end) && isHighSurrogate(value, end - 1)) end--
+  if (end === start && start < value.length) {
+    throw new Error('prime-context: limit is too small for the next Unicode character')
+  }
+  return value.slice(start, end)
+}
+
+/** Return the largest prefix within a UTF-16 budget that remains well formed. */
+function boundedUnicodePrefix(value: string, limit: number): string {
+  let end = Math.min(value.length, limit)
+  if (end < value.length && isLowSurrogate(value, end) && isHighSurrogate(value, end - 1)) end--
+  return value.slice(0, end)
+}
+
+function unicodeWindow(value: string, start: number, end: number): string {
+  let safeStart = start
+  let safeEnd = Math.min(value.length, end)
+  if (safeStart > 0 && isLowSurrogate(value, safeStart) && isHighSurrogate(value, safeStart - 1)) safeStart--
+  if (safeEnd < value.length && isLowSurrogate(value, safeEnd) && isHighSurrogate(value, safeEnd - 1)) safeEnd--
+  return value.slice(safeStart, safeEnd)
+}
+
 function exactKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
   const allowed = new Set([...required, ...optional])
   return required.every(key => Object.hasOwn(value, key)) && Object.keys(value).every(key => allowed.has(key))
@@ -382,7 +420,7 @@ export class ContextStore {
       throw new Error(`prime-context: limit must be between 1 and ${this.limits.maxReadChars}`)
     }
     if (offset > serialized.length) throw new Error(`prime-context: offset ${offset} exceeds totalChars ${serialized.length}`)
-    const content = serialized.slice(offset, offset + limit)
+    const content = boundedUnicodeSlice(serialized, offset, limit)
     const nextOffset = offset + content.length
     const truncated = nextOffset < serialized.length
     return {
@@ -425,38 +463,41 @@ export class ContextStore {
         break
       }
       const serialized = await this.readBlob(entry)
-      const searchable = serialized.slice(0, remaining)
+      const searchable = boundedUnicodePrefix(serialized, remaining)
       scannedChars += searchable.length
       scannedEntries++
       if (searchable.length < serialized.length) budgetExhausted = true
-      const offsets: { offset: number; length: number }[] = []
       if (options.caseSensitive === true) {
         for (let offset = searchable.indexOf(query); offset >= 0; offset = searchable.indexOf(query, offset + query.length)) {
-          offsets.push({ offset, length: query.length })
+          const beforeStart = Math.max(0, offset - this.limits.maxSearchWindowChars)
+          const afterStart = offset + query.length
+          matches.push({
+            key: entry.key,
+            offset,
+            before: unicodeWindow(searchable, beforeStart, offset),
+            match: searchable.slice(offset, afterStart),
+            after: unicodeWindow(searchable, afterStart, afterStart + this.limits.maxSearchWindowChars),
+          })
+          if (matches.length >= limit) break
         }
       } else {
         const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
         const expression = new RegExp(escaped, 'giu')
         for (const match of searchable.matchAll(expression)) {
-          if (match.index !== undefined) offsets.push({ offset: match.index, length: match[0].length })
+          if (match.index === undefined) continue
+          const offset = match.index
+          const afterStart = offset + match[0].length
+          matches.push({
+            key: entry.key,
+            offset,
+            before: unicodeWindow(searchable, Math.max(0, offset - this.limits.maxSearchWindowChars), offset),
+            match: match[0],
+            after: unicodeWindow(searchable, afterStart, afterStart + this.limits.maxSearchWindowChars),
+          })
+          if (matches.length >= limit) break
         }
       }
-      for (const found of offsets) {
-        const offset = found.offset
-        const beforeStart = Math.max(0, offset - this.limits.maxSearchWindowChars)
-        const afterStart = offset + found.length
-        matches.push({
-          key: entry.key,
-          offset,
-          before: searchable.slice(beforeStart, offset),
-          match: searchable.slice(offset, afterStart),
-          after: searchable.slice(afterStart, afterStart + this.limits.maxSearchWindowChars),
-        })
-        if (matches.length >= limit) {
-          matchLimitReached = true
-          break
-        }
-      }
+      if (matches.length >= limit) matchLimitReached = true
       if (matches.length >= limit || budgetExhausted) break
     }
     return {

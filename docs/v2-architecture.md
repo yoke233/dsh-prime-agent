@@ -14,7 +14,7 @@
 
 Prime Agent 最有辨识度的部分不是一组 memory 条目，而是 RLM 工作方式：上下文成为可寻址数据，推理成为对数据、工具和 Agent 的程序化调度。
 
-在 DSH 中复制持久 IPython 会重新引入 Kernel、RPC、进程回收、scope 路由、取消和权限边界。更合适的做法是保留 RLM 不变量，同时复用 DSH 已拥有的运行时：
+v0.2 先保留了“上下文外置、按需读取、代码组合工具”的 RLM 不变量，并复用 DSH 已拥有的运行时：
 
 ```text
 用户任务
@@ -102,7 +102,7 @@ Prime 上游现在强调 child answer 通过后续 `agent_message` 或文件返�
 - skill/subagent 条目必须引用真实可见工具，不能引用 `run_code` transport。
 - local/global 默认都由部署策略控制，global 默认关闭。
 
-continual prompt snapshot 只包含有界的稳定经验。基础 system prompt 不可由 refinement 修改。
+continual prompt snapshot 只包含有界的稳定经验。每条经验以 JSON-quoted 的不可信建议记录呈现，结构性字段拒绝控制与格式字符，模型策略明确禁止记录覆盖当前 system、user、权限或工具约束。基础 system prompt 不可由 refinement 修改。
 
 ## Prompt 与 token 边界
 
@@ -143,7 +143,7 @@ continual prompt snapshot 只包含有界的稳定经验。基础 system prompt 
 
 delete 目前只删除 manifest 引用，保留不可变 blob，便于去重且避免并发删除竞态。0.3 在引入 immutable capsule 后再统一设计引用、保留期和 GC。
 
-## 为什么 0.2 不使用 IPython
+## 为什么 0.2 尚未使用 IPython
 
 持久 IPython 的优势是保留活 Python 对象、函数和 Kernel 命名空间；代价是另一套进程、Comm/RPC、资源配额、崩溃恢复、安全和 Agent scope 绑定。
 
@@ -155,7 +155,9 @@ DSH TypeScript Code Runtime 已提供：
 - 日志、取消和输出约束；
 - 与 Subagent/Jobs 的原生集成。
 
-所以 0.2 持久化的是数据命名空间，不是 JavaScript heap。只有当产品明确需要 Python 对象身份、Notebook 兼容或 Python-only 控制库时，才评估新的 Python Code Runtime；它不应作为 `prime_context` 旁边的第二套临时工具偷偷引入。
+所以 0.2 持久化的是数据命名空间，不是 JavaScript heap。这一选择让 RLM 数据工作区先落地，但不能替代 Prime Agent 的持久计算 namespace：函数、import、对象、索引和 client 仍在每次 `run_code` 后丢失。
+
+DSH PTC/Code Mode 已经交付 Prime 式的可编程控制面；该差距是剩余的连续计算保真问题，其不变量是持久计算 namespace，而不是特定 Python 语法。v0.3 将扩展现有 TypeScript Code Runtime 路径，继续复用工具桥、日志和取消边界。IPython 只用于参考 cell 连续性、中断与恢复边界，不作为 backend，也不会成为 `prime_context` 旁边的第二套嵌套代码工具。完整设计见 [v0.3 路线](v0.3-roadmap.md)。
 
 ## 配置与部署不变量
 
@@ -171,26 +173,32 @@ DSH TypeScript Code Runtime 已提供：
 
 - 大值完整存储，动态 prompt 只出现有界 catalog 元数据。
 - 支持跨 `ContextStore` 实例/跨 turn 按 key 恢复。
-- 支持字符切片、JSON Pointer 和有界字面搜索。
+- 支持不会拆分 Unicode surrogate pair 的字符切片、JSON Pointer，以及命中上限即停止的有界字面搜索。
 - revision 冲突、scope 配额、manifest 配额与 blob 完整性明确失败。
 - 真实 DSH Code Mode SDK 包含 `prime_context`、`prime_refine` 与 Subagent/Jobs。
 - 一个真实 `run_code` 调用可通过 `Promise.all` 并发启动多个 Subagent。
 - 后台 Subagent admission 后，父 Agent 能先写入工作结果，再在 child 完成后通过 `job_output` 回收并持久化结果。
-- Continual Harness 的历史回滚、极小 evidence 限制与 tool reference normalization 已有回归覆盖。
+- Continual Harness 的历史回滚、极小 evidence 限制、tool reference normalization、事务快照身份、prompt 硬预算与不可信记录边界已有回归覆盖。
 - 不修改 DSH Agent Loop，不复制 Subagent/Jobs 生命周期。
 
 ## 后续边界
 
-### 0.3：Context Capsule
+### 0.3：持久 RLM 计算环境
 
-- 不可变 `share`/`mount`。
-- 显式父子上下文授权。
-- capsule 生命周期、引用或 TTL，以及 blob GC。
-- 评估 DSH family messaging 是否能更接近 Prime 的显式 child reply。
+- 为 DSH Code Runtime 增加不透明 continuity identity seam。
+- 实现每 Session 一个持久 TypeScript Worker Realm。
+- 实现 stable `tools` proxy 与当前 run/Agent binding lease。
+- 实现 state catalog、best-effort checkpoint/restore 与资源治理。
 
-完整任务分解、契约和验收标准见 [v0.3 路线：Context Capsule 与 Agent Family](v0.3-roadmap.md)。
+完整任务分解、契约和验收标准见 [v0.3 路线：持久 RLM 计算环境](v0.3-roadmap.md)。
 
-### 0.4：学习闭环
+### 0.4：Context Capsule 与 Agent Family
+
+- 不可变 `share`/`mount` 与显式父子上下文授权。
+- admission-first child handle、恢复、follow-up、collect、cancel 与 delete。
+- child 主动 reply、capsule 生命周期与 blob GC。
+
+### 0.5：学习闭环
 
 - 从失败、纠正与稳定成功生成 proposal。
 - proposal、review、apply 分离。

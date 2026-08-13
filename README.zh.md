@@ -18,7 +18,7 @@
 
 动态 prompt 只注入工作区元数据。完整值保留在内容寻址 blob 中，直到模型显式调用 `get` 或 `search`。因此 prompt 成本取决于当前决策读取了多少内容，而不是一共存了多少上下文。
 
-插件复用 DSH 的 Agent Loop、TypeScript Code Runtime、Subagent、Jobs、Goal、Workflow、Session 与取消语义，不内嵌 IPython，也不创建第二套 Worker 生命周期。
+v0.2 复用 DSH 的 Agent Loop、TypeScript Code Runtime、Subagent、Jobs、Goal、Workflow、Session 与取消语义，不内嵌 IPython，也不创建第二套 Worker 生命周期。
 
 ## 安装
 
@@ -124,20 +124,25 @@ return await tools.prime_context({
 - RLM 值存储为不可变 SHA-256 内容寻址 blob；manifest 只保存元数据与 hash。
 - manifest 提交使用跨进程写锁与原子替换；读取 blob 时校验 hash 与字节数。
 - catalog、单值、scope、manifest、读取和搜索预算都由部署配置控制。
+- Continual-learning 条目以经过 JSON 引用的不可信建议记录进入 prompt。结构性 metadata 拒绝控制与格式字符；记录不能覆盖当前 system、user、权限或工具约束。
 - 状态损坏、超限、丢失或 revision 冲突都会明确失败。
 - delete 只移除 manifest 引用，目前仍保留不可变 blob。Capsule 分享与 blob 保留/回收策略推迟到后续版本。
 
 在宿主平台支持时会请求 POSIX owner-only 权限。这些措施用于持久化与完整性加固，不代表安全沙箱。
 
-## 为什么不使用 IPython？
+## 为什么 IPython 只是参考而不是 backend？
 
-Prime Agent 最重要的性质是：可编程控制面可以操作可寻址上下文与异步 Agent，而不是必须采用 Python 语法。DSH 已有 TypeScript Code Runtime，并已集成 scoped tools、日志、取消、Subagent 与 Jobs。嵌入持久 IPython kernel 会增加另一套 RPC、进程、恢复、隔离与所有权边界。
+v0.2 优先实现了操作可寻址数据与异步 Agent 的可编程控制面。DSH TypeScript Code Runtime 已经集成 scoped tools、日志、取消、Subagent 与 Jobs，因此 `prime_context` 可以先交付可靠的数据持久化。
 
-因此 0.2 只把数据持久化到 `prime_context`，每次 `run_code` 调用本身仍是临时执行。只有当 Python 对象身份和 kernel 兼容性成为明确产品需求时，才值得考虑 Python runtime。
+这已经抓住 Prime Agent 很大一部分工作感觉：DSH PTC/Code Mode 给模型一个可编程界面来组合工具与递归 Agent，`prime_context` 则把大型数据留在模型上下文之外。但它还不等价于 Prime 的持久计算状态，因为 v0.2 每次 `run_code` 结束后仍会丢失函数、import、对象、索引和 client。
+
+剩余不变量是持久计算 namespace，而不是 Python 语法。因此 [v0.3 路线](docs/v0.3-roadmap.md) 不增加另一个模型可见 runtime，而是在现有 PTC 路径上扩展 Session-scoped Persistent TypeScript Realm。`prime_context` 继续作为显式、可靠的数据层。IPython 只用于参考 cell 连续性、中断与诚实恢复语义，不是计划中的产品 backend。
 
 ## 开发
 
 开发测试会把公开 DSH 包名解析到同级 `../deepseek-harness` 源码；发布包只导入公开包名。
+
+DSH peer range 有意限制在兼容的 `0.1.x` 系列。它们标记为 optional，是为了避免 npm 在已经提供这些包的宿主中安装第二套 Harness package graph；如果选定的 DSH composition 缺少必需 service，插件加载仍会失败。当前 DSH `PromptContext` 契约是同步的，因此动态 prompt provider 使用有界同步文件快照；state directory 应放在本机存储，而不是网络文件系统。
 
 ```sh
 npm run typecheck

@@ -22,7 +22,7 @@ Synchronize behavioral contracts and architecture, not implementation language o
 
 | Prime Agent source concept | DSH adapter counterpart | Sync policy |
 | --- | --- | --- |
-| Persistent IPython control environment | Ephemeral TypeScript `run_code` plus durable `prime_context` values | Adopt control-plane semantics; do not copy the kernel stack |
+| Persistent IPython control environment | v0.2 ephemeral Code Mode + durable data; v0.3 Persistent TypeScript Realm | Use IPython only as a behavioral reference; do not adopt its runtime stack or plan it as a backend |
 | Python variables and files as external context | Manifest catalog and content-addressed blobs | Adapt retrieval, budgeting, and recovery behavior |
 | `rlm()` admission handle | DSH Subagent background admission and Job id | Preserve admission-first semantics using DSH lifecycle ownership |
 | `agent_message` replies and family roster | DSH completion delivery, `job_output`, and available Agent/Subagent services | Review semantic gaps; never invent a second message bus casually |
@@ -95,16 +95,16 @@ After a synchronization pass:
 | Reviewed baseline | Upstream change | Decision | Adapter result |
 | --- | --- | --- | --- |
 | `7787f074` | Admission-first `rlm()`, explicit child reporting, recoverable child handles | Adapt | Background DSH Subagent returns a Job id; parent continues and later collects through `job_output` |
-| `7787f074` | Persistent IPython as the only model-facing control plane | Adapt | Code Mode is mandatory; durable variables live in `prime_context`, not the JavaScript heap |
+| `7787f074` | Persistent IPython as the only model-facing control plane | Adapt | Code Mode remains the sole surface; v0.3 adds a Session-scoped Persistent TypeScript Realm while `prime_context` owns reliable data |
 | `7787f074` | Local/global Continual Harness with refine/rollback | Adapt | `prime_refine` is secondary, evidence-gated, optimistic, bounded, and conflict-safe |
 | `7787f074` | Host owns agent lifecycle, messages, goals, and cancellation | Adopt | The plugin composes DSH services and creates no worker registry or second Agent Loop |
 | `7787f074` | Automatic refinement enabled by default | Defer | Requires explicit proposal/review/outcome design before model-authored automation |
 
 ## Semantic gaps to re-check each time
 
-- Prime child answers arrive as later messages; v0.2 primarily exposes DSH Job collection. Revisit if DSH gains a closer family-message contract.
-- Prime's Python heap preserves live objects and functions; v0.2 preserves only JSON, text, and artifact references.
-- v0.2 has no immutable context capsule `share`/`mount` contract and no blob garbage collection; these are tracked in the [v0.3 roadmap](v0.3-roadmap.md).
+- Prime child answers can inform the parent's active computation. DSH currently schedules default `subagent-report` delivery with `followup`, which queues an ordinary later turn. v0.4 should request a DSH-owned steer-first scheduling option—steer a running parent, wake an idle parent—rather than patching DSH or creating a plugin-private inbox.
+- Prime's Python heap preserves live objects and functions; v0.2 preserves only JSON, text, and artifact references. The [v0.3 P0](v0.3-roadmap.md) closes the cross-turn computation gap with a Persistent TypeScript Realm. IPython remains reference material for behavior and failure semantics, not a product backend.
+- v0.2 has no immutable context capsule `share`/`mount` contract and no blob garbage collection; these are deferred to v0.4.
 - `prime_refine` is explicit; it does not yet observe outcomes or propose refinements automatically.
 
 These gaps are deliberate until a product requirement and a DSH-native ownership path justify closing them.

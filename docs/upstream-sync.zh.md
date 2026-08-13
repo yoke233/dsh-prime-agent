@@ -22,7 +22,7 @@ fix(coding-agent): retain root kill cleanup ownership (#1240)
 
 | Prime Agent 概念 | DSH 适配层对应物 | 同步策略 |
 | --- | --- | --- |
-| 持久 IPython 控制环境 | 临时 TypeScript `run_code` 加持久 `prime_context` 值 | 采用控制面语义，不复制 Kernel 技术栈 |
+| 持久 IPython 控制环境 | v0.2 临时 Code Mode + 持久数据；v0.3 Persistent TypeScript Realm | IPython 只作行为参考；不采用其 runtime 技术栈，也不规划为 backend |
 | Python 变量与文件形式的外部上下文 | manifest catalog 与内容寻址 blob | 适配检索、预算和恢复行为 |
 | `rlm()` admission handle | DSH Subagent 后台 admission 与 Job id | 用 DSH 生命周期所有权保留 admission-first 语义 |
 | `agent_message` 回复与 family roster | DSH completion delivery、`job_output` 和已有 Agent/Subagent 服务 | 持续检查语义差距，不轻易另建消息总线 |
@@ -95,16 +95,16 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 | 已审阅基线 | 上游变化 | 判断 | 适配结果 |
 | --- | --- | --- | --- |
 | `7787f074` | admission-first `rlm()`、子 Agent 显式汇报、可恢复 child handle | 适配 | DSH 后台 Subagent 返回 Job id；父 Agent 继续，稍后通过 `job_output` 回收 |
-| `7787f074` | 持久 IPython 是模型唯一可见控制面 | 适配 | 强制 Code Mode；持久变量进入 `prime_context`，不依赖 JavaScript heap |
+| `7787f074` | 持久 IPython 是模型唯一可见控制面 | 适配 | Code Mode 仍是唯一界面；v0.3 增加 Session-scoped Persistent TypeScript Realm，可靠数据继续由 `prime_context` 拥有 |
 | `7787f074` | local/global Continual Harness 与 refine/rollback | 适配 | `prime_refine` 降为次级，基于证据、乐观并发、有界且冲突安全 |
 | `7787f074` | Host 拥有 Agent 生命周期、消息、Goal 和取消 | 采用 | 插件组合 DSH 服务，不创建 Worker registry 或第二套 Agent Loop |
 | `7787f074` | 默认开启自动 refinement | 暂缓 | 在自动模型写入前先设计明确 proposal/review/outcome 机制 |
 
 ## 每次都要复查的语义差距
 
-- Prime 的 child answer 以稍后消息到达；v0.2 主要使用 DSH Job 回收。若 DSH 提供更接近的 family-message 契约，应重新评估。
-- Prime 的 Python heap 能保存活对象和函数；v0.2 只持久化 JSON、文本和 artifact reference。
-- v0.2 尚无不可变 Context Capsule `share`/`mount` 契约，也没有 blob 垃圾回收；相关工作记录在 [v0.3 路线](v0.3-roadmap.md)。
+- Prime 的 child answer 可以进入 parent 仍在进行的计算。DSH 当前默认用 `followup` 调度 `subagent-report`，因此会排成普通后续轮次。v0.4 应推动 DSH 提供其原生拥有的 steer-first 调度选项——运行中的 parent 走 steer，空闲 parent 被唤醒——而不是修改 DSH 源码或在插件里建立私有 inbox。
+- Prime 的 Python heap 能保存活对象和函数；v0.2 只持久化 JSON、文本和 artifact reference。[v0.3 P0](v0.3-roadmap.md) 用 Persistent TypeScript Realm 关闭跨 turn 计算差距。IPython 只用于参考行为与失败语义，不是产品 backend。
+- v0.2 尚无不可变 Context Capsule `share`/`mount` 契约，也没有 blob 垃圾回收；这些工作顺延到 v0.4。
 - `prime_refine` 目前需要显式调用，不会自动观察效果或生成 proposal。
 
 这些差距是有意保留的；只有明确产品需求且存在 DSH 原生所有权路径时才应关闭。
