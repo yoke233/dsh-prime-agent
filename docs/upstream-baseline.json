@@ -1,0 +1,9 @@
+{
+  "upstream": "https://github.com/PrimeIntellect-ai/prime-agent.git",
+  "localCheckout": "../prime-agent",
+  "baselineCommit": "7787f07415d843b9a800f6a4720e0c739bd608e5",
+  "baselineCommittedAt": "2026-08-12T21:01:27-07:00",
+  "baselineSubject": "fix(coding-agent): retain root kill cleanup ownership (#1240)",
+  "reviewedAt": "2026-08-13",
+  "adapterVersion": "0.2.0"
+}

@@ -1,0 +1,46 @@
+# Prime RLM bundle. This is intentionally a breaking v0.2 composition: it
+# selects Code Mode as the only model-facing control plane and mounts fresh RLM
+# and continual state below $DSH_HOME/prime-agent-v2.
+- id: tools
+  config:
+    mode: code
+    maxParallelSubCalls: 10
+
+- insert:
+    - id: prime-agent
+      name: dsh-prime-agent
+      config:
+        stateDirectory: !!js dshHomePath('prime-agent-v2')
+        contextToolName: prime_context
+        refineToolName: prime_refine
+        allowGlobalContext: false
+        allowGlobalRefinement: false
+        requireCodeMode: true
+        requireOrchestrationTools: true
+        context:
+          maxEntriesPerScope: 128
+          maxKeyChars: 160
+          maxSummaryChars: 500
+          maxValueBytes: 16777216
+          maxTotalBytesPerScope: 268435456
+          maxManifestBytes: 2097152
+          maxReadChars: 32000
+          maxSearchQueryChars: 500
+          maxSearchMatches: 50
+          maxSearchWindowChars: 500
+          maxSearchChars: 2000000
+          maxCatalogEntries: 64
+          maxCatalogChars: 12000
+        continual:
+          maxEntriesPerScope: 64
+          maxEntryIdChars: 128
+          maxEntryTitleChars: 200
+          maxEntryContentChars: 4000
+          maxReferenceToolChars: 128
+          maxEvidenceItems: 12
+          maxEvidenceChars: 1000
+          maxEditsPerTransaction: 16
+          maxTransactions: 32
+          maxStateBytes: 524288
+          maxPromptEntriesPerScope: 32
+          maxPromptCharsPerScope: 16000

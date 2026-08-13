@@ -1,0 +1,9 @@
+node_modules/
+coverage/
+dist/
+*.tgz
+*.log
+.DS_Store
+
+# Runtime state belongs under DSH_HOME, never in the source repository.
+prime-agent-v2/
