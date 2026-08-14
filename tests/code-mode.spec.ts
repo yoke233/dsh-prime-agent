@@ -77,6 +77,22 @@ describe('Prime Code Mode composition', () => {
     expect(policy).toContain('rebuild from durable checkpoints')
     expect(policy).not.toMatch(/rollback|roll back|rolled back/i)
     expect(policy).not.toMatch(/automatic/i)
+
+    // One mental model in one section: hydrate/dehydrate between runs, and the
+    // same verbs one scope out for the handoff to a child.
+    expect(policy).toContain('Hydrate and dehydrate')
+    expect(policy).toContain('const { helper, planIndex } = state')
+    expect(policy).toContain('Object.assign(state, { files, summary })')
+    expect(policy).toMatch(/do not redeclare the same helper, recompute a value, or re-read/)
+    // The handoff recipe: material by file, instructions by prompt, snapshot
+    // semantics, and a report that only carries conclusions and paths.
+    expect(policy).toMatch(/dehydrate the selected keys to a file instead of to state/)
+    expect(policy).toMatch(/Material travels by file, instructions travel in the prompt/)
+    expect(policy).toContain('A handoff file is not edited after it is written')
+    expect(policy).toContain('never bury task instructions in a data file')
+    expect(policy).toContain('snapshot of the moment it was written')
+    expect(policy).toContain('the same reduce-first rule, one level down')
+    expect(policy).toContain('truncated past 8192 characters')
   })
 
   it('fails prompt assembly when the deployment does not select Code Mode', async () => {
