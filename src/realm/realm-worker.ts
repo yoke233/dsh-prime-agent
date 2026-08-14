@@ -16,7 +16,7 @@ import { createRequire } from 'node:module'
 import { inspect } from 'node:util'
 import { workerData } from 'node:worker_threads'
 import type { MessagePort } from 'node:worker_threads'
-import type { HostToRealm, RealmNamespaceSpec, RealmProgramFailure, RealmToHost } from './protocol.js'
+import type { HostToRealm, RealmNamespaceSpec, RealmProgramFailure, RealmStateKeys, RealmToHost } from './protocol.js'
 
 const CapturedAbortController = AbortController
 const CapturedAbortSignal = AbortSignal
@@ -37,6 +37,8 @@ const capturedObjectIs = Object.is
 const capturedObjectPrototype = Object.prototype
 const capturedPropertyIsEnumerable = Object.prototype.propertyIsEnumerable
 const capturedReflectOwnKeys = Reflect.ownKeys
+const capturedStringSlice = String.prototype.slice
+const capturedSymbolToString = Symbol.prototype.toString
 
 /**
  * The async function constructor, reached through an instance because
@@ -51,6 +53,15 @@ const AsyncFunction = (async () => {}).constructor as new (...args: string[]) =>
  * every namespace declaration it sends.
  */
 const HIDDEN_BINDING_MEMBER = 'prime_realm_identity'
+
+/**
+ * Ceilings on the key census one settlement carries. They bound the WIRE, not
+ * the notice: these names are model-chosen text, so the host clamps again when
+ * it renders. Reporting more keys, or longer ones, than the host can ever show
+ * would only cost a copy across the port.
+ */
+const MAX_REPORTED_STATE_KEYS = 24
+const MAX_REPORTED_KEY_CHARS = 64
 
 /** Bounded inspect options, so a pathological value cannot explode the rendering. */
 const INSPECT_OPTIONS = { depth: 4, maxArrayLength: 100, maxStringLength: 10_000 } as const
@@ -601,6 +612,27 @@ function stateOverflow(maxStateEntries: number | undefined): string | undefined 
   return `realm state holds ${entries} entries, over the cap of ${maxStateEntries}; delete entries from state before the next run`
 }
 
+/**
+ * The bounded census of `state` for the run notice, over the SAME own keys
+ * {@link stateOverflow} counts, so what the model is shown is what the cap
+ * governs. Names only; a value never crosses on this field.
+ *
+ * Total by construction — it runs after the program's own guard, where a throw
+ * would leave the run without its terminal message: own-key enumeration invokes
+ * no getter, and the symbol rendering goes through the captured intrinsic
+ * rather than a `String` the program may have replaced.
+ */
+function stateKeys(): RealmStateKeys {
+  const own = capturedReflectOwnKeys(state)
+  const names: string[] = []
+  for (const key of own) {
+    if (names.length >= MAX_REPORTED_STATE_KEYS) break
+    const name = typeof key === 'string' ? key : capturedSymbolToString.call(key)
+    names.push(capturedStringSlice.call(name, 0, MAX_REPORTED_KEY_CHARS))
+  }
+  return { names, omitted: own.length - names.length }
+}
+
 /** Execute one program body, then settle exactly once. */
 async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise<void> {
   const run: ActiveRun = {
@@ -665,7 +697,10 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
   // persisted one from hanging its next run on a promise nobody will settle.
   for (const call of run.pending.values()) call.reject('tool lease revoked: the run that issued this call has ended')
   run.pending.clear()
-  post({ type: 'done', runId: run.id, nonce: run.nonce, ...done })
+  // The census travels with every settlement, failed runs included: a failure
+  // leaves the heap exactly as the program built it, so the names it holds are
+  // still what the next run will inherit.
+  post({ type: 'done', runId: run.id, nonce: run.nonce, state: stateKeys(), ...done })
 }
 
 port.on('message', (message: HostToRealm) => {

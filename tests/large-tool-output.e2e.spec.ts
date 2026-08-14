@@ -360,15 +360,15 @@ describe('scenario 2: oversized outer completion', () => {
 
 describe('scenario 3: the hard output cap is unchanged', () => {
   it('still fails with output-limit when a completion exceeds maxOutputBytes, and spills no artifact', async () => {
-    // 512 − the 160-byte generation-notice reserve leaves the realm 352 bytes.
-    const { spillRoot, agent } = await bootPrime({ backend: 'local', maxOutputBytes: 512 })
+    // 1024 − the 512-byte trailing-notice reserve leaves the realm 512 bytes.
+    const { spillRoot, agent } = await bootPrime({ backend: 'local', maxOutputBytes: 1024 })
 
     const execution = await runCode(agent, `return "Z".repeat(2000)`)
 
     expect(execution.isError).toBe(true)
     if (!execution.isError) throw new Error('expected the hard cap to fail the run')
     expect(execution.error.message).toContain('output-limit')
-    expect(execution.error.message).toContain('outer output exceeded 352 bytes')
+    expect(execution.error.message).toContain('outer output exceeded 512 bytes')
     // The diagnostic is small, so nothing was spilled: the hard cap is settled
     // BEFORE the presentation policy and offers no artifact recovery.
     expect(await spillFiles(spillRoot)).toHaveLength(0)

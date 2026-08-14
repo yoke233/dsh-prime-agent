@@ -20,6 +20,7 @@ import type { CodeBindingFunction, CodeRunFailure, CodeRunRequest, CodeRunResult
 import { RealmIdentityStore } from './identity.js'
 import type { RealmVerification } from './identity.js'
 import { HIDDEN_BINDING_MEMBER, MIN_OUTPUT_BYTES, OutputLedger } from './protocol.js'
+import type { RealmStateKeys } from './protocol.js'
 import { PersistentRealm } from './realm.js'
 import type { RealmBudgets } from './realm.js'
 
@@ -41,9 +42,31 @@ const MAX_SWEEP_INTERVAL_MS = 60_000
  * state notice. The notice is appended after the realm finalized its ledger, so
  * without the reserve a program that filled its budget exactly would push the
  * result past the deployment's `maxOutputBytes`. Comfortably above the longest
- * notice this module can produce.
+ * notice this module can produce: the generation sentence plus the key census,
+ * which {@link MAX_STATE_LINE_BYTES} bounds on its own.
  */
-const NOTICE_RESERVE_BYTES = 160
+const NOTICE_RESERVE_BYTES = 512
+
+/**
+ * Ceilings on the key census line. Three of them, because each bounds a
+ * different thing the model's own program controls: how many names it holds,
+ * how long one name may be, and how much of {@link NOTICE_RESERVE_BYTES} the
+ * whole line may spend. Whatever they cut is counted, never silently dropped.
+ */
+const MAX_STATE_KEYS = 24
+const MAX_STATE_KEY_CHARS = 40
+const MAX_STATE_LINE_BYTES = 320
+
+/** Charged before the first key: the line's own prefix plus the longest `+N more` tail. */
+const STATE_LINE_OVERHEAD_BYTES = 64
+
+/**
+ * Characters a key name may not contribute to a one-line notice: controls and
+ * formats (a newline would forge a second log entry, a bidi override would
+ * reorder the line), line and paragraph separators, and the lone surrogates a
+ * truncation can leave behind.
+ */
+const UNSAFE_KEY_CHARS = /[\p{C}\p{Zl}\p{Zp}]/gu
 
 /**
  * Reclaimed-realm records kept for their state-loss report. Dropping the oldest
@@ -182,6 +205,40 @@ function generationNotice(generation: number, fresh: boolean, lost: boolean): st
   return lost
     ? `[prime-realm] generation ${generation} started; live-only state from the previous generation was lost`
     : `[prime-realm] generation ${generation} started with an empty state`
+}
+
+/** Truncate and neutralize one model-chosen key name so it cannot reshape the notice. */
+function safeKeyName(name: string): string {
+  // Clipped BEFORE the substitution, so a cut through a surrogate pair is
+  // neutralized by the same pass as everything else.
+  const clipped = name.length > MAX_STATE_KEY_CHARS ? `${name.slice(0, MAX_STATE_KEY_CHARS)}…` : name
+  return clipped.replace(UNSAFE_KEY_CHARS, '�')
+}
+
+/**
+ * The variable-browser line: which names `state` holds now the run has settled,
+ * never what is in them. Keys are measured the way the ledger measures output,
+ * so the line cannot outgrow its share of the reserve however a program names
+ * its entries; the count of everything that did not fit is what tells the model
+ * it is looking at a truncated census rather than a complete one.
+ *
+ * An empty `state` produces NO line: there is nothing to browse, and a run that
+ * wrote nothing should not be told about it every time.
+ */
+function stateKeysNotice(keys: RealmStateKeys): string | undefined {
+  if (keys.names.length === 0) return undefined
+  const shown: string[] = []
+  let bytes = STATE_LINE_OVERHEAD_BYTES
+  for (const name of keys.names) {
+    const safe = safeKeyName(name)
+    const cost = Buffer.byteLength(JSON.stringify(safe), 'utf8')
+    if (shown.length >= MAX_STATE_KEYS || bytes + cost > MAX_STATE_LINE_BYTES) break
+    bytes += cost
+    shown.push(safe)
+  }
+  const omitted = keys.omitted + keys.names.length - shown.length
+  const more = omitted > 0 ? `${shown.length > 0 ? ', ' : ''}… +${omitted} more` : ''
+  return `[prime-realm] state keys: ${shown.join(', ')}${more}`
 }
 
 /** Sweep often enough that a realm is reclaimed within 1.5x its idle ceiling. */
@@ -337,11 +394,14 @@ export class PrimeCodeRuntime extends CodeRuntime {
     // program actually ran in even when it waited behind other runs, and a run
     // that never reached a worker leaves the pending report for the one that does.
     let dispatched: string | undefined
+    // Only a run the worker itself settled reports a census; one the host ended
+    // has no heap left to describe.
+    let census: RealmStateKeys | undefined
     const result = await entry.realm.run(request, ({ generation, fresh, stateLost }) => {
       dispatched = generationNotice(entry.generationBase + generation, fresh, stateLost || entry.reclaimed)
       entry.reclaimed = false
       entry.everDispatched = true
-    })
+    }, (keys) => { census = keys })
     // A run that never reached a worker reports the realm's CURRENT standing
     // without consuming it, so the run that does dispatch still gets told.
     const pendingLoss = entry.realm.generationNoticePending || entry.reclaimed
@@ -351,8 +411,12 @@ export class PrimeCodeRuntime extends CodeRuntime {
       pendingLoss,
     )
     // Appended host-side rather than through the worker's ledger, which is why
-    // every realm runs against a budget reduced by `NOTICE_RESERVE_BYTES`.
-    return { ...result, logs: [...result.logs, notice] }
+    // every realm runs against a budget reduced by `NOTICE_RESERVE_BYTES`. The
+    // census goes FIRST: the generation sentence is the last word on the run,
+    // being the line that says whether the heap may be trusted at all.
+    const keysNotice = census === undefined ? undefined : stateKeysNotice(census)
+    if (keysNotice === undefined) return { ...result, logs: [...result.logs, notice] }
+    return { ...result, logs: [...result.logs, keysNotice, notice] }
   }
 
   /** The realm for one id, creating or reclaiming as the pool ceiling allows. */

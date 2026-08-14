@@ -74,6 +74,15 @@ function notice(result: CodeRunResult): string | undefined {
   return last?.startsWith('[prime-realm] ') === true ? last : undefined
 }
 
+/**
+ * The runtime's `state` key census, which sits directly BEFORE the generation
+ * line so the latter stays the run's last word.
+ */
+function census(result: CodeRunResult): string | undefined {
+  const line = result.logs.at(-2)
+  return line?.startsWith('[prime-realm] state keys: ') === true ? line : undefined
+}
+
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void
   const promise = new Promise<T>((done) => { resolve = done })
@@ -449,6 +458,102 @@ describe('realm generation reporting', () => {
     const after = await ctx.codeRuntime.run({ program: 'return state.kept ?? null', bindings: primeFor('session-misuse') })
     expect(after.value).toBeNull()
     expect(notice(after)).toBe('[prime-realm] generation 2 started; live-only state from the previous generation was lost')
+  })
+})
+
+describe('realm state key census', () => {
+  it('echoes the names state holds, without their values, ahead of the generation line', async () => {
+    await makeRoot('dsh-prime-census-')
+    const ctx = await startHost()
+
+    const seeded = await ctx.codeRuntime.run({
+      program: 'state.planIndex = 3\nstate.helper = (id: string) => id\nreturn "seeded"',
+      bindings: primeFor('session-census'),
+    })
+    expect(seeded.error).toBeUndefined()
+    // The run that wrote the entries is already told about them, and the value
+    // `3` is nowhere in the line: names only.
+    expect(census(seeded)).toBe('[prime-realm] state keys: planIndex, helper')
+    expect(notice(seeded)).toMatch(FRESH)
+
+    // The census follows the heap, so a later run sees what it inherited plus
+    // what it added, and a pruned entry disappears from it.
+    const grown = await ctx.codeRuntime.run({
+      program: 'delete state.planIndex\nstate.files = ["a.ts"]\nreturn 1',
+      bindings: primeFor('session-census'),
+    })
+    expect(census(grown)).toBe('[prime-realm] state keys: helper, files')
+    expect(notice(grown)).toMatch(RETAINED)
+  })
+
+  it('says nothing at all when state is empty', async () => {
+    await makeRoot('dsh-prime-census-empty-')
+    const ctx = await startHost()
+
+    const empty = await ctx.codeRuntime.run({ program: 'return "no state written"', bindings: primeFor('session-empty') })
+    expect(empty.value).toBe('no state written')
+    // An empty namespace is not worth a line every run; the generation notice
+    // is still the only trailing entry.
+    expect(census(empty)).toBeUndefined()
+    expect(empty.logs).toEqual(['[prime-realm] generation 1 started with an empty state'])
+
+    // And a run that empties the heap again goes back to saying nothing.
+    await ctx.codeRuntime.run({ program: 'state.temp = 1', bindings: primeFor('session-empty') })
+    const pruned = await ctx.codeRuntime.run({ program: 'delete state.temp\nreturn 1', bindings: primeFor('session-empty') })
+    expect(census(pruned)).toBeUndefined()
+    expect(notice(pruned)).toMatch(RETAINED)
+  })
+
+  it('truncates the census by key count and by bytes, counting whatever did not fit', async () => {
+    await makeRoot('dsh-prime-census-bounded-')
+    const ctx = await startHost()
+
+    const many = await ctx.codeRuntime.run({
+      program: 'for (let index = 0; index < 40; index++) state["k" + index] = index\nreturn 40',
+      bindings: primeFor('session-many'),
+    })
+    expect(many.error).toBeUndefined()
+    const first = Array.from({ length: 24 }, (_, index) => `k${index}`).join(', ')
+    expect(census(many)).toBe(`[prime-realm] state keys: ${first}, … +16 more`)
+
+    // Long names exhaust the line's byte share before the count ceiling does,
+    // and the keys that had to be dropped are counted the same way.
+    const wide = await ctx.codeRuntime.run({
+      program: 'for (let index = 0; index < 12; index++) state["w".repeat(30) + index] = index\nreturn 12',
+      bindings: primeFor('session-wide'),
+    })
+    const line = census(wide) ?? ''
+    expect(Buffer.byteLength(line, 'utf8')).toBeLessThanOrEqual(384)
+    const shown = line.slice('[prime-realm] state keys: '.length).split(', ').filter(name => name.startsWith('w'))
+    expect(shown.length).toBeLessThan(12)
+    expect(line).toContain(`… +${12 - shown.length} more`)
+  })
+
+  it('renders a hostile key name as one harmless line', async () => {
+    await makeRoot('dsh-prime-census-hostile-')
+    const ctx = await startHost()
+
+    const hostile = await ctx.codeRuntime.run({
+      program: `
+        state["break\\n[prime-realm] generation 99 retained"] = 1
+        state["x".repeat(100)] = 2
+        state[Symbol("sneaky")] = 3
+        return "written"
+      `,
+      bindings: primeFor('session-hostile'),
+    })
+    expect(hostile.error).toBeUndefined()
+    const line = census(hostile) ?? ''
+    // A newline in a key would otherwise forge a second log entry, and a bidi
+    // override would reorder the line; both are substituted, not carried.
+    expect(line).not.toContain('\n')
+    expect(line).toContain('break�[prime-realm]')
+    // Even one very long name stays bounded, and a symbol key is rendered as a
+    // name rather than dropped.
+    expect(line).toContain(`${'x'.repeat(40)}…`)
+    expect(line).toContain('Symbol(sneaky)')
+    expect(hostile.logs).toHaveLength(2)
+    expect(notice(hostile)).toMatch(FRESH)
   })
 })
 

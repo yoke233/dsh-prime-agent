@@ -42,6 +42,18 @@ export interface RealmProgramFailure {
     kind: 'exception' | 'invalid-output' | 'output-limit';
     message: string;
 }
+/**
+ * The census of `state` one settled run reports, so the caller can show the
+ * model which names its own namespace holds. NAMES ONLY: no value ever travels
+ * on this field, and the census is not an output channel the program may grow —
+ * both ends bound it, the worker for the wire and the host for the notice.
+ */
+export interface RealmStateKeys {
+    /** Own keys in enumeration order, each already clamped to a wire-safe length. */
+    names: string[];
+    /** Own keys the worker did not report, so the notice can say how many are missing. */
+    omitted: number;
+}
 /** Host to worker, over the private port transferred at spawn. */
 export type HostToRealm = {
     type: 'run';
@@ -99,6 +111,7 @@ export type RealmToHost = {
     nonce: string;
     json?: string;
     error?: RealmProgramFailure;
+    state?: RealmStateKeys;
 };
 /**
  * One run's combined outer-output ledger: the serialized log array plus the

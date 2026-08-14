@@ -22,7 +22,7 @@ import type { Readable } from 'node:stream'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import type { CodeBindingNamespace, CodeJsonValue, CodeRunFailure, CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
 import { HIDDEN_BINDING_MEMBER, MIN_OUTPUT_BYTES, OutputLedger } from './protocol.js'
-import type { HostToRealm, RealmNamespaceSpec, RealmToHost } from './protocol.js'
+import type { HostToRealm, RealmNamespaceSpec, RealmStateKeys, RealmToHost } from './protocol.js'
 
 /** Per-run resource ceilings. Every field is an increment for ONE run, not a realm lifetime total. */
 export interface RealmBudgets {
@@ -198,6 +198,24 @@ function waitForPipeDrain(stream: Readable): Promise<void> {
 }
 
 /**
+ * Rebuild the key census a settlement reported, or nothing. The worker executes
+ * model code, so the census is inbound data like every other field: an entry
+ * that is not a string, or a count that is not a whole number, discards the
+ * whole census rather than putting model-shaped junk in front of the caller.
+ */
+function parseStateKeys(raw: unknown): RealmStateKeys | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const { names, omitted } = raw as Record<string, unknown>
+  if (!Array.isArray(names) || !Number.isSafeInteger(omitted) || (omitted as number) < 0) return undefined
+  const rebuilt: string[] = []
+  for (const name of names as unknown[]) {
+    if (typeof name !== 'string') return undefined
+    rebuilt.push(name)
+  }
+  return { names: rebuilt, omitted: omitted as number }
+}
+
+/**
  * Runtime shape gate for inbound control traffic. The worker runs MODEL CODE,
  * so the compile-time type means nothing here: every message is re-validated
  * and REBUILT field by field. Junk returns `undefined` and is dropped, because
@@ -223,16 +241,18 @@ function parseWorkerMessage(raw: unknown): RealmToHost | undefined {
     }
     case 'output-limit': return { type: 'output-limit', runId, nonce }
     case 'done': {
+      const keys = parseStateKeys(message.state)
+      const census = keys !== undefined ? { state: keys } : {}
       if (message.error !== undefined) {
         if (typeof message.error !== 'object' || message.error === null) return undefined
         const { kind, message: detail } = message.error as Record<string, unknown>
         if (kind !== 'exception' && kind !== 'invalid-output' && kind !== 'output-limit') return undefined
         if (typeof detail !== 'string') return undefined
-        return { type: 'done', runId, nonce, error: { kind, message: detail } }
+        return { type: 'done', runId, nonce, error: { kind, message: detail }, ...census }
       }
-      if (message.json === undefined) return { type: 'done', runId, nonce }
+      if (message.json === undefined) return { type: 'done', runId, nonce, ...census }
       if (typeof message.json !== 'string') return undefined
-      return { type: 'done', runId, nonce, json: message.json }
+      return { type: 'done', runId, nonce, json: message.json, ...census }
     }
     default: return undefined
   }
@@ -266,6 +286,7 @@ interface RunEntry {
   readonly request: CodeRunRequest
   readonly bindings: Map<string, CodeBindingNamespace>
   readonly onStart: ((notice: RealmRunNotice) => void) | undefined
+  readonly onState: ((keys: RealmStateKeys) => void) | undefined
   readonly resolve: (result: CodeRunResult) => void
   readonly finished: Promise<void>
   finish: () => void
@@ -365,9 +386,14 @@ export class PersistentRealm {
    *   while queued, rejected by the type-strip, or unable to start a worker)
    *   never calls it, so a pending state-loss report survives for the run that
    *   actually inherits the new heap.
+   * @param onState - called once if and when the worker reports the run
+   *   settled, with the bounded census of `state` as it stands afterwards. A
+   *   run the host ended itself (abort, budget, worker death) never calls it:
+   *   the heap it would describe no longer exists. Delivered as DATA — this
+   *   module never renders a model-facing notice.
    * @returns the run's outcome; rejects only on caller misuse.
    */
-  run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<CodeRunResult> {
+  run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void, onState?: (keys: RealmStateKeys) => void): Promise<CodeRunResult> {
     if (this.disposed) return Promise.reject(new Error('dsh-prime-agent: realm run() after disposal'))
     let bindings: Map<string, CodeBindingNamespace>
     try {
@@ -385,6 +411,7 @@ export class PersistentRealm {
       request,
       bindings,
       onStart,
+      onState,
       resolve,
       finished,
       finish,
@@ -707,6 +734,14 @@ export class PersistentRealm {
 
   /** Settle one run from the worker's terminal message. */
   private onDone(entry: RunEntry, message: Extract<RealmToHost, { type: 'done' }>): void {
+    if (entry.onState && message.state) {
+      try {
+        entry.onState(message.state)
+      } catch {
+        // Bookkeeping for the caller's benefit, exactly like `onStart`: a throw
+        // there is not the run's problem and must not strand its settlement.
+      }
+    }
     if (message.error) {
       // A completion that overflowed the cap is reported by a worker that has
       // already finished the program, so the realm keeps its heap.

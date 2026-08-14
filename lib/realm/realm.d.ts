@@ -12,6 +12,7 @@
  * @module dsh-prime-agent/realm/realm
  */
 import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
+import type { RealmStateKeys } from './protocol.js';
 /** Per-run resource ceilings. Every field is an increment for ONE run, not a realm lifetime total. */
 export interface RealmBudgets {
     /** Event-loop busy-time budget for one run, measured as the worker's ELU delta since that run started. */
@@ -106,9 +107,14 @@ export declare class PersistentRealm {
      *   while queued, rejected by the type-strip, or unable to start a worker)
      *   never calls it, so a pending state-loss report survives for the run that
      *   actually inherits the new heap.
+     * @param onState - called once if and when the worker reports the run
+     *   settled, with the bounded census of `state` as it stands afterwards. A
+     *   run the host ended itself (abort, budget, worker death) never calls it:
+     *   the heap it would describe no longer exists. Delivered as DATA — this
+     *   module never renders a model-facing notice.
      * @returns the run's outcome; rejects only on caller misuse.
      */
-    run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<CodeRunResult>;
+    run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void, onState?: (keys: RealmStateKeys) => void): Promise<CodeRunResult>;
     /**
      * Stop admission, terminate the worker, and await complete settlement: no
      * worker, timer, or unsettled run outlives this call.
