@@ -66,7 +66,7 @@ dsh plugin --profile web add ./dsh-prime-agent
 
 - `inspect` 返回当前 revision、条目和近期事务。
 - `apply` 需要 inspect 得到的 revision、trigger、具体 evidence、可验证的 expected outcome,以及最小 create/update/delete edits。
-- `rollback` 需要当前 revision 和目标 transaction id,且只有相关条目没有发生漂移时才成功。
+- `rollback` 需要当前 revision 和目标 transaction id,可附带 trigger 记录回滚动机,且只有相关条目没有发生漂移时才成功。
 
 条目类型包括 `prompt`、`memory`、`skill` 与 `subagent`。skill/subagent 只能引用真实可见的工具;它们记录路由,不会创建能力或扩大权限。
 

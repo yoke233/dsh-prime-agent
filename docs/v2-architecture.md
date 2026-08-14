@@ -70,8 +70,10 @@ Realm 是 live-only 的：hard kill 后 heap 丢失,下一次 run 收到明确�
 
 - 禁止存任务数据、研究笔记、中间结果和大上下文。
 - apply 必须有 trigger、具体 evidence、可验证 expected outcome 与最小 edits。
+- rollback 需要 expected_revision 与 transaction_id，拒绝 evidence、expected outcome 与 edits；可选 trigger 记录回滚动机，缺省时事务写入合成文案。
 - apply/rollback 使用 optimistic revision。
-- rollback 只在目标事务输出未被后续修改时成功。
+- rollback 只在目标事务输出未被后续修改时成功；回滚事务与 apply 一样留痕，记录动机、rollbackOf 与 before/after。
+- 严格校验针对歧义或越权的输入；与当前操作语义相容的动机说明应被接受并留痕，不应迫使调用方丢弃它。
 - skill/subagent 条目必须引用真实可见工具，不能引用 `run_code` transport。
 - local/global 默认都由部署策略控制，global 默认关闭。
 
