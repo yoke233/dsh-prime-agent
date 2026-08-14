@@ -1,0 +1,13 @@
+{
+  "name": "prime-headless-shim",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "description": "test-only: the @deepseek-ai/dsh-headless one-shot runner plus an agentPresets.mount in the agent setup hook"
+}

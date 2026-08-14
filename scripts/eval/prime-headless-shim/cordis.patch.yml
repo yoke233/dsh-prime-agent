@@ -1,0 +1,8 @@
+# test overlay: swap the shipped one-shot runner for the preset-mounting copy.
+- id: headless-runner
+  name: '@deepseek-ai/dsh-headless'
+  disabled: true
+
+- insert:
+    - id: prime-headless-runner
+      name: prime-headless-shim

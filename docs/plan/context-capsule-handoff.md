@@ -107,6 +107,17 @@
 
 **升级触发(需求触发,非指标触发):** L2(share 糖)由评测或使用中观察到的系统性机械失误触发;L3(完整 capsule)由真实信任边界触发;implicit-state 级 4(runtime 水合)由真实需求触发,并始终受维护成本一等约束压制。
 
+## 首次实测记录(2026-08-15,交付当晚)
+
+隔离 DSH_HOME + headless 一次性会话,gpt-5.6-sol,任务为 18 个合成服务日志的分析 + 委派子代理写报告,提示词不含任何 state/交接/文件字样。
+
+- **采用率**:根会话 17 个 `run_code` 程序中 **15 个(88.2%)**使用水合/脱水惯用式,且形态与 policy 所教逐字一致(开头解构、结尾 `Object.assign`);子代理 3/5。旧提示词全部历史队列为 1.3–5.1%。
+- **配方全环节自发走通**:归约统计入 `state.stats` → 脱水到 `.task-handoff-log-stats.json` → spawn 提示 = 任务说明 + 文件路径 + 带 summary 与"约 5KB"规模的目录,并向 child 转述了按需读取纪律 → `run_in_background: true` admission-first,job id 存入 state → child 有界读取(limit 400)后写 `report.md` → 根会话独立复核 19 项数字 → **主动删除交接文件**(配方第 7 条)。全部数字与日志真值精确一致。
+- **D8 回显**:每次结算出现,命名空间演进清晰可读(`logFiles → stats → handoffPath → reportAgentId → validation → handoffIntegrity → expected → reportText/reportLines → audit`),key 命名全部有意义——目录质量担忧未成真。
+- **评分工具盲点**:首版正则只抓 `state.` 属性访问,把 policy 所教的两种形态记为 0;已修(`scripts/measure-state-adoption.mjs` 现按 dot/hydrate/dehydrate 三形态计)。教什么就要测什么。
+- **部署缺口(headless 跑 Prime 需两处补齐,应向上游反馈)**:`@deepseek-ai/dsh-headless` bundle 不含 `agent-presets` 行;且 shipped runner 的 `agents.create` setup 钩子从不调用 `agentPresets.mount`(该钩子恰是 mount 的唯一受支持调用点)。测试用的 runner shim(官方 runner + 一行 mount)固化于 `scripts/eval/prime-headless-shim/`。
+- **结论**:L1 一次实测即验证;未观察到任何指向 L2 的机械失误。
+
 ## 参考
 
 - `6dcb551:docs/v0.3-roadmap.md` — 原始 Capsule/Family 设计(L3 的需求底稿)

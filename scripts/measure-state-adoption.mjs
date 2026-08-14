@@ -24,9 +24,18 @@ const ROOT = positional[0] ?? join(homedir(), '.dsh', 'sessions')
 const CUTOFF = Date.parse(flags.cutoff ?? '2026-08-14T19:16:41+08:00')
 const DUMP = flags.dump
 
-// read/write of the persistent realm binding: `state.x`, `state["x"]`,
-// but NOT `this.state.x`, `nextState.x`, `foo.state.x`
-const STATE_RE = /(?<![A-Za-z0-9_$.])state\s*(?:\.|\[)/
+// Use of the persistent realm binding, in any of the three taught forms —
+// property access (`state.x` / `state["x"]`), hydrate destructuring
+// (`const { x } = state`), and dehydrate write-back (`Object.assign(state, …)`)
+// — but NOT `this.state.x`, `nextState.x`, `foo.state.x`. The first version of
+// this regex only matched property access and scored the policy-taught
+// hydrate/dehydrate idiom as zero (discovered in the 2026-08-15 live run).
+const STATE_FORMS = {
+  dot: /(?<![A-Za-z0-9_$.])state\s*(?:\.|\[)/,
+  hydrate: /(?:\}|\w)\s*=\s*state\b(?!\s*[.[])/,
+  dehydrate: /Object\.assign\(\s*state\b/,
+}
+const STATE_RE = new RegExp(Object.values(STATE_FORMS).map(r => `(?:${r.source})`).join('|'))
 
 // DSH writes a CONCATENATED zstd frame container (one frame per append batch).
 // Node's one-shot/stream API only yields the first frame, so scan frame
