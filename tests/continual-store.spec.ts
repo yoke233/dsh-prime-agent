@@ -48,10 +48,11 @@ describe('HarnessStore', () => {
       [{ action: 'delete', kind: 'memory', id: 'stable-format' }],
     )).rejects.toThrow('revision conflict')
 
-    const rolledBack = await store.rollback('local', 'session-a', 1, applied.transaction.id)
+    const rolledBack = await store.rollback('local', 'session-a', 1, applied.transaction.id, 'The user asked to discard the freshly written entry.')
     expect(rolledBack.state.revision).toBe(2)
     expect(rolledBack.state.entries).toEqual([])
     expect(rolledBack.transaction.rollbackOf).toBe(applied.transaction.id)
+    expect(rolledBack.transaction.trigger).toBe('The user asked to discard the freshly written entry.')
   })
 
   it('requires real callable references for skill entries', async () => {

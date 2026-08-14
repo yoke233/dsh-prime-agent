@@ -363,8 +363,12 @@ export class HarnessStore {
     owner: string,
     expectedRevision: number,
     transactionId: string,
+    trigger?: string,
   ): Promise<{ state: HarnessState; transaction: HarnessTransaction }> {
     const targetId = normalizeText(transactionId, 'transaction_id', 128)
+    const normalizedTrigger = trigger === undefined
+      ? undefined
+      : normalizeText(trigger, 'trigger', this.limits.maxEvidenceChars)
     return this.mutate(scope, owner, expectedRevision, (current) => {
       const target = current.transactions.find(transaction => transaction.id === targetId)
       if (target === undefined) throw new Error(`prime-agent: retained transaction ${targetId} was not found`)
@@ -391,7 +395,7 @@ export class HarnessStore {
       const transaction: HarnessTransaction = {
         id: randomUUID(),
         type: 'rollback',
-        trigger: boundedText(`Rollback ${targetId}`, this.limits.maxEvidenceChars),
+        trigger: normalizedTrigger ?? boundedText(`Rollback ${targetId}`, this.limits.maxEvidenceChars),
         evidence: [boundedText(`No drift from ${targetId}.`, this.limits.maxEvidenceChars)],
         expectedOutcome: boundedText('Restore prior snapshots.', this.limits.maxEvidenceChars),
         createdAt: now,

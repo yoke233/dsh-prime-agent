@@ -140,7 +140,7 @@ export function registerContinual(ctx: Context, config: ContinualConfig): Harnes
       scope: { type: 'string', enum: ['local', 'global'], default: 'local', description: 'Defaults to local.' },
       expected_revision: { type: 'integer', description: 'Required by apply/rollback; copy the revision from inspect.' },
       transaction_id: { type: 'string', description: 'Target transaction for rollback.' },
-      trigger: { type: 'string', description: 'Concrete failure, correction, or reusable success that motivates apply.' },
+      trigger: { type: 'string', description: 'Concrete failure, correction, or reusable success that motivates apply; optional on rollback to record why the transaction is reverted.' },
       evidence: { type: 'array', items: { type: 'string' }, description: 'Concrete observations supporting apply.' },
       expected_outcome: { type: 'string', description: 'Falsifiable improvement expected from apply.' },
       edits: {
@@ -193,10 +193,10 @@ export function registerContinual(ctx: Context, config: ContinualConfig): Harnes
       if (args.expected_revision === undefined) throw new Error(`prime-agent: ${args.operation} requires expected_revision`)
       if (args.operation === 'rollback') {
         if (args.transaction_id === undefined) throw new Error('prime-agent: rollback requires transaction_id')
-        if (args.trigger !== undefined || args.evidence !== undefined || args.expected_outcome !== undefined || args.edits !== undefined) {
-          throw new Error('prime-agent: rollback accepts only operation, scope, expected_revision, and transaction_id')
+        if (args.evidence !== undefined || args.expected_outcome !== undefined || args.edits !== undefined) {
+          throw new Error('prime-agent: rollback accepts only operation, scope, expected_revision, transaction_id, and trigger')
         }
-        const result = await store.rollback(scope, owner, args.expected_revision, args.transaction_id)
+        const result = await store.rollback(scope, owner, args.expected_revision, args.transaction_id, args.trigger)
         return publicState('rollback', result.state, result.transaction.id)
       }
       if (args.transaction_id !== undefined) throw new Error('prime-agent: apply does not accept transaction_id')

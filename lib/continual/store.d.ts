@@ -16,7 +16,7 @@ export declare class HarnessStore {
         transaction: HarnessTransaction;
     }>;
     /** Roll back a retained transaction only when none of its outputs drifted. */
-    rollback(scope: HarnessScope, owner: string, expectedRevision: number, transactionId: string): Promise<{
+    rollback(scope: HarnessScope, owner: string, expectedRevision: number, transactionId: string, trigger?: string): Promise<{
         state: HarnessState;
         transaction: HarnessTransaction;
     }>;

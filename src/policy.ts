@@ -21,7 +21,7 @@ function orchestrationPolicy(ctx: Context, agent: Agent | undefined, requireTool
   return `Prime control-plane policy:
 - Use Code Mode as the control plane. Compose independent reads and tool/subagent calls in one program.
 - Parallelism has three shapes: bare Promise.all only for an atomic group where every result is required; best-effort probes with a per-call catch or Promise.allSettled; side-effecting mutations sequentially, one at a time.
-- Realm state is the working namespace: assign intermediate values, helper functions, and progress to state instead of recomputing or re-reading them.
+- Realm state is the working namespace and persists across run_code calls in this session: assign intermediate values, helper functions, and progress to state instead of recomputing, re-reading, or redeclaring them in every program.
 - Reduce first, return second: filter, aggregate, count, hash, or extract large tool results inside the program, and keep only the reduced form in state. When a result carries a spill locator, read the span you need from it instead of pulling the whole text back.
 - Realm state is live-only. Checkpoint anything that must survive a restart — progress ledgers, collected results — to durable task files at phase boundaries.
 - A failed tool call is a fact, not a transient condition: capture it, report which operation failed and whether a side effect already happened, and do not blindly repeat it. Side effects stand until you undo them explicitly.
