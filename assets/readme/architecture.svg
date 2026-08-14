@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="420" viewBox="0 0 1200 420"
+     role="img" aria-labelledby="title desc">
+  <title id="title">混合运行时路由</title>
+  <desc id="desc">run_code 经 DSH Code Mode bridge 进入 PrimeCodeRuntime:握手认证通过的 Prime 会话路由到持久 Realm Worker,其余请求继续走官方 one-shot Worker。</desc>
+
+  <rect width="1200" height="420" rx="24" fill="#F7F5EF"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="418.5" rx="23.25" fill="none" stroke="#E2DCCB" stroke-width="1.5"/>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <!-- run_code -->
+    <rect x="64" y="160" width="170" height="100" rx="12" fill="#FFFFFF" stroke="#DDD7C6" stroke-width="1.5"/>
+    <text x="149" y="204" font-size="21" fill="#20262E" text-anchor="middle">run_code</text>
+    <text x="149" y="234" font-size="18" fill="#8A8FA0" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">唯一模型可见工具</text>
+
+    <path d="M 234 210 L 288 210" stroke="#C6BFAD" stroke-width="2" fill="none"/>
+
+    <!-- bridge -->
+    <rect x="294" y="160" width="252" height="100" rx="12" fill="#FFFFFF" stroke="#DDD7C6" stroke-width="1.5"/>
+    <text x="420" y="204" font-size="21" fill="#20262E" text-anchor="middle">DSH Code Mode bridge</text>
+    <text x="420" y="234" font-size="18" fill="#8A8FA0" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">按 Agent 作用域绑定工具</text>
+
+    <path d="M 546 210 L 600 210" stroke="#C6BFAD" stroke-width="2" fill="none"/>
+
+    <!-- PrimeCodeRuntime -->
+    <rect x="606" y="160" width="240" height="100" rx="12" fill="#FFFFFF" stroke="#2F6FD6" stroke-width="1.5"/>
+    <text x="726" y="204" font-size="21" fill="#20262E" text-anchor="middle">PrimeCodeRuntime</text>
+    <text x="726" y="234" font-size="18" fill="#8A8FA0" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">探测 Realm 握手</text>
+
+    <!-- branches -->
+    <path d="M 846 190 C 880 175, 890 140, 908 128" stroke="#C97B22" stroke-width="2" fill="none"/>
+    <text x="896" y="104" font-size="18" fill="#C97B22" text-anchor="end" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">握手认证通过</text>
+
+    <path d="M 846 230 C 880 245, 890 280, 908 292" stroke="#C6BFAD" stroke-width="2" fill="none"/>
+    <text x="896" y="326" font-size="18" fill="#8A8FA0" text-anchor="end" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">无 Prime 绑定</text>
+
+    <!-- persistent realm -->
+    <rect x="912" y="56" width="232" height="120" rx="12" fill="#FDF6EC" stroke="#C97B22" stroke-width="1.5"/>
+    <text x="1028" y="102" font-size="20" fill="#20262E" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">持久 Realm Worker</text>
+    <text x="1028" y="130" font-size="18" fill="#4A5262" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">每个会话一个</text>
+    <text x="1028" y="156" font-size="18" fill="#8A8FA0" text-anchor="middle">state &#183; generations</text>
+
+    <!-- one-shot -->
+    <rect x="912" y="244" width="232" height="120" rx="12" fill="#FFFFFF" stroke="#DDD7C6" stroke-width="1.5"/>
+    <text x="1028" y="290" font-size="20" fill="#20262E" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">One-shot Worker</text>
+    <text x="1028" y="318" font-size="18" fill="#4A5262" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">官方运行时</text>
+    <text x="1028" y="344" font-size="18" fill="#8A8FA0" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">默认语义不变</text>
+
+    <text x="64" y="388" font-size="18" fill="#8A8FA0">prime_realm_identity &#183; challenge-proof HMAC &#183; 身份不匹配 fail-closed</text>
+  </g>
+</svg>

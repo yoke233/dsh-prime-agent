@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="360" viewBox="0 0 1200 360"
+     role="img" aria-labelledby="title desc">
+  <title id="title">dsh-prime-agent</title>
+  <desc id="desc">为 DeepSeek Harness Code Mode 提供持久 TypeScript Realm:一次 run_code 写入的 state,在下一次调用里仍然存活。</desc>
+
+  <rect width="1200" height="360" rx="24" fill="#F7F5EF"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="358.5" rx="23.25" fill="none" stroke="#E2DCCB" stroke-width="1.5"/>
+
+  <g id="title-block" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <text x="64" y="88" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" letter-spacing="3" fill="#8A8FA0">DEEPSEEK HARNESS &#183; CODE MODE PLUGIN</text>
+    <text x="62" y="152" font-size="62" font-weight="700" fill="#20262E">dsh-prime-agent</text>
+    <text x="64" y="200" font-size="22" fill="#4A5262">为 Agent 会话提供持久 TypeScript Realm ——</text>
+    <text x="64" y="234" font-size="22" fill="#4A5262"><tspan font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#2F6FD6">state</tspan>、函数与模块缓存跨 <tspan font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#2F6FD6">run_code</tspan> 调用存活。</text>
+    <rect x="64" y="282" width="10" height="10" fill="#C97B22"/>
+    <text x="86" y="292" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" fill="#8A8FA0">TypeScript &#183; 混合运行时 &#183; 一次性 preset 不受影响 &#183; MIT</text>
+  </g>
+
+  <g id="project-proof" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <!-- run 1 cell -->
+    <rect x="700" y="52" width="448" height="104" rx="12" fill="#FFFFFF" stroke="#DDD7C6" stroke-width="1.5"/>
+    <circle cx="722" cy="80" r="4" fill="#2F6FD6"/>
+    <text x="736" y="86" font-size="18" fill="#8A8FA0">run_code &#183; run 1</text>
+    <text x="722" y="118" font-size="18" fill="#33404F"><tspan fill="#C97B22">state</tspan>.lookup = new Map(records)</text>
+    <text x="722" y="144" font-size="18" fill="#33404F"><tspan fill="#C97B22">state</tspan>.review = async (id) =&gt; &#8230;</text>
+
+    <!-- state thread -->
+    <path d="M 688 112 L 688 260" stroke="#C97B22" stroke-width="2" fill="none"/>
+    <circle cx="688" cy="112" r="4.5" fill="#C97B22"/>
+    <circle cx="688" cy="260" r="4.5" fill="#C97B22"/>
+
+    <!-- run 2 cell -->
+    <rect x="700" y="204" width="448" height="104" rx="12" fill="#FFFFFF" stroke="#DDD7C6" stroke-width="1.5"/>
+    <circle cx="722" cy="232" r="4" fill="#2F6FD6"/>
+    <text x="736" y="238" font-size="18" fill="#8A8FA0">run_code &#183; run 2</text>
+    <text x="722" y="266" font-size="18" fill="#33404F">return await <tspan fill="#C97B22">state</tspan>.review('a')</text>
+    <text x="722" y="292" font-size="18" fill="#4E7D4C">// [prime-realm] generation 1 retained</text>
+
+    <text x="700" y="340" font-size="17" fill="#8A8FA0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">同一会话一个 Realm &#183; state 跨 run 延续</text>
+  </g>
+</svg>

@@ -41,9 +41,9 @@
     "lib/**/*.d.ts",
     "lib/**/*.map",
     "agent-presets",
+    "assets/readme",
     "cordis.patch.yml",
     "README.md",
-    "README.zh.md",
     "LICENSE",
     "docs"
   ],
