@@ -83,27 +83,28 @@ After a synchronization pass:
 
 1. Update `docs/prime-agent-learnings.md` when the mental model changed.
 2. Update `docs/v2-architecture.md`, README files, and tool policy when the public behavior changed.
-3. Add a regression test for every adopted or adapted contract.
-4. Run `npm run check`.
-5. Run the real DSH composition test covering Code Mode, Subagent, and Jobs.
-6. Review quotas, authority, cancellation, durability, replay visibility, and failure behavior.
-7. Review the final diff for accidental Prime implementation coupling.
-8. Update `upstream-baseline.json` to the exact reviewed commit and date.
+3. Diff the packaged Prime preset (`agent-presets/prime/`, once it ships) against the upstream shipped `code` preset and port composition changes; it is a full copy because DSH has no preset inheritance.
+4. Add a regression test for every adopted or adapted contract.
+5. Run `npm run check`.
+6. Run the real DSH composition test covering Code Mode, Subagent, and Jobs.
+7. Review quotas, authority, cancellation, durability, replay visibility, and failure behavior.
+8. Review the final diff for accidental Prime implementation coupling.
+9. Update `upstream-baseline.json` to the exact reviewed commit and date.
 
 ## Decision log
 
 | Reviewed baseline | Upstream change | Decision | Adapter result |
 | --- | --- | --- | --- |
 | `7787f074` | Admission-first `rlm()`, explicit child reporting, recoverable child handles | Adapt | Background DSH Subagent returns a Job id; parent continues and later collects through `job_output` |
-| `7787f074` | Persistent IPython as the only model-facing control plane | Adapt | Code Mode remains the sole surface; v0.3 adds a Session-scoped Persistent TypeScript Realm while `prime_context` owns reliable data |
+| `7787f074` | Persistent IPython as the only model-facing control plane | Adapt | Code Mode remains the sole surface; v0.3 will use an authenticated `prime_realm_identity` binding handshake to route Prime sessions into a Persistent TypeScript Realm while ordinary sessions retain the official one-shot runtime |
 | `7787f074` | Local/global Continual Harness with refine/rollback | Adapt | `prime_refine` is secondary, evidence-gated, optimistic, bounded, and conflict-safe |
 | `7787f074` | Host owns agent lifecycle, messages, goals, and cancellation | Adopt | The plugin composes DSH services and creates no worker registry or second Agent Loop |
 | `7787f074` | Automatic refinement enabled by default | Defer | Requires explicit proposal/review/outcome design before model-authored automation |
 
 ## Semantic gaps to re-check each time
 
-- Prime child answers can inform the parent's active computation. DSH currently schedules default `subagent-report` delivery with `followup`, which queues an ordinary later turn. v0.4 should request a DSH-owned steer-first scheduling option—steer a running parent, wake an idle parent—rather than patching DSH or creating a plugin-private inbox.
-- Prime's Python heap preserves live objects and functions; v0.2 preserves only JSON, text, and artifact references. The [v0.3 P0](v0.3-roadmap.md) closes the cross-turn computation gap with a Persistent TypeScript Realm. IPython remains reference material for behavior and failure semantics, not a product backend.
+- Prime child answers can inform the parent's active computation. Implemented: the bundle patch retires the host `tool-subagent-report` (fixed `wakeup`, one separate later turn per report) and mounts `dsh-prime-agent/subagent-report`, which chooses the delivery per call over the public `reportFrom` — `quiet` for a running parent (inject → the current turn's next step, exactly where a steer would land) and `wakeup` for an idle one. No DSH source change and no plugin-private inbox. Remaining upstream ask: a DSH-native steer delivery (with a wake) would close the narrow busy→idle window in which a quiet report waits for the child's settled notice to wake the parent.
+- Prime's Python heap preserves live objects and functions; v0.2 preserves only JSON, text, and artifact references. The planned [v0.3 P0](v0.3-roadmap.md) will close the cross-turn computation gap with a Persistent TypeScript Realm selected through a plugin-private authenticated binding handshake. IPython remains reference material for behavior and failure semantics, not a product backend.
 - v0.2 has no immutable context capsule `share`/`mount` contract and no blob garbage collection; these are deferred to v0.4.
 - `prime_refine` is explicit; it does not yet observe outcomes or propose refinements automatically.
 

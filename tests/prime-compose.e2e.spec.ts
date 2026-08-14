@@ -1,0 +1,131 @@
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import { boot, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { CallId } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
+import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+
+const PATCH_PATH = resolve(import.meta.dirname, '../cordis.patch.yml')
+const PACKAGED_PRESET = resolve(import.meta.dirname, '../agent-presets/prime')
+const testSignal = new AbortController().signal
+
+let ctx: Context | undefined
+let root: string | undefined
+let callNumber = 0
+
+afterEach(async () => {
+  await ctx?.fiber.dispose()
+  ctx = undefined
+  vi.unstubAllEnvs()
+  if (root !== undefined) await rm(root, { recursive: true, force: true })
+  root = undefined
+  callNumber = 0
+})
+
+function testAgent(id: string, cwd: string): { agent: Agent, events: { type: string, data: unknown }[] } {
+  const events: { type: string, data: unknown }[] = []
+  const agent = {
+    id: SessionId(id),
+    session: {
+      header: { cwd },
+      append: (type: string, data: unknown) => { events.push({ type, data }) },
+    },
+  } as unknown as Agent
+  return { agent, events }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function completion(execution: ToolExecutionResult): { logs: string[], result?: unknown } {
+  if (execution.isError) throw new Error(execution.error.message)
+  if (!isRecord(execution.value) || !Array.isArray(execution.value.logs)
+    || !execution.value.logs.every(log => typeof log === 'string')) {
+    throw new Error('invalid run_code result')
+  }
+  return {
+    logs: execution.value.logs,
+    ...('result' in execution.value ? { result: execution.value.result } : {}),
+  }
+}
+
+async function runCode(agent: Agent, code: string): Promise<{ logs: string[], result?: unknown }> {
+  if (ctx === undefined) throw new Error('test context was not booted')
+  return completion(await ctx.tools.execute({
+    callId: CallId(`prime-compose-${++callNumber}`),
+    name: RUN_CODE_NAME,
+    arguments: { code, description: 'Exercise the composed Prime runtime' },
+    signal: testSignal,
+    agent,
+  }))
+}
+
+describe('Prime host patch composition', () => {
+  it('replaces the official runtime, authenticates through the real tool, and places the preset', async () => {
+    root = await mkdtemp(join(tmpdir(), 'dsh-prime-compose-'))
+    const home = join(root, 'home')
+    vi.stubEnv('DSH_HOME', home)
+    const configPath = join(root, 'cordis.yml')
+    await writeFile(configPath, `
+- id: system-prompt
+  name: '@deepseek-ai/dsh-system-prompt'
+- id: tools
+  name: '@deepseek-ai/dsh-tools'
+  config:
+    mode: code
+- id: code-runtime
+  name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+- id: agents
+  name: '@deepseek-ai/dsh-agent'
+- id: subagents
+  name: '@deepseek-ai/dsh-subagent'
+- id: prime-agent
+  name: dsh-prime-agent
+  config:
+    stateDirectory: !!js dshHomePath('prime-agent')
+    requireOrchestrationTools: false
+`.trimStart())
+
+    ctx = await boot(
+      'prime-compose-e2e',
+      configPath,
+      loadOverlayPatches('prime-compose-e2e', PATCH_PATH),
+      undefined,
+      import.meta.url,
+    )
+
+    const entries = [...ctx.loader.entries()]
+    const official = entries.find(entry => entry.options.id === 'code-runtime')
+    expect(official?.options.disabled).toBe(true)
+    // The inserted row is nested under the root Include rather than returned by
+    // loader.entries(); the authenticated retained-state assertions below are
+    // the Prime-only observable behavior at the published runtime seam.
+
+    const alpha = testAgent('compose-alpha', root)
+    const beta = testAgent('compose-beta', root)
+    const first = await runCode(alpha.agent, 'state.answer = 424242; return state.answer')
+    expect(first.result).toBe(424242)
+    expect(first.logs.at(-1)).toBe('[prime-realm] generation 1 started with an empty state')
+
+    const retained = await runCode(alpha.agent, 'return state.answer')
+    expect(retained.result).toBe(424242)
+    expect(retained.logs.at(-1)).toBe('[prime-realm] generation 1 retained')
+
+    const isolated = await runCode(beta.agent, 'return state.answer ?? null')
+    expect(isolated.result).toBeNull()
+    expect(alpha.events.some(event => event.type === 'tool/code-dispatch'
+      && isRecord(event.data) && event.data.name === 'prime_realm_identity')).toBe(true)
+
+    const placed = join(home, '.agent-presets', 'prime')
+    for (const filename of ['agent.cordis.yml', 'preset.yml']) {
+      expect(await readFile(join(placed, filename), 'utf8'))
+        .toBe(await readFile(join(PACKAGED_PRESET, filename), 'utf8'))
+    }
+  })
+})

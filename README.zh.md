@@ -4,7 +4,7 @@
 
 [English](README.md) · [架构](docs/v2-architecture.md) · [v0.3 路线](docs/v0.3-roadmap.md) · [Prime Agent 学习笔记](docs/prime-agent-learnings.md) · [上游同步手册](docs/upstream-sync.zh.md)
 
-0.2 是一次全新设计：不读取 0.1 状态、不保留旧 `prime_harness` API，也不提供迁移路径。
+v0.2 是一次全新设计：不读取 0.1 状态、不保留旧 `prime_harness` API，也不提供迁移路径。v0.3 交付 Persistent TypeScript Realm：经认证的 per-session realm，`state`、函数与 module cache 跨 `run_code` 保留。
 
 ## 设计
 
@@ -18,7 +18,7 @@
 
 动态 prompt 只注入工作区元数据。完整值保留在内容寻址 blob 中，直到模型显式调用 `get` 或 `search`。因此 prompt 成本取决于当前决策读取了多少内容，而不是一共存了多少上下文。
 
-v0.2 复用 DSH 的 Agent Loop、TypeScript Code Runtime、Subagent、Jobs、Goal、Workflow、Session 与取消语义，不内嵌 IPython，也不创建第二套 Worker 生命周期。
+v0.2 复用 DSH 公开的 Agent Loop、Code Mode、Code Runtime、Subagent、Jobs、Goal、Workflow、Session 与取消契约，不修改 Harness、不内嵌 IPython，也不创建第二套 Worker 生命周期。
 
 ## 安装
 
@@ -28,9 +28,7 @@ npm run check
 dsh plugin --profile web add ./dsh-prime-agent
 ```
 
-随包提供的 bundle patch 会选择 Code Mode，并把全新状态写入 `$DSH_HOME/prime-agent-v2`。需要无界面运行时可换成 `headless` 等其他 profile。
-
-默认 bundle 要求当前 DSH preset 能看到 `subagent`（或 `subagent_fork`）和 `job_output`；如果没有组合这些工具，system prompt assembly 会明确失败。
+`dsh plugin add` 即提供全部内容：随包 bundle patch 把宿主 `code-runtime` provider 替换为 `dsh-prime-agent/runtime`；随包 Prime preset（DSH Code preset 副本加 scoped Prime 条目）在启动时落位到 `$DSH_HOME/.agent-presets`（仅缺失时）。启用 Prime 模式只是为某个 Session 在选择器中选中 Prime preset；默认 preset 与其他 preset 保持官方 one-shot 语义。落位后的 preset 之后绝不会被覆盖——插件升级与 harness 升级都不刷新它；删除 `$DSH_HOME/.agent-presets/prime` 并重启即可重新落位当前快照。
 
 ## RLM 工作流
 
@@ -102,7 +100,7 @@ return await tools.prime_context({
 
 ## 配置
 
-`stateDirectory` 必填。下列默认值与随包 preset 一致。
+`stateDirectory` 必填。未配置选项时使用下列默认值。
 
 | 选项 | 默认值 | 含义 |
 | --- | --- | --- |
@@ -115,7 +113,7 @@ return await tools.prime_context({
 | `context` | 有界默认值 | 工作区配额、读/搜索限制和 catalog prompt 预算 |
 | `continual` | 有界默认值 | 学习条目、事务、状态与 prompt 限制 |
 
-所有具体限制见 [cordis.patch.yml](cordis.patch.yml)。
+bundle patch 只承载 host `code-runtime` 替换，不改默认 preset 或工具展示模式。`dsh-prime-agent/runtime` 条目另接受官方预算字段（`computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，同名逐字透传）与 realm pool 治理项（`maxActiveRealms`、`maxIdleMs`、`maxHostCallsPerRun`、`maxParallelHostCallsPerRun`、`maxStateEntries`）。
 
 ## 存储与安全
 
@@ -132,17 +130,17 @@ return await tools.prime_context({
 
 ## 为什么 IPython 只是参考而不是 backend？
 
-v0.2 优先实现了操作可寻址数据与异步 Agent 的可编程控制面。DSH TypeScript Code Runtime 已经集成 scoped tools、日志、取消、Subagent 与 Jobs，因此 `prime_context` 可以先交付可靠的数据持久化。
+DSH Code Mode 已经集成 scoped tools、日志、取消、Subagent 与 Jobs，因此 Prime 保持唯一的模型可见编程界面，并通过 `prime_context` 显式持久化数据。
 
-这已经抓住 Prime Agent 很大一部分工作感觉：DSH PTC/Code Mode 给模型一个可编程界面来组合工具与递归 Agent，`prime_context` 则把大型数据留在模型上下文之外。但它还不等价于 Prime 的持久计算状态，因为 v0.2 每次 `run_code` 结束后仍会丢失函数、import、对象、索引和 client。
+这里提供的是持久 RLM 工作区，不是持久 JavaScript heap。当前公开的 `CodeRunRequest` 只有 program、bindings 和 abort signal，没有所属 Session 身份或 release 生命周期；标准 Worker Runtime 也刻意采用单次执行。插件因此不会宣称函数、import、对象、索引或 client 能跨 `run_code` 保留，也不会通过重放可能有副作用的代码、monkey patch Harness 或嵌套第二个代码执行器来伪造这种保证。
 
-剩余不变量是持久计算 namespace，而不是 Python 语法。因此 [v0.3 路线](docs/v0.3-roadmap.md) 不增加另一个模型可见 runtime，而是在现有 PTC 路径上扩展 Session-scoped Persistent TypeScript Realm。`prime_context` 继续作为显式、可靠的数据层。IPython 只用于参考 cell 连续性、中断与诚实恢复语义，不是计划中的产品 backend。
+已批准的 [v0.3 路线](docs/v0.3-roadmap.md) 保留原生 Code Mode bridge，通过带认证的 `prime_realm_identity` binding handshake 把 Prime Session 路由到长期 Worker，普通 Session 继续使用官方 one-shot Runtime。`prime_context` 仍承担显式可靠状态；IPython 只作为设计参考。
 
 ## 开发
 
 开发测试会把公开 DSH 包名解析到同级 `../deepseek-harness` 源码；发布包只导入公开包名。
 
-DSH peer range 有意限制在兼容的 `0.1.x` 系列。它们标记为 optional，是为了避免 npm 在已经提供这些包的宿主中安装第二套 Harness package graph；如果选定的 DSH composition 缺少必需 service，插件加载仍会失败。当前 DSH `PromptContext` 契约是同步的，因此动态 prompt provider 使用有界同步文件快照；state directory 应放在本机存储，而不是网络文件系统。
+DSH peer range 有意限制在兼容的 `0.1.x` 系列。它们标记为 optional，是为了避免 npm 在已经提供这些包的宿主中安装第二套 Harness package graph；当 profile 的 bundles 不提供 runtime row 导入的 Code Mode 包时，该 row 会以明确诊断失败（请使用 web 或 headless profile）；如果选定的 DSH composition 缺少必需 service，插件加载仍会失败。当前 DSH `PromptContext` 契约是同步的，因此动态 prompt provider 使用有界同步文件快照；state directory 应放在本机存储，而不是网络文件系统。
 
 ```sh
 npm run typecheck

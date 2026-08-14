@@ -255,10 +255,13 @@ function resolveJsonPointer(value: JsonValue, pointer: string): JsonValue {
 
 /** Atomic manifest and content-addressed blob store for the RLM workspace. */
 export class ContextStore {
-  constructor(
-    private readonly stateDirectory: string,
-    private readonly limits: ContextLimits,
-  ) {}
+  private readonly stateDirectory: string
+  private readonly limits: ContextLimits
+
+  constructor(stateDirectory: string, limits: ContextLimits) {
+    this.stateDirectory = stateDirectory
+    this.limits = limits
+  }
 
   /** Resolve the manifest path for one scope without embedding a session id in the filename. */
   manifestPath(scope: ContextScope, owner: string): string {

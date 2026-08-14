@@ -7,6 +7,7 @@ import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { registerContinual } from './continual/plugin.js'
 import type { HarnessLimits } from './continual/types.js'
+import { registerRealmIdentity } from './realm/identity-tool.js'
 import { registerRlm } from './rlm/plugin.js'
 import type { ContextLimits } from './rlm/types.js'
 
@@ -137,13 +138,17 @@ export function apply(ctx: Context, config: Config): void {
     allowGlobal: config.allowGlobalRefinement ?? false,
     limits: continualLimits,
   })
+  registerRealmIdentity(ctx, { stateDirectory })
 
   if (config.requireCodeMode ?? true) {
     ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
       const result = await next()
       if (context.agent === undefined) return result
       if (result.tools.length !== 1 || result.tools[0]?.name !== RUN_CODE_NAME) {
-        throw new Error(`dsh-prime-agent: agent ${String(context.agent.id)} must use Code Mode; expected the sole model-visible tool to be ${RUN_CODE_NAME}`)
+        // The agent id is deliberately absent: it is the session identifier the
+        // realm protocol treats as sensitive, and a prompt-assembly failure is
+        // not worth putting it into a host log.
+        throw new Error(`dsh-prime-agent: this agent must use Code Mode; expected the sole model-visible tool to be ${RUN_CODE_NAME}`)
       }
       return result
     })

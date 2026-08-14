@@ -108,6 +108,6 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 
 0.2 已交付 `prime_context + PTC/Code Mode + Subagent/Jobs + prime_refine` 闭环。DSH PTC 已经提供 Prime 式的可编程工具与递归 Agent 编排，`prime_context` 提供上下文外置；进一步对照确认的主要保真差距是持久计算 namespace。Prime 用 IPython 让函数、import、对象、索引与工具编排代码跨 turn 延续；`prime_context` 只能恢复显式序列化的数据。
 
-我们学习这一不变量，而不绑定其实现语言。因此下一阶段优先把现有 DSH TypeScript Code Runtime 改造成 Session-scoped Persistent Realm，并保留 `prime_context` 作为可靠数据层。IPython 只作为理解 cell 连续性、中断、snapshot 限制与恢复语义的参考，不进入产品路线。Context Capsule 与 Agent family 顺延到 v0.4，自动学习顺延到 v0.5。具体边界见 [v0.3 路线](v0.3-roadmap.md)。
+我们学习这一不变量，而不绑定其实现语言。v0.3 计划保留 DSH 原生 Code Mode bridge，通过带 challenge proof 的 `prime_realm_identity` binding handshake 取得不透明 Session Realm 身份；hybrid Runtime 将只让 Prime Session 进入 Persistent TypeScript Worker，其他请求继续委托官方 one-shot Worker。`prime_context` 仍是可靠数据层，IPython 只用于参考 cell 连续性、中断、snapshot 限制与恢复语义。Context Capsule 与 Agent family 顺延到 v0.4，自动学习顺延到 v0.5。具体边界见 [v0.3 路线](v0.3-roadmap.md)。
 
 Agent family 的学习同样关注控制语义而不是 API 名称：child 的中间发现应尽可能进入 parent 当前计算的最近 step，而不是无条件积压成多个独立后续轮次。DSH 当前默认 report 路由与此仍有差距；插件先记录并推动宿主提供调度扩展点，不直接修改宿主实现。

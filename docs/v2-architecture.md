@@ -157,7 +157,7 @@ DSH TypeScript Code Runtime 已提供：
 
 所以 0.2 持久化的是数据命名空间，不是 JavaScript heap。这一选择让 RLM 数据工作区先落地，但不能替代 Prime Agent 的持久计算 namespace：函数、import、对象、索引和 client 仍在每次 `run_code` 后丢失。
 
-DSH PTC/Code Mode 已经交付 Prime 式的可编程控制面；该差距是剩余的连续计算保真问题，其不变量是持久计算 namespace，而不是特定 Python 语法。v0.3 将扩展现有 TypeScript Code Runtime 路径，继续复用工具桥、日志和取消边界。IPython 只用于参考 cell 连续性、中断与恢复边界，不作为 backend，也不会成为 `prime_context` 旁边的第二套嵌套代码工具。完整设计见 [v0.3 路线](v0.3-roadmap.md)。
+DSH PTC/Code Mode 已经交付 Prime 式的可编程控制面。当前公开 Code Runtime 请求没有 owning Session identity，但它携带当前 Agent 的 scoped tool bindings。v0.3 将通过固定的 `prime_realm_identity` binding 完成带 challenge proof 的插件私有 Realm handshake，再由 hybrid `PrimeCodeRuntime` 把 Prime 请求路由到长期 Worker、把普通请求委托给私有隔离的官方 one-shot Worker。这样无需修改宿主源码、重放副作用代码或嵌套第二套代码工具。完整设计见 [v0.3 路线](v0.3-roadmap.md)。
 
 ## 配置与部署不变量
 
@@ -167,7 +167,7 @@ DSH PTC/Code Mode 已经交付 Prime 式的可编程控制面；该差距是剩�
 - global context 与 global refinement 默认 false。
 - 工具名必须匹配小写字母、数字和下划线规则，且两者不能相同。
 - 所有 limit 必须为正整数；Schemastery 还对 manifest/catalog/state 的最低安全值做约束。
-- bundle 显式把 DSH tools mode 设置为 `code`，并使用 `$DSH_HOME/prime-agent-v2` 新目录。
+- bundle patch 只替换 host `code-runtime` provider（禁用官方 row、插入 `dsh-prime-agent/runtime`）；随包 Prime preset 由 runtime 启动时落位。默认 preset、`tools` mode 与既有 preset 均不变。
 
 ## 0.2 验收结果
 
@@ -183,14 +183,14 @@ DSH PTC/Code Mode 已经交付 Prime 式的可编程控制面；该差距是剩�
 
 ## 后续边界
 
-### 0.3：持久 RLM 计算环境
+### 0.3：Prime Persistent TypeScript Realm（已交付）
 
-- 为 DSH Code Runtime 增加不透明 continuity identity seam。
-- 实现每 Session 一个持久 TypeScript Worker Realm。
-- 实现 stable `tools` proxy 与当前 run/Agent binding lease。
-- 实现 state catalog、best-effort checkpoint/restore 与资源治理。
+- 固定的 `prime_realm_identity` bootstrap binding 签发带 Session binding 和 challenge proof 的不透明 Realm identity。
+- hybrid `PrimeCodeRuntime` 对 Prime 请求使用长期 Worker，对其他请求委托官方 one-shot Worker。
+- 实现显式 `state`、stable tools proxy、per-run binding lease、generation 与有界 Realm pool。
+- 随包提供完整 Prime preset 与 bundle patch：patch 禁用官方 `code-runtime` row 并插入 Prime runtime row；启动时把包内 preset 落位到 `$DSH_HOME/.agent-presets/prime`（仅缺失时复制，绝不覆盖既有目录）。默认 preset 与普通 preset 语义不变。
 
-完整任务分解、契约和验收标准见 [v0.3 路线：持久 RLM 计算环境](v0.3-roadmap.md)。
+完整契约和验收标准见 [v0.3 路线](v0.3-roadmap.md)。
 
 ### 0.4：Context Capsule 与 Agent Family
 

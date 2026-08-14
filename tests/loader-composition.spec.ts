@@ -57,7 +57,7 @@ async function loadComposition(): Promise<Context> {
 }
 
 describe('dsh-prime-agent Loader composition', () => {
-  it('loads both v0.2 subsystems and keeps task data out of the continual snapshot', async () => {
+  it('loads both Prime subsystems and keeps task data out of the continual snapshot', async () => {
     const ctx = await loadComposition()
     const unloaded = [...ctx.loader.entries()]
       .filter(entry => entry.fiber === undefined && !entry.disabled)

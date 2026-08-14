@@ -4,7 +4,7 @@
 
 [简体中文](README.zh.md) · [Architecture](docs/v2-architecture.md) · [v0.3 roadmap](docs/v0.3-roadmap.md) · [Prime Agent learnings](docs/prime-agent-learnings.md) · [Upstream sync manual](docs/upstream-sync.md)
 
-Version 0.2 is a clean redesign. It does not read 0.1 state, preserve the old `prime_harness` API, or provide a migration path.
+Version 0.2 is a clean redesign. It does not read 0.1 state, preserve the old `prime_harness` API, or provide a migration path. Version 0.3 adds the Persistent TypeScript Realm: an authenticated per-session realm whose `state`, functions, and module cache survive across `run_code` calls.
 
 ## Design
 
@@ -18,7 +18,7 @@ The plugin separates three responsibilities:
 
 Only workspace metadata enters the dynamic prompt. Values remain in content-addressed blobs until the model explicitly calls `get` or `search`. This keeps prompt cost tied to the current decision instead of total stored context.
 
-Version 0.2 reuses DSH's Agent Loop, TypeScript Code Runtime, Subagent, Jobs, Goal, Workflow, Session, and cancellation semantics. It does not embed IPython or create a second worker lifecycle.
+Version 0.2 reuses DSH's public Agent Loop, Code Mode, Code Runtime, Subagent, Jobs, Goal, Workflow, Session, and cancellation contracts. It does not patch Harness, embed IPython, or create a second worker lifecycle.
 
 ## Install
 
@@ -28,9 +28,7 @@ npm run check
 dsh plugin --profile web add ./dsh-prime-agent
 ```
 
-The included bundle patch selects Code Mode and stores fresh state below `$DSH_HOME/prime-agent-v2`. Use another profile name, such as `headless`, when appropriate.
-
-The default bundle requires visible `subagent` (or `subagent_fork`) and `job_output` tools. Assembly fails loudly when the selected DSH preset does not compose them.
+`dsh plugin add` provides everything: the package's bundle patch swaps the host `code-runtime` provider for `dsh-prime-agent/runtime`, and the packaged Prime preset — a copy of the DSH Code preset plus the scoped Prime rows — is placed into `$DSH_HOME/.agent-presets` at startup when absent. Enabling Prime mode is just picking the Prime preset for a session; the default preset and every other preset keep official one-shot semantics. The placed preset is never overwritten afterwards — neither plugin nor harness upgrades refresh it; delete `$DSH_HOME/.agent-presets/prime` and restart to re-place the current snapshot.
 
 ## RLM workflow
 
@@ -102,7 +100,7 @@ Entry kinds are `prompt`, `memory`, `skill`, and `subagent`. Skill and subagent 
 
 ## Configuration
 
-`stateDirectory` is required. Defaults below are the values used by the bundled preset.
+`stateDirectory` is required. Defaults below are used when an option is omitted.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -115,7 +113,7 @@ Entry kinds are `prompt`, `memory`, `skill`, and `subagent`. Skill and subagent 
 | `context` | bounded defaults | Workspace quotas, read/search limits, and catalog prompt budget |
 | `continual` | bounded defaults | Learning entry, transaction, state, and prompt limits |
 
-See [cordis.patch.yml](cordis.patch.yml) for every concrete limit.
+The package bundle patch carries only the host `code-runtime` swap, leaving the default preset and tool presentation untouched. The `dsh-prime-agent/runtime` row additionally accepts the official budget fields (`computeMs`, `maxWallMs`, `maxOutputBytes`, `maxOldGenerationSizeMb`, passed through verbatim) and realm-pool governance (`maxActiveRealms`, `maxIdleMs`, `maxHostCallsPerRun`, `maxParallelHostCallsPerRun`, `maxStateEntries`).
 
 ## Storage and safety
 
@@ -132,17 +130,17 @@ POSIX owner-only modes are requested where the host platform honors them. This i
 
 ## Why IPython is a reference, not a backend
 
-Version 0.2 prioritized a programmable control plane over addressable data and asynchronous agents. DSH's TypeScript Code Runtime already supplied scoped tools, logging, cancellation, Subagent, and Jobs integration, so `prime_context` delivered reliable data persistence first.
+DSH Code Mode already supplies scoped tools, logging, cancellation, Subagent, and Jobs integration, so Prime keeps one model-facing programming surface and makes data persistence explicit through `prime_context`.
 
-This already captures much of Prime Agent's working feel: DSH PTC/Code Mode gives the model one programmable surface for composing tools and recursive agents, while `prime_context` keeps large data outside the model context. It is not yet equivalent to Prime's persistent computational state, because each v0.2 `run_code` invocation loses functions, imports, objects, indexes, and clients when its JavaScript worker exits.
+This is a persistent RLM workspace, not a persistent JavaScript heap. The current public `CodeRunRequest` contains only the program, bindings, and abort signal; it carries no owning Session identity or release lifecycle, and the standard worker runtime is intentionally one-shot. The plugin therefore does not claim that functions, imports, objects, indexes, or clients survive a `run_code` call. It also does not fake that guarantee by replaying side-effectful code, monkey-patching Harness, or nesting another code executor.
 
-The remaining invariant is a persistent computational namespace, not Python syntax. The [v0.3 roadmap](docs/v0.3-roadmap.md) therefore extends the existing PTC path with a session-scoped Persistent TypeScript Realm instead of adding another model-facing runtime. `prime_context` remains the reliable explicit data layer. IPython is retained only as a reference for cell continuity, interruption, and honest recovery semantics; it is not a planned product backend.
+The approved [v0.3 roadmap](docs/v0.3-roadmap.md) keeps the native Code Mode bridge and uses an authenticated `prime_realm_identity` binding handshake to route Prime sessions into persistent workers while ordinary sessions retain the official one-shot runtime. `prime_context` remains the reliable explicit state layer; IPython remains a design reference only.
 
 ## Development
 
 Development tests resolve public DSH package names to the sibling `../deepseek-harness` checkout. The published package imports only public package names.
 
-DSH peer ranges are intentionally limited to the compatible `0.1.x` line. They are optional so npm does not install a second Harness package graph into a host that already supplies them; plugin loading still fails if the selected DSH composition lacks a required service. Dynamic prompt providers use bounded synchronous file snapshots because the current DSH `PromptContext` contract is synchronous; keep the state directory on local storage rather than a network filesystem.
+DSH peer ranges are intentionally limited to the compatible `0.1.x` line. They are optional so npm does not install a second Harness package graph into a host that already supplies them; the runtime row fails with an explicit diagnostic when the profile's bundles do not supply the Code Mode packages it imports (use a web or headless profile), and plugin loading still fails if the selected DSH composition lacks a required service. Dynamic prompt providers use bounded synchronous file snapshots because the current DSH `PromptContext` contract is synchronous; keep the state directory on local storage rather than a network filesystem.
 
 ```sh
 npm run typecheck

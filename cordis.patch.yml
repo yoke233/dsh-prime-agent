@@ -1,46 +1,58 @@
-# Prime RLM bundle. This is intentionally a breaking v0.2 composition: it
-# selects Code Mode as the only model-facing control plane and mounts fresh RLM
-# and continual state below $DSH_HOME/prime-agent-v2.
-- id: tools
-  config:
-    mode: code
-    maxParallelSubCalls: 10
+# Applied automatically once `dsh plugin add` lists this package in the
+# profile's bundles. Four operations, in two independent pairs.
+#
+# Pair 1 — the Prime hybrid code runtime. Retire the official one-shot
+# `code-runtime` row and insert the Prime runtime in its place. The `name` field
+# on the disable is an assertion protecting a swapped-provider row from being
+# disabled — but the two patches are independent, so the insert still lands and
+# the boot then fails on the contended `codeRuntime` slot; the Prime runtime's
+# own `apply` turns that contention into a diagnostic naming this patch, since
+# the loader's skip warning is not visible in production logging. Non-Prime
+# requests are delegated to a privately mounted copy of the official runtime, so
+# every other preset keeps official one-shot semantics and budgets.
+#
+# Pair 2 — Prime-form subagent reports. Retire the host `tool-subagent-report`
+# (whose fixed `wakeup` schedules every child report as a separate next-turn)
+# and insert `dsh-prime-agent/subagent-report`, which schedules each report by
+# the parent's momentary state like the Prime Agent prototype: a busy parent
+# folds it into the running turn (`next-step`), an idle parent is prompted with
+# one turn (`next-turn`). The base bundle applies as ONE insert over the empty
+# profile root, so `tool-subagent-report` is a TOP-LEVEL row addressed by id
+# (last write wins per row) — that is what makes this disable land. The two
+# patches of this pair are independent: if the upstream row's id or name drifts
+# (or it moves inside a group the include's patch map cannot recurse into —
+# only `group: true` entries with an array config are indexed), the disable is
+# a silent warn-and-skip while the insert still lands, and every continuable
+# child then carries TWO `report` registrations. That collision is turned into
+# a diagnostic naming this patch by `dsh-prime-agent/subagent-report` itself;
+# `tests/packaging-boundary.spec.ts` additionally pins the upstream row when
+# the sibling harness checkout is present. Completion delivery is unchanged —
+# the harness's own `subagent-settled` notice already uses this same
+# parent-state form. This is a whole-profile change: every continuable child in
+# the deployment gets the Prime-form `report` instead of the host one.
+#
+# The default preset, `tools` mode, and every existing agent preset stay
+# untouched; the packaged Prime preset is placed into `$DSH_HOME/.agent-presets`
+# by the runtime row at startup (copy-if-absent), not by this patch.
+#
+# `stateDirectory` MUST stay textually identical to the expression in
+# `agent-presets/prime/agent.cordis.yml` — both sides read the same
+# `realm-identity/hmac.key`, and `tests/packaging-boundary.spec.ts` locks the
+# two files together.
+- id: code-runtime
+  name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+  disabled: true
 
 - insert:
-    - id: prime-agent
-      name: dsh-prime-agent
+    - id: prime-code-runtime
+      name: dsh-prime-agent/runtime
       config:
-        stateDirectory: !!js dshHomePath('prime-agent-v2')
-        contextToolName: prime_context
-        refineToolName: prime_refine
-        allowGlobalContext: false
-        allowGlobalRefinement: false
-        requireCodeMode: true
-        requireOrchestrationTools: true
-        context:
-          maxEntriesPerScope: 128
-          maxKeyChars: 160
-          maxSummaryChars: 500
-          maxValueBytes: 16777216
-          maxTotalBytesPerScope: 268435456
-          maxManifestBytes: 2097152
-          maxReadChars: 32000
-          maxSearchQueryChars: 500
-          maxSearchMatches: 50
-          maxSearchWindowChars: 500
-          maxSearchChars: 2000000
-          maxCatalogEntries: 64
-          maxCatalogChars: 12000
-        continual:
-          maxEntriesPerScope: 64
-          maxEntryIdChars: 128
-          maxEntryTitleChars: 200
-          maxEntryContentChars: 4000
-          maxReferenceToolChars: 128
-          maxEvidenceItems: 12
-          maxEvidenceChars: 1000
-          maxEditsPerTransaction: 16
-          maxTransactions: 32
-          maxStateBytes: 524288
-          maxPromptEntriesPerScope: 32
-          maxPromptCharsPerScope: 16000
+        stateDirectory: !!js dshHomePath('prime-agent')
+
+- id: tool-subagent-report
+  name: '@deepseek-ai/dsh-tool-subagent-report'
+  disabled: true
+
+- insert:
+    - id: prime-subagent-report
+      name: dsh-prime-agent/subagent-report

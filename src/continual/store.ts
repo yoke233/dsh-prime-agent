@@ -230,10 +230,13 @@ function renderState(state: HarnessState, limits: HarnessLimits): string {
 
 /** Atomic, conflict-aware persistence for local and global harness documents. */
 export class HarnessStore {
-  constructor(
-    private readonly stateDirectory: string,
-    private readonly limits: HarnessLimits,
-  ) {}
+  private readonly stateDirectory: string
+  private readonly limits: HarnessLimits
+
+  constructor(stateDirectory: string, limits: HarnessLimits) {
+    this.stateDirectory = stateDirectory
+    this.limits = limits
+  }
 
   /** Resolve an opaque, traversal-safe file path for a scope owner. */
   path(scope: HarnessScope, owner: string): string {

@@ -83,27 +83,28 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 
 1. 心智模型变化时更新 `docs/prime-agent-learnings.md`。
 2. 公共行为变化时更新 `docs/v2-architecture.md`、两份 README 与工具 policy。
-3. 每个采用或适配的契约都增加回归测试。
-4. 运行 `npm run check`。
-5. 运行覆盖 Code Mode、Subagent 与 Jobs 的真实 DSH 组合测试。
-6. 审阅配额、权限、取消、耐久性、重放可见性和失败行为。
-7. 审阅最终 diff，排除对 Prime 实现细节的意外耦合。
-8. 把 `upstream-baseline.json` 更新到精确已审阅 commit 与日期。
+3. 将随包 Prime preset（`agent-presets/prime/`，交付后）与上游 shipped `code` preset 逐行对照并移植变化；DSH 没有 preset inheritance，这份副本必须整份维护。
+4. 每个采用或适配的契约都增加回归测试。
+5. 运行 `npm run check`。
+6. 运行覆盖 Code Mode、Subagent 与 Jobs 的真实 DSH 组合测试。
+7. 审阅配额、权限、取消、耐久性、重放可见性和失败行为。
+8. 审阅最终 diff，排除对 Prime 实现细节的意外耦合。
+9. 把 `upstream-baseline.json` 更新到精确已审阅 commit 与日期。
 
 ## 决策日志
 
 | 已审阅基线 | 上游变化 | 判断 | 适配结果 |
 | --- | --- | --- | --- |
 | `7787f074` | admission-first `rlm()`、子 Agent 显式汇报、可恢复 child handle | 适配 | DSH 后台 Subagent 返回 Job id；父 Agent 继续，稍后通过 `job_output` 回收 |
-| `7787f074` | 持久 IPython 是模型唯一可见控制面 | 适配 | Code Mode 仍是唯一界面；v0.3 增加 Session-scoped Persistent TypeScript Realm，可靠数据继续由 `prime_context` 拥有 |
+| `7787f074` | 持久 IPython 是模型唯一可见控制面 | 适配 | Code Mode 仍是唯一界面；v0.3 将通过带认证的 `prime_realm_identity` binding handshake 把 Prime Session 路由到 Persistent TypeScript Realm，普通 Session 保持官方 one-shot Runtime |
 | `7787f074` | local/global Continual Harness 与 refine/rollback | 适配 | `prime_refine` 降为次级，基于证据、乐观并发、有界且冲突安全 |
 | `7787f074` | Host 拥有 Agent 生命周期、消息、Goal 和取消 | 采用 | 插件组合 DSH 服务，不创建 Worker registry 或第二套 Agent Loop |
 | `7787f074` | 默认开启自动 refinement | 暂缓 | 在自动模型写入前先设计明确 proposal/review/outcome 机制 |
 
 ## 每次都要复查的语义差距
 
-- Prime 的 child answer 可以进入 parent 仍在进行的计算。DSH 当前默认用 `followup` 调度 `subagent-report`，因此会排成普通后续轮次。v0.4 应推动 DSH 提供其原生拥有的 steer-first 调度选项——运行中的 parent 走 steer，空闲 parent 被唤醒——而不是修改 DSH 源码或在插件里建立私有 inbox。
-- Prime 的 Python heap 能保存活对象和函数；v0.2 只持久化 JSON、文本和 artifact reference。[v0.3 P0](v0.3-roadmap.md) 用 Persistent TypeScript Realm 关闭跨 turn 计算差距。IPython 只用于参考行为与失败语义，不是产品 backend。
+- Prime 的 child answer 可以进入 parent 仍在进行的计算。已实现：随包 patch 停用 host `tool-subagent-report`（固定 `wakeup`，每条上报排成单独后续轮次），改挂 `dsh-prime-agent/subagent-report`，在公共 `reportFrom` 之上按父状态逐次选择投递——运行中的 parent 走 `quiet`（inject → 当前轮次的 next-step，与 steer 落点一致），空闲 parent 走 `wakeup` 唤起一轮。未修改 DSH 源码，也没有插件私有 inbox。仍向上游争取：DSH 原生的带唤醒 steer 投递，可关闭"忙→闲瞬间 quiet 上报需等子代理 settled 通知唤醒父"的窄窗。
+- Prime 的 Python heap 能保存活对象和函数；v0.2 只持久化 JSON、文本和 artifact reference。规划中的 [v0.3 P0](v0.3-roadmap.md) 将用插件私有的认证 binding handshake 选择 Persistent TypeScript Realm，关闭跨 turn 计算差距。IPython 只用于参考行为与失败语义，不是产品 backend。
 - v0.2 尚无不可变 Context Capsule `share`/`mount` 契约，也没有 blob 垃圾回收；这些工作顺延到 v0.4。
 - `prime_refine` 目前需要显式调用，不会自动观察效果或生成 proposal。
 

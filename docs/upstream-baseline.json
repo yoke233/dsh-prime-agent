@@ -5,5 +5,11 @@
   "baselineCommittedAt": "2026-08-12T21:01:27-07:00",
   "baselineSubject": "fix(coding-agent): retain root kill cleanup ownership (#1240)",
   "reviewedAt": "2026-08-13",
-  "adapterVersion": "0.2.0"
+  "adapterVersion": "0.2.0",
+  "harness": {
+    "localCheckout": "../deepseek-harness",
+    "baselineCommit": "47f943859bef60e4160492346772ded9b24f765a",
+    "baselineCommittedAt": "2026-08-13T19:38:46+08:00",
+    "presetSnapshot": "agent-presets/prime/agent.cordis.yml copies apps/cli/config/agent-presets/code/agent.cordis.yml at this commit; diff on every sync pass"
+  }
 }

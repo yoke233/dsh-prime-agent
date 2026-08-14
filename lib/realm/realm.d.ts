@@ -1,0 +1,161 @@
+/**
+ * Host side of one Persistent Realm: a long-lived worker thread that keeps its
+ * `state` heap across runs, executes runs strictly one at a time, and leases
+ * binding members only for the run that declared them.
+ *
+ * The seam contract is unchanged from the shipped one-shot runtime: a program
+ * failure, budget expiry, abort, or substrate death RESOLVES with
+ * `result.error`, and only caller misuse (running a disposed realm, declaring
+ * an unusable namespace) rejects. What is new is that a normal run leaves the
+ * worker alive; abort, timeout, log overflow, substrate death and protocol
+ * violations hard-kill it and start a new generation.
+ * @module dsh-prime-agent/realm/realm
+ */
+import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
+/** Per-run resource ceilings. Every field is an increment for ONE run, not a realm lifetime total. */
+export interface RealmBudgets {
+    /** Event-loop busy-time budget for one run, measured as the worker's ELU delta since that run started. */
+    computeMs: number;
+    /** Wall-clock ceiling for one run. */
+    maxWallMs: number;
+    /** Hard cap on one run's combined serialized logs plus completion value or failure message. */
+    maxOutputBytes: number;
+    /** The worker's max old-generation heap in MiB; overflow kills it, surfacing as `worker-exit`. */
+    maxOldGenerationSizeMb: number;
+    /**
+     * Total host binding calls one run may issue. A call over the ceiling is
+     * REFUSED, not fatal: the program sees a rejection it can catch and the realm
+     * keeps its heap. Unbounded when absent.
+     */
+    maxHostCallsPerRun?: number;
+    /**
+     * Host binding calls one run may have in flight at once, refused the same way
+     * as {@link maxHostCallsPerRun}. Unbounded when absent.
+     */
+    maxParallelHostCallsPerRun?: number;
+    /**
+     * Own keys `state` may hold when a run settles. Over the cap the run fails
+     * with an exception and the heap is LEFT ALONE, so the next run can prune it.
+     * Unbounded when absent.
+     */
+    maxStateEntries?: number;
+}
+/**
+ * What a run saw when it actually began executing. Delivered at DISPATCH, not
+ * at admission or settlement: a run can wait behind others in the queue, and
+ * only the dispatch moment knows which worker generation the program will run
+ * against and whether the heap it inherits is a fresh one.
+ */
+export interface RealmRunNotice {
+    /** The generation the program is about to execute in. */
+    generation: number;
+    /**
+     * Whether this is the FIRST run to dispatch on this worker, i.e. the program
+     * starts from an empty `state`. True for a brand-new realm and for the
+     * replacement worker after a hard kill; false for every later run, which is
+     * exactly when a caller may tell the model its heap carried over.
+     */
+    fresh: boolean;
+    /** Whether a hard kill destroyed a live-only heap since the previous run reported. */
+    stateLost: boolean;
+}
+/**
+ * One realm: a lazily spawned worker, a strictly serial run queue, and the
+ * generation bookkeeping a caller needs to tell the model its live-only state
+ * is gone.
+ */
+export declare class PersistentRealm {
+    /** Opaque routing identity; never rendered into a result or diagnostic. */
+    readonly realmId: string;
+    private readonly budgets;
+    private readonly queue;
+    private readonly inflight;
+    private readonly terminations;
+    private session;
+    private activeRun;
+    private runCounter;
+    private generationValue;
+    private generationBumpPending;
+    private noticePending;
+    private lastUsed;
+    private disposed;
+    constructor(options: {
+        realmId: string;
+        budgets: RealmBudgets;
+    });
+    /**
+     * The current worker generation, counting from 1. A hard kill schedules the
+     * increment; reading it (or starting the replacement worker) materializes it,
+     * so repeated reads between two runs stay stable.
+     */
+    get generation(): number;
+    /** Whether a hard kill has happened that no caller has reported to the model yet. */
+    get generationNoticePending(): boolean;
+    /** Clear the pending notice once a caller has told the model its live-only state was lost. */
+    acknowledgeGenerationNotice(): void;
+    /** No run is active and none is waiting. */
+    get idle(): boolean;
+    /** Epoch milliseconds of the most recent admission or settlement, for pool LRU/TTL. */
+    get lastUsedAt(): number;
+    /**
+     * Admit one run. Runs execute in admission order, one at a time; a run still
+     * queued when its signal fires cancels only itself.
+     * @param request - the program, its bindings, and the abort signal.
+     * @param onStart - called once if and when the run reaches a worker, with the
+     *   generation it will execute in. A run that never dispatches (cancelled
+     *   while queued, rejected by the type-strip, or unable to start a worker)
+     *   never calls it, so a pending state-loss report survives for the run that
+     *   actually inherits the new heap.
+     * @returns the run's outcome; rejects only on caller misuse.
+     */
+    run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<CodeRunResult>;
+    /**
+     * Stop admission, terminate the worker, and await complete settlement: no
+     * worker, timer, or unsettled run outlives this call.
+     */
+    dispose(): Promise<void>;
+    /** Reject malformed binding globals or typed-error declarations as caller misuse. */
+    private validateBindings;
+    /** A signal fired: cancel a queued run alone, or hard-kill the worker running an active one. */
+    private onSignalAbort;
+    /** Start the next queued run, if the realm is free to take one. */
+    private pump;
+    /** Type-strip the program, spawn or reuse the worker, and arm this run's budgets. */
+    private dispatch;
+    /** The live worker, spawning a new generation when the previous one is gone. */
+    private ensureSession;
+    /** Post one control message, tolerating a session torn down underneath us. */
+    private post;
+    /** Route one inbound control message, escalating anything outside the protocol. */
+    private onControlMessage;
+    /** Settle one run from the worker's terminal message. */
+    private onDone;
+    /**
+     * Charge one binding call against this run's host-call budgets, or report why
+     * it is refused. Counting happens BEFORE the host function is reached, so a
+     * refused call costs neither a dispatch nor a slot.
+     */
+    private admitHostCall;
+    /** Bridge one binding call to the host function the CURRENT run declared. */
+    private dispatchCall;
+    /**
+     * Native-level pipe output. It belongs to the run in flight; arriving while
+     * the realm is idle it is out-of-protocol activity, and the worker loses its
+     * heap rather than running alongside the next run.
+     */
+    private onStrayOutput;
+    /** The worker died on its own (OOM, `process.exit`, an uncaught throw). */
+    private onWorkerGone;
+    /**
+     * End one worker generation: terminate it, let its pipes drain, and only THEN
+     * settle the run it was executing — once `run()` resolves, the isolate that
+     * produced the result is gone and its trailing output is already in the
+     * ledger. Idempotent, so two triggers in the same tick (a wall timer and an
+     * abort, or a kill and the worker's own `exit`) still cost one generation.
+     */
+    private hardKill;
+    /** Deliver one run's single outcome and release everything it held. */
+    private settle;
+}
+export default PersistentRealm;
+//# sourceMappingURL=realm.d.ts.map
