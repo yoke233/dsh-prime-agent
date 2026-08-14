@@ -6,7 +6,7 @@
 
 大型内容的 retention、spill 与 output budget 由 [大型 Tool 输出治理方案](./large-tool-output-optimization.md) 负责;本文只定义失败发生后是否继续、是否重试、状态是否可信,以及如何向下一轮暴露事实。
 
-前置条件同大型输出方案:先修绿 `prime-preset-mount.e2e` 与 `prime-compose.e2e` 并冻结测试基线。
+前置条件已满足:`prime-preset-mount.e2e` 与 `prime-compose.e2e` 已修绿(compose 曾靠删断言变绿,真断言已恢复)。
 
 ## 目标
 
@@ -14,7 +14,7 @@
 2. 不因"自动恢复"重复执行有副作用、需审批或身份敏感的操作。
 3. 明确区分普通 Tool failure、程序 failure、generation 丢失和身份完整性失败。
 4. Agent 依据稳定事实行动,不解析偶然错误文案。
-5. 重要进度在 Worker 丢失后可从 `prime_context` 恢复。
+5. 重要进度在 Worker 丢失后可从持久任务文件的 checkpoint 恢复。
 6. 保持 Harness ToolRuntime、审批、沙箱、Jobs 和 CodeRuntime seam 的所有权,不在 Prime 复制通用 retry runtime。
 
 ## 非目标
@@ -23,7 +23,7 @@
 - 不绕过 guard、approval、sandbox 或 Harness policy。
 - 不靠匹配自然语言错误字符串自动重试。
 - 不把 stack trace、完整 Tool 输出或敏感路径写入 continual learning。
-- 不让 `prime_context` 自动记录每次调用;可靠 checkpoint 由程序显式决定。
+- 不自动记录每次调用;可靠 checkpoint 由程序显式写入持久任务文件。
 
 ## 已核实的运行时事实
 
@@ -49,10 +49,10 @@
 | Program failure | 未捕获异常、非法 completion | 否 | 通常 retained | 读 captured logs,写更小修复程序 |
 | Active cancellation | 用户取消、外层 signal | 否 | generation lost | 尊重取消;从 durable checkpoint 恢复 |
 | Runtime timeout | wall/compute budget | 原样否 | generation lost | 缩小工作、分页或拆 run |
-| Worker failure | worker exit、运行外故障 | 恢复性重建,不重放副作用 | generation lost | 查 notice,从 `prime_context` 重建 |
+| Worker failure | worker exit、运行外故障 | 恢复性重建,不重放副作用 | generation lost | 查 notice,从持久检查点重建 |
 | Output limit | logs/completion 超限 | 原样否 | 依 overflow 路径 | 按大型输出方案归约;先确认 generation |
 | Identity/integrity failure | forged、stale、malformed、storage corrupt | 绝不 | 未进入可信 Realm | fail-closed,报告部署/存储问题 |
-| Background job failure | job failed/killed/expired | 默认否 | 与 Realm 分离 | 读一次 final output,按 job 语义决定 |
+| Background job failure | job failed/killed | 默认否 | 与 Realm 分离 | 读一次 final output,按 job 语义决定 |
 
 ## 设计决策
 
@@ -62,9 +62,9 @@
 - **D4 retry 前置条件**(全部满足才允许):操作只读/幂等或带服务端 idempotency key;失败不是 misuse/policy denial/approval reject/integrity failure/unchanged output-limit;上限明确(默认最多 1 次补偿);未收到 cancellation;backoff 由 Tool/deployment adapter 拥有,禁止 `run_code` 内 detached timer;每次尝试可观察。
 - **D5 revision conflict 必须重读**:重新 catalog/inspect → 读新 revision → 重验意图 → 以新 revision 提交一次;不在 catch 中盲改 `expected_revision` 重放旧 mutation。
 - **D6 sandbox 升级策略——一次、同操作、最小权限**:识别到真实 denial 后保留原命令/参数/工作目录,选最小足够权限,经 Harness approval 对同一操作重试一次;拒绝或仍失败即终止;禁止换命令、换 Tool 或临时脚本绕过。**定位:这是 prompt policy + pipeline 验收,不是 runtime 强制不变量。** Prime runtime 不重试(正确),但无法机械禁止模型另发一条操作;确定性测试只能证明 policy 文本明确、每次真实调用仍过 guard/approval、Prime runtime 不绕过 pipeline。"模型确实不绕行"只能由可选 real-model smoke 佐证,不写成无模型 CI 的强保证。
-- **D7 generation loss 后不信任 live-only state**:不读旧闭包/Map/client;从 `prime_context` catalog 开始按需读取;重建派生索引;对可能已发生的外部副作用先查真实外部状态;recovery 结果保持精简。
+- **D7 generation loss 后不信任 live-only state**:不读旧闭包/Map/client;从持久检查点与任务文件按需读取;重建派生索引;对可能已发生的外部副作用先查真实外部状态;recovery 结果保持精简。
 - **D8 身份失败不可降级**:不自制 token、不关校验、不切 one-shot;恢复只能来自部署/存储修复或新 Session/Realm。
-- **D9 background jobs 所有权协议**:记录 job id;完成后读 final output,不 sleep/busy-poll;relevant 则 `job_output` 收集,不再 relevant 则 `job_kill`;failed/killed/expired 不自动重启,重启前先判断副作用和 durable output。
+- **D9 background jobs 所有权协议**:记录 job id;完成后读 final output,不 sleep/busy-poll;relevant 则 `job_output` 收集,不再 relevant 则 `job_kill`;failed/killed 不自动重启,重启前先判断副作用和 durable output。(harness `JobStatus` 的终态词汇是 completed/killed/failed,无 `expired`。)
 
 ## 推荐的程序模式
 
@@ -89,7 +89,7 @@ try {
 
 ### Phase 1:Prompt policy 与确定性单元测试(与大型输出方案共享,一次完成)
 
-`src/rlm/plugin.ts` 的 `orchestrationPolicy()` 与 `tests/code-mode.spec.ts` 同时被两份方案修改,合并为一次改动。本方案贡献的规则:裸 `Promise.all` 只用于真正共同成功的 foreground 组;best-effort 逐项捕获或 `allSettled`;mutation 顺序执行;失败不盲目重试;sandbox denial 只允许一次同操作最小权限升级;generation loss 后从动态名称的 `prime_context` 恢复。
+`src/policy.ts` 的 `orchestrationPolicy()` 与 `tests/code-mode.spec.ts` 同时被两份方案修改,合并为一次改动。本方案贡献的规则:裸 `Promise.all` 只用于真正共同成功的 foreground 组;best-effort 逐项捕获或 `allSettled`;mutation 顺序执行;失败不盲目重试;sandbox denial 只允许一次同操作最小权限升级;generation loss 后从持久检查点恢复。
 
 测试断言:policy 含 fail-fast 与 best-effort 的区别;自定义 context Tool 名称正确插入 recovery 文案;policy 不承诺自动 rollback 或 automatic retry;SDK 类型声明仍含 `ToolCallError`。
 
@@ -101,14 +101,14 @@ try {
 2. 裸 `Promise.all` 成员失败导致 outer run failure,但同一 Agent 下一 run generation retained。
 3. 程序未捕获异常时外层为 structured `isError`,captured logs 可见且有界。
 4. 一个 mutation 成功、后续程序失败:外部副作用不被声称已回滚。
-5. generation loss(timeout 或 active abort 任选一条路径)后,下一 run 收到 loss notice 并从 `prime_context` checkpoint 重建 state。
+5. generation loss(timeout 或 active abort 任选一条路径)后,下一 run 收到 loss notice 并从持久任务文件 checkpoint 重建 state。
 6. handshake fail-closed 只补一条**自动 binding path** 的 E2E;完整篡改矩阵已由 `tests/prime-runtime.spec.ts` 低层覆盖,不复制。
 
 queued/active abort、worker exit、output-limit 的低层语义已由 `tests/realm-worker.spec.ts` 覆盖,E2E 不重复;output-limit 的 heap 保留/丢失差异归大型输出方案的 differential tests。
 
 ### Phase 2.5:Jobs 验收
 
-扩展 `tests/orchestration.spec.ts`(fake jobs),补齐 D9 与测试矩阵已承诺但此前无阶段承接的场景:relevant job 最终 `job_output` collect;obsolete job `job_kill`;failed/killed/expired 不自动重启;整个流程无 sleep/busy-poll。现有文件只覆盖成功 collect。
+扩展 `tests/orchestration.spec.ts`(fake jobs),补齐 D9 与测试矩阵已承诺但此前无阶段承接的场景:relevant job 最终 `job_output` collect;obsolete job `job_kill`;failed/killed 不自动重启;整个流程无 sleep/busy-poll。现有文件只覆盖成功 collect。
 
 ### Phase 3:权限与审批集成验收
 
@@ -132,7 +132,7 @@ queued/active abort、worker exit、output-limit 的低层语义已由 `tests/re
 | --- | --- | --- |
 | Policy unit | 并行分类、mutation 顺序、无盲重试、一次升级文案 | 是 |
 | Failure E2E(场景 1–4) | 局部捕获、`toolName`、structured isError、副作用不回滚、Realm retained | 是 |
-| Durable recovery(场景 5) | generation notice + `prime_context` 重建 | 是 |
+| Durable recovery(场景 5) | generation notice + 持久 checkpoint 重建 | 是 |
 | Identity(场景 6) | 自动 binding path fail-closed;篡改矩阵已有低层覆盖 | 是 |
 | Jobs(Phase 2.5) | collect relevant、kill obsolete、不自动重启、无 busy-poll | 是,fake jobs |
 | Approval/sandbox(Phase 3) | 真实 escalation Tool、一次最小升级、拒绝后停止 | 是,fake adapter |
@@ -141,7 +141,7 @@ queued/active abort、worker exit、output-limit 的低层语义已由 `tests/re
 
 ## 可观察性
 
-v1 不新增持久 failure database,使用现有事件:outer `tool/call`/`tool/result`、nested dispatch 事件、`CodeRunFailedError` 的 kind 与 captured logs、generation notice、job status、`prime_context` revision。
+v1 不新增持久 failure database,使用现有事件:outer `tool/call`/`tool/result`、nested dispatch 事件、`CodeRunFailedError` 的 kind 与 captured logs、generation notice、job status。
 
 失败摘要至少说明:哪层失败、哪个操作、是否发生副作用、generation 是否可信、是否重试及次数、下一步(修输入 / 用户授权 / 部署修复 / durable recovery)。不返回完整 stack、token、proof、存储路径或大型 payload。
 
@@ -155,7 +155,7 @@ v1 不新增持久 failure database,使用现有事件:outer `tool/call`/`tool/r
 
 ## 发布与回滚
 
-Phase 1 只改 policy 文案与测试。Phase 2/2.5 增加集成测试,预期不改生产语义;暴露契约差异时先记录、单独批准修复。Phase 3 只验证 Harness 已有 seam,不在 Prime 新增权限能力。Phase 4 属上游 interface,独立设计发布。所有阶段不改 Realm identity、`prime_context` manifest 或 continual state 格式。
+Phase 1 只改 policy 文案与测试。Phase 2/2.5 增加集成测试,预期不改生产语义;暴露契约差异时先记录、单独批准修复。Phase 3 只验证 Harness 已有 seam,不在 Prime 新增权限能力。Phase 4 属上游 interface,独立设计发布。所有阶段不改 Realm identity 或 continual state 格式。
 
 ## 完成标准(v1 = Phase 1–3)
 
@@ -163,7 +163,7 @@ Phase 1 只改 policy 文案与测试。Phase 2/2.5 增加集成测试,预期不
 2. 普通 Tool failure 可局部捕获,不丢失其他独立成功结果。
 3. 无默认 mutation replay 或 message-based automatic retry。
 4. 真实 `run_code` E2E 固定 ordinary failure、program failure 和 generation-loss 语义。
-5. generation loss 后可从 `prime_context` checkpoint 重建,并先核验外部副作用。
+5. generation loss 后可从持久任务文件 checkpoint 重建,并先核验外部副作用。
 6. 一次同操作最小权限升级作为 policy 文本 + pipeline 验收成立:每次调用过 guard/approval,reject 后 Tool body 未执行;不声称 runtime 机械禁止二次操作。
 7. handshake/integrity failure 保持 fail-closed(低层矩阵 + 一条自动 binding path E2E)。
 8. background jobs 在最终回答前被收集或取消:collect/kill/不自动重启/无 busy-poll 均有 CI 测试。

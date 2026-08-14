@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CodeRuntime } from '@deepseek-ai/dsh-code-runtime'
 import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
-import SystemPrompt, { renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool, RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import * as primeAgent from '../src/index.js'
 
@@ -42,8 +42,8 @@ afterEach(async () => {
   root = undefined
 })
 
-describe('Prime RLM Code Mode composition', () => {
-  it('uses prime_context as a persistent SDK namespace while prompt context stays metadata-only', async () => {
+describe('Prime Code Mode composition', () => {
+  it('exposes only run_code and states the control-plane policy', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-prime-code-'))
     context = new Context()
     await context.plugin(SystemPrompt, {})
@@ -59,55 +59,24 @@ describe('Prime RLM Code Mode composition', () => {
     const initialAssembly = await context.systemPrompt.assemble({ agent })
     expect(initialAssembly.tools.map(tool => tool.name)).toEqual([RUN_CODE_NAME])
     const sdk = initialAssembly.sections.find(section => section.name === 'tools:sdk')?.text
-    expect(sdk).toContain('prime_context:')
     expect(sdk).toContain('prime_refine:')
     expect(sdk).toContain('subagent:')
-    expect(initialAssembly.sections.find(section => section.name === 'prime-agent:rlm-policy')?.text)
-      .toContain('Promise.all')
-
-    const secret = 'full-context-value-that-must-not-enter-the-catalog'
-    const runtime = context.codeRuntime as BindingRuntime
-    runtime.behavior = async (request) => {
-      const primeContext = request.bindings[0]?.functions.prime_context
-      if (primeContext === undefined) throw new Error('prime_context binding missing')
-      const catalog = await primeContext({ operation: 'catalog' }) as { revision: number }
-      const put = await primeContext({
-        operation: 'put', expected_revision: catalog.revision, key: 'repo-map', kind: 'text',
-        summary: 'Repository map', value: secret,
-      })
-      return { logs: [], value: put }
-    }
-    const putResult = await context.tools.execute({
-      callId: 'run-code-put' as never,
-      name: RUN_CODE_NAME,
-      arguments: { code: 'return await tools.prime_context({ operation: "put", ... })', description: 'Store context' },
-      signal: new AbortController().signal,
-      agent,
-    })
-    expect(putResult.isError).toBe(false)
-    if (putResult.isError) throw new Error(putResult.error.message)
-    expect(putResult.value).toMatchObject({ result: { revision: 1 } })
-
-    const assembly = await context.systemPrompt.assemble({ agent })
-    const snapshot = renderContextSnapshot(assembly)
-    expect(snapshot).toContain('repo-map [text, v1')
-    expect(snapshot).not.toContain(secret)
-
-    runtime.behavior = async (request) => {
-      const primeContext = request.bindings[0]?.functions.prime_context
-      if (primeContext === undefined) throw new Error('prime_context binding missing')
-      return { logs: [], value: await primeContext({ operation: 'get', key: 'repo-map', offset: 5, limit: 12 }) }
-    }
-    const getResult = await context.tools.execute({
-      callId: 'run-code-get' as never,
-      name: RUN_CODE_NAME,
-      arguments: { code: 'return await tools.prime_context({ operation: "get", ... })', description: 'Read context' },
-      signal: new AbortController().signal,
-      agent,
-    })
-    expect(getResult.isError).toBe(false)
-    if (getResult.isError) throw new Error(getResult.error.message)
-    expect(getResult.value).toMatchObject({ result: { result: { content: secret.slice(5, 17), truncated: true } } })
+    expect(sdk).toContain('ToolCallError')
+    const policy = initialAssembly.sections.find(section => section.name === 'prime-agent:rlm-policy')?.text ?? ''
+    expect(policy).toContain('Promise.all')
+    expect(policy).toContain('Promise.allSettled')
+    expect(policy).toMatch(/bare Promise\.all only for an atomic group/)
+    expect(policy).toMatch(/best-effort probes with a per-call catch or Promise\.allSettled/)
+    expect(policy).toMatch(/side-effecting mutations sequentially/)
+    expect(policy).toContain('Realm state is the working namespace')
+    expect(policy).toContain('Reduce first, return second')
+    expect(policy).toContain('keep only the reduced form in state')
+    expect(policy).toContain('spill locator')
+    expect(policy).toContain('do not blindly repeat it')
+    expect(policy).toMatch(/sandbox denial, ask once for the minimum permission/)
+    expect(policy).toContain('rebuild from durable checkpoints')
+    expect(policy).not.toMatch(/rollback|roll back|rolled back/i)
+    expect(policy).not.toMatch(/automatic/i)
   })
 
   it('fails prompt assembly when the deployment does not select Code Mode', async () => {
@@ -122,7 +91,7 @@ describe('Prime RLM Code Mode composition', () => {
       .rejects.toThrow('must use Code Mode')
   })
 
-  it('uses resolved custom tool names in both the SDK and continual guidance', async () => {
+  it('uses the resolved custom refine tool name in the SDK', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-prime-custom-names-'))
     context = new Context()
     await context.plugin(SystemPrompt, {})
@@ -131,16 +100,17 @@ describe('Prime RLM Code Mode composition', () => {
     registerOrchestrationFixtures(context)
     await context.plugin(primeAgent, {
       stateDirectory: join(root, 'state'),
-      contextToolName: 'workspace_context',
       refineToolName: 'refine_rules',
     })
 
     const assembly = await context.systemPrompt.assemble({ agent: { id: 'custom-name-agent' } as Agent })
     const sdk = assembly.sections.find(section => section.name === 'tools:sdk')?.text
     const policy = assembly.sections.find(section => section.name === 'prime-agent:policy')?.text
-    expect(sdk).toContain('workspace_context:')
     expect(sdk).toContain('refine_rules:')
-    expect(policy).toContain('those belong in workspace_context')
-    expect(policy).not.toContain('those belong in prime_context')
+    expect(sdk).not.toContain('prime_refine:')
+    expect(policy).toContain('realm state and durable task files')
+
+    const rlmPolicy = assembly.sections.find(section => section.name === 'prime-agent:rlm-policy')?.text ?? ''
+    expect(rlmPolicy).toContain('Reduce first, return second')
   })
 })

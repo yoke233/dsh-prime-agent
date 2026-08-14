@@ -7,9 +7,8 @@ import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { registerContinual } from './continual/plugin.js'
 import type { HarnessLimits } from './continual/types.js'
+import { registerPolicy } from './policy.js'
 import { registerRealmIdentity } from './realm/identity-tool.js'
-import { registerRlm } from './rlm/plugin.js'
-import type { ContextLimits } from './rlm/types.js'
 
 export const name = 'prime-agent'
 export const inject = ['tools', 'systemPrompt']
@@ -17,40 +16,20 @@ export const inject = ['tools', 'systemPrompt']
 /** Clean v0.2 configuration; no v0.1 state or option compatibility is retained. */
 export interface Config {
   stateDirectory: string
-  contextToolName?: string
   refineToolName?: string
-  allowGlobalContext?: boolean
   allowGlobalRefinement?: boolean
   requireCodeMode?: boolean
   requireOrchestrationTools?: boolean
-  context?: Partial<ContextLimits>
   continual?: Partial<HarnessLimits>
 }
 
-/** Schemastery configuration for the RLM workspace and secondary learning layer. */
+/** Schemastery configuration for the control plane and secondary learning layer. */
 export const Config: z<Config> = z.object({
   stateDirectory: z.string().required(),
-  contextToolName: z.string().default('prime_context'),
   refineToolName: z.string().default('prime_refine'),
-  allowGlobalContext: z.boolean().default(false),
   allowGlobalRefinement: z.boolean().default(false),
   requireCodeMode: z.boolean().default(true),
   requireOrchestrationTools: z.boolean().default(true),
-  context: z.object({
-    maxEntriesPerScope: z.natural().min(1).default(128),
-    maxKeyChars: z.natural().min(1).default(160),
-    maxSummaryChars: z.natural().min(1).default(500),
-    maxValueBytes: z.natural().min(1).default(16 * 1024 * 1024),
-    maxTotalBytesPerScope: z.natural().min(1).default(256 * 1024 * 1024),
-    maxManifestBytes: z.natural().min(1024).default(2 * 1024 * 1024),
-    maxReadChars: z.natural().min(1).default(32_000),
-    maxSearchQueryChars: z.natural().min(1).default(500),
-    maxSearchMatches: z.natural().min(1).default(50),
-    maxSearchWindowChars: z.natural().min(1).default(500),
-    maxSearchChars: z.natural().min(1).default(2_000_000),
-    maxCatalogEntries: z.natural().min(1).default(64),
-    maxCatalogChars: z.natural().min(256).default(12_000),
-  }),
   continual: z.object({
     maxEntriesPerScope: z.natural().min(1).default(64),
     maxEntryIdChars: z.natural().min(1).default(128),
@@ -66,22 +45,6 @@ export const Config: z<Config> = z.object({
     maxPromptCharsPerScope: z.natural().min(256).default(16000),
   }),
 }) as unknown as z<Config>
-
-const CONTEXT_DEFAULTS: ContextLimits = {
-  maxEntriesPerScope: 128,
-  maxKeyChars: 160,
-  maxSummaryChars: 500,
-  maxValueBytes: 16 * 1024 * 1024,
-  maxTotalBytesPerScope: 256 * 1024 * 1024,
-  maxManifestBytes: 2 * 1024 * 1024,
-  maxReadChars: 32_000,
-  maxSearchQueryChars: 500,
-  maxSearchMatches: 50,
-  maxSearchWindowChars: 500,
-  maxSearchChars: 2_000_000,
-  maxCatalogEntries: 64,
-  maxCatalogChars: 12_000,
-}
 
 const CONTINUAL_DEFAULTS: HarnessLimits = {
   maxEntriesPerScope: 64,
@@ -114,27 +77,17 @@ function positiveLimits<T extends object>(defaults: T, partial: Partial<T> | und
   return limits
 }
 
-/** Register the RLM workspace, learning layer, and strict Code Mode assembly invariant. */
+/** Register the control-plane policy, learning layer, and strict Code Mode assembly invariant. */
 export function apply(ctx: Context, config: Config): void {
   const stateDirectory = config.stateDirectory.trim()
   if (stateDirectory.length === 0) throw new Error('dsh-prime-agent: stateDirectory must not be empty')
-  const contextToolName = toolName(config.contextToolName, 'prime_context', 'contextToolName')
   const refineToolName = toolName(config.refineToolName, 'prime_refine', 'refineToolName')
-  if (contextToolName === refineToolName) throw new Error('dsh-prime-agent: contextToolName and refineToolName must differ')
-  const contextLimits = positiveLimits(CONTEXT_DEFAULTS, config.context, 'context')
   const continualLimits = positiveLimits(CONTINUAL_DEFAULTS, config.continual, 'continual')
 
-  registerRlm(ctx, {
-    stateDirectory: join(stateDirectory, 'rlm'),
-    toolName: contextToolName,
-    allowGlobal: config.allowGlobalContext ?? false,
-    requireOrchestrationTools: config.requireOrchestrationTools ?? true,
-    limits: contextLimits,
-  })
+  registerPolicy(ctx, { requireOrchestrationTools: config.requireOrchestrationTools ?? true })
   registerContinual(ctx, {
     stateDirectory: join(stateDirectory, 'continual'),
     toolName: refineToolName,
-    contextToolName,
     allowGlobal: config.allowGlobalRefinement ?? false,
     limits: continualLimits,
   })
@@ -156,7 +109,6 @@ export function apply(ctx: Context, config: Config): void {
 }
 
 export { HarnessStore, renderHarnessState } from './continual/store.js'
-export { ContextStore, renderContextCatalog } from './rlm/store.js'
 export type {
   HarnessChange,
   HarnessEdit,
@@ -167,14 +119,3 @@ export type {
   HarnessState,
   HarnessTransaction,
 } from './continual/types.js'
-export type {
-  ArtifactReference,
-  ContextEntry,
-  ContextLimits,
-  ContextManifest,
-  ContextRead,
-  ContextScope,
-  ContextSearchMatch,
-  ContextSearchResult,
-  ContextValueKind,
-} from './rlm/types.js'

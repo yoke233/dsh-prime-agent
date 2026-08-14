@@ -274,9 +274,9 @@
 
 # ── prime realm ─────────────────────────────────────────────────────────────
 
-# The plugin's model-facing rows for this agent alone: the `prime_context`
-# workspace, the `prime_refine` learning layer, and the fixed
-# `prime_realm_identity` bootstrap binding the host `PrimeCodeRuntime` probes to
+# The plugin's model-facing rows for this agent alone: the `prime_refine`
+# learning layer and the fixed `prime_realm_identity` bootstrap binding the
+# host `PrimeCodeRuntime` probes to
 # decide whether this request belongs to a persistent TypeScript realm. It needs
 # no `isolate` realm because it publishes no service — every store it opens is
 # keyed by the owning agent — and it sits before `tool-presentation` only for

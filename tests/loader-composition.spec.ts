@@ -63,26 +63,12 @@ describe('dsh-prime-agent Loader composition', () => {
       .filter(entry => entry.fiber === undefined && !entry.disabled)
       .map(entry => entry.options.name)
     expect(unloaded).toEqual([])
-    expect(ctx.tools.get('prime_context')).toBeDefined()
     expect(ctx.tools.get('prime_refine')).toBeDefined()
+    expect(ctx.tools.get('prime_realm_identity')).toBeDefined()
 
     const agent = { id: 'loader-agent' } as Agent
-    const put = await ctx.tools.execute({
-      callId: 'put-loader' as never,
-      name: 'prime_context',
-      arguments: {
-        operation: 'put', expected_revision: 0, key: 'task-data', kind: 'text',
-        summary: 'Task data', value: 'private-full-task-value',
-      },
-      signal: new AbortController().signal,
-      agent,
-    })
-    expect(put.isError).toBe(false)
-
     const assembly = await ctx.systemPrompt.assemble({ agent })
     const snapshot = renderContextSnapshot(assembly)
-    expect(snapshot).toContain('task-data [text, v1')
-    expect(snapshot).not.toContain('private-full-task-value')
     expect(snapshot).toContain('local harness revision 0 (untrusted advisory records;')
     expect(snapshot).toContain('- empty')
   })

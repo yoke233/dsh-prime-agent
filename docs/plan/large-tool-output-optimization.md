@@ -4,7 +4,7 @@
 
 提案 v2(按对抗审查修订并瘦身)。只定义实现顺序、模块责任与验收标准,不表示改动已完成。
 
-前置条件:`prime-preset-mount.e2e` 与 `prime-compose.e2e` 当前失败。实施本方案前必须先修绿并冻结测试基线,否则后续 E2E 与 differential 验收没有可信参照。
+前置条件已满足:`prime-preset-mount.e2e` 与 `prime-compose.e2e` 已修绿,测试基线可信。
 
 ## 目标
 
@@ -19,7 +19,7 @@
 - 不修改任何 Tool 的 canonical output schema。
 - 不把大型 Tool 输出写入 `prime_refine`、system prompt 或 continual-learning state。
 - 不让 Prime runtime 直接写 spill 文件,不新增第二个 `SpillStore`。
-- 不把 spill 当持久业务存储;需要跨进程可靠恢复的结果仍进 `prime_context` 或外部 artifact 系统。
+- 不把 spill 当持久业务存储;需要跨进程可靠恢复的结果仍进持久任务文件或外部 artifact 系统。
 - 不在未获得实际数据前公开细碎的 head/tail 配置项。
 
 ## 已核实的现状
@@ -28,7 +28,7 @@
 - Spill policy 是 best-effort 且只处理纯文本投影(`packages/spill/spill-policy/src/index.ts:138-231`):任意非文本 content block 不 spill;outer `read` 特意跳过(防 read→spill→read 循环),nested `read` 的 dispatch log 照 spill;无 owning Session、无 backend、`saveText` 失败、notice 自身超 cap 时保持 inline。spill 失败绝不把成功 Tool 调用变成 `isError`。
 - Prime `maxOutputBytes` 是安全硬上限(`src/realm/protocol.ts` `OutputLedger`),只核算 logs/completion/失败消息,越界返回明确 `output-limit`。它与 `maxInlineBytes`(软投影预算)用途不同,不可合并。
 - Binding 参数和返回值不入 outer ledger。通用 spill 只能收缩模型/日志投影,不能在不破坏 schema 的前提下替换程序收到的值。
-- `prime_context`/`prime_refine` 自有输出已有界(catalog、offset/limit、pointer、search window、各类配额)。
+- `prime_refine` 自有输出已有界(inspect 分页与各类配额)。
 - Hard cap 发生在 spill 之前:超过 `maxOutputBytes` 的字节到不了 `tools/post-execute`。现存不对称:log overflow 丢 generation,oversized completion 返回 `output-limit` 但保留 heap。spill 解决"已结算结果污染上下文",不解决"越过安全边界后的数据恢复",两者分开设计与测试。
 - 与官方 one-shot runtime 的已知 ledger 差异:官方最小预算 4(`MIN_OUTPUT_BYTES`,code-runtime-worker-thread),Prime 最小预算 256 + generation notice reserve 160(`src/realm/protocol.ts:25`、`src/realm/runtime.ts:46`);官方 completion 走 stack-safe flat wire(`worker-json.ts`/`output-json.ts` 迭代编码),Prime 为递归校验 + `JSON.stringify` + JSON string wire 三层递归/字符串路径(`src/realm/realm-worker.ts:509-574` 及 done 消息)。
 - `state` 只有 Worker heap 硬边界;`maxStateEntries` 不度量字节。policy 必须禁止把大型原始 Tool 结果长期塞进 `state`。
@@ -39,7 +39,7 @@
 - **D2 完整 value 只在程序数据面**:程序收到完整 canonical value;Session dispatch 日志只存有界预览 + locator;模型不直接收到 nested value;禁止把 `string[]`/DTO 替换成 `{ spillPath }`。
 - **D3 spill 后五断言**:预览 + notice 合计 ≤ `maxInlineBytes`;notice 说明遗漏量、locator、恢复方法;artifact 保存完整 UTF-8 文本且与 renderer 输出逐字节一致;UTF-8 裁切无替换字符;Session 日志不持久化完整大文本。
 - **D4 spill 失败保持 best-effort**:不把成功调用改成失败,不隐藏 inline 内容;测试与诊断必须能区分"成功 spill"与"保持 inline 的降级"。
-- **D5 程序内归约 policy**:不直接 return/print 大型中间结果;先过滤、聚合、计数、哈希或抽取;优先用分页/range/pointer/search window;可复用中间结果归约后写 `prime_context`,只返回 key、摘要和定位信息;已有 locator 时定点恢复,不整段灌回上下文。**大型原始结果不长期放入 `state`。**
+- **D5 程序内归约 policy**:不直接 return/print 大型中间结果;先过滤、聚合、计数、哈希或抽取;优先用分页/range/pointer/search window;可复用中间结果归约后留在 realm `state` 或写入持久任务文件,只返回摘要和定位信息;已有 locator 时定点恢复,不整段灌回上下文。**大型原始结果不长期放入 `state`。**
 - **D6 v1 不自动恢复 hard-cap 之外的输出**:`CodeRunRequest` 无 owning Session,spill store 要求 Session-scoped owner。v1 保持 `output-limit` fail-closed;自动恢复需求先在 Harness 建立 owner-aware `CodeOutputSink` seam(Phase 4),不在 Prime 私建 overflow 文件。
 
 ## 分阶段实施
@@ -48,7 +48,7 @@
 
 #### 1.1 Policy 文案(与失败恢复方案共享,一次完成)
 
-`src/rlm/plugin.ts` 的 `orchestrationPolicy()` 与 `tests/code-mode.spec.ts` 同时被本方案和 [Tool 失败恢复方案](./tool-failure-recovery.md) Phase 1 修改。两份规则**合并为一次改动**:本方案贡献 D5 的归约规则,失败恢复方案贡献并行/重试/恢复规则。保持动态 Tool 名称解析,不硬编码自定义后的 `prime_context` 名称。测试断言 policy 含"先归约、后返回"且引用实际配置的 context Tool 名称。
+`src/policy.ts` 的 `orchestrationPolicy()` 与 `tests/code-mode.spec.ts` 同时被本方案和 [Tool 失败恢复方案](./tool-failure-recovery.md) Phase 1 修改。两份规则**合并为一次改动**:本方案贡献 D5 的归约规则,失败恢复方案贡献并行/重试/恢复规则。测试断言 policy 含"先归约、后返回"。
 
 #### 1.2 Fixture 与依赖
 
@@ -115,7 +115,7 @@ Phase 1 完成后采集:单次与累计 binding bytes、Session JSONL 增长、h
 
 ## 发布与回滚
 
-Phase 1 不增加生产配置或状态格式,policy 文案可独立回滚,无迁移。Phase 2 每项契约变化必须有 differential test 和发布说明,不动 Realm identity、`prime_context` manifest 或 continual state。Phase 3 只加默认关闭的可选预算,回滚配置即恢复。Phase 4 属上游 interface,独立设计评审发布。
+Phase 1 不增加生产配置或状态格式,policy 文案可独立回滚,无迁移。Phase 2 每项契约变化必须有 differential test 和发布说明,不动 Realm identity 或 continual state。Phase 3 只加默认关闭的可选预算,回滚配置即恢复。Phase 4 属上游 interface,独立设计评审发布。
 
 ## 完成标准(Phase 1)
 

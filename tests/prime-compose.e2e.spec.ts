@@ -9,6 +9,8 @@ import { CallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import LocalSpillStore from '@deepseek-ai/dsh-spill-local'
+import * as SpillPolicy from '@deepseek-ai/dsh-spill-policy'
 
 const PATCH_PATH = resolve(import.meta.dirname, '../cordis.patch.yml')
 const PACKAGED_PRESET = resolve(import.meta.dirname, '../agent-presets/prime')
@@ -32,7 +34,8 @@ function testAgent(id: string, cwd: string): { agent: Agent, events: { type: str
   const agent = {
     id: SessionId(id),
     session: {
-      header: { cwd },
+      // `header.id` is the spill owner the composed policy reads.
+      header: { id: SessionId(id), cwd },
       append: (type: string, data: unknown) => { events.push({ type, data }) },
     },
   } as unknown as Agent
@@ -70,6 +73,7 @@ describe('Prime host patch composition', () => {
   it('replaces the official runtime, authenticates through the real tool, and places the preset', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-prime-compose-'))
     const home = join(root, 'home')
+    const spillRoot = join(root, 'spill')
     vi.stubEnv('DSH_HOME', home)
     const configPath = join(root, 'cordis.yml')
     await writeFile(configPath, `
@@ -100,12 +104,53 @@ describe('Prime host patch composition', () => {
       import.meta.url,
     )
 
-    const entries = [...ctx.loader.entries()]
-    const official = entries.find(entry => entry.options.id === 'code-runtime')
-    expect(official?.options.disabled).toBe(true)
-    // The inserted row is nested under the root Include rather than returned by
-    // loader.entries(); the authenticated retained-state assertions below are
-    // the Prime-only observable behavior at the published runtime seam.
+    // The spill chain mounts post-boot from the pinned harness SOURCE tree
+    // rather than as loader rows: loader entries resolve through node_modules,
+    // and the registry's @deepseek-ai/dsh-spill-policy (0.0.1-rc.1 at the time
+    // of writing) lags the pinned checkout every other test in this suite
+    // verifies against, so a loader row would compose a different policy than
+    // the one the plan's focused E2E pins. The composition property under test
+    // — owner, backend, and projection wired against the loader-booted profile
+    // — is unchanged.
+    await ctx.plugin(LocalSpillStore, { root: spillRoot })
+    await ctx.plugin(SpillPolicy, { maxInlineBytes: 1024 })
+
+    // Project each row before asserting. A loader `Entry` holds `ctx`, a cordis
+    // Context proxy that throws on any property it does not provide; vitest's
+    // diff printer probes `$$typeof`, so asserting on entries themselves fails
+    // with that crash instead of the assertion's own difference.
+    // `loader.entries()` recurses into nested subtrees, so the rows the patch
+    // inserted into the root Include appear here alongside the config's own.
+    const rows = [...ctx.loader.entries()].map(entry => ({
+      id: entry.options.id,
+      name: entry.options.name,
+      disabled: entry.options.disabled ?? false,
+      mounted: Boolean(entry.fiber),
+    }))
+
+    // The runtime swap, both halves: the official row is retired without a
+    // fiber, and the Prime row the patch inserted in its place is live.
+    expect(rows).toContainEqual({
+      id: 'code-runtime',
+      name: '@deepseek-ai/dsh-code-runtime-worker-thread',
+      disabled: true,
+      mounted: false,
+    })
+    expect(rows).toContainEqual({
+      id: 'prime-code-runtime',
+      name: 'dsh-prime-agent/runtime',
+      disabled: false,
+      mounted: true,
+    })
+    // The patch's second insert lands from the same overlay. Its disable half
+    // targets a host row this minimal config never loads, so only the insert
+    // is observable here; `tests/packaging-boundary.spec.ts` pins the target.
+    expect(rows).toContainEqual({
+      id: 'prime-subagent-report',
+      name: 'dsh-prime-agent/subagent-report',
+      disabled: false,
+      mounted: true,
+    })
 
     const alpha = testAgent('compose-alpha', root)
     const beta = testAgent('compose-beta', root)
@@ -127,5 +172,31 @@ describe('Prime host patch composition', () => {
       expect(await readFile(join(placed, filename), 'utf8'))
         .toBe(await readFile(join(PACKAGED_PRESET, filename), 'utf8'))
     }
+
+    // Plan 1.4 composition acceptance: the loader-composed profile routes a
+    // large outer result through the real spill chain — owner, backend, and
+    // policy wired by the config above, not by hand in the test.
+    const body = 'SPILL-'.repeat(1000)
+    const big = await ctx.tools.execute({
+      callId: CallId(`prime-compose-${++callNumber}`),
+      name: RUN_CODE_NAME,
+      arguments: { code: 'return "SPILL-".repeat(1000)', description: 'Exercise the composed spill chain' },
+      signal: testSignal,
+      agent: alpha.agent,
+    })
+    expect(big.isError).toBe(false)
+    const bigValue = completion(big)
+    expect(bigValue.result).toBe(body)
+
+    const bigContent = big.content
+      .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
+      .map(block => block.text).join('')
+    expect(Buffer.byteLength(bigContent, 'utf8')).toBeLessThanOrEqual(1024)
+    expect(bigContent).toContain('Full formatted result stored at:')
+    expect(bigContent).not.toContain(body)
+
+    const locator = /Full formatted result stored at: (.+?)\. Use read with/.exec(bigContent)?.[1]
+    if (locator === undefined) throw new Error(`no spill locator in: ${bigContent.slice(-300)}`)
+    expect(await readFile(locator, 'utf8')).toContain(body)
   })
 })

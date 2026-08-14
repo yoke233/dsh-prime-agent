@@ -20,7 +20,7 @@ Prime Agent 把 Agent 视为长期运行的计算过程，而不是一次性聊�
 
 模型上下文只保留当前决策需要的信息。大文件、搜索结果和中间数据留在模型请求之外，通过 catalog、范围读取、结构化选择或搜索窗口按需进入推理。
 
-在 DSH 适配中，这一原则由 `prime_context` 实现：完整值进入内容寻址 blob，动态 prompt 只出现元数据 catalog。TypeScript `run_code` 的 heap 不持久，但命名数据可以跨 turn 恢复。
+在 DSH 适配中，这一原则由持久 Realm 与程序内归约实现：大结果在 `run_code` 程序内过滤、聚合后留在 Realm `state`，需要跨重启存活的检查点写入持久任务文件；进入上下文的只有当前决策需要的摘要。
 
 ### 控制面应当可编程
 
@@ -42,7 +42,7 @@ Prime 的 Python shim 表达意图，Host 验证并执行。凭据、Session、A
 
 DSH 插件遵循同一边界：
 
-- `prime_context` 拥有自己的 manifest/blob 完整性与配额。
+- 持久 Realm 拥有自己的身份、generation 与资源治理。
 - Agent、Subagent、Jobs、Goal、Session 和 Code Runtime 继续拥有各自权威状态。
 - 插件只组合公开服务，不复制 registry 或绕过权限。
 - 模型可见工具调用与结果仍进入 DSH 日志路径。
@@ -89,7 +89,7 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 
 | Prime Agent | dsh-prime-agent / DSH |
 | --- | --- |
-| 持久 IPython 控制面 | v0.2：Code Mode + `prime_context`；v0.3：Persistent TypeScript Realm；IPython 仅作语义参考 |
+| 持久 IPython 控制面 | Code Mode + Persistent TypeScript Realm；IPython 仅作语义参考 |
 | Python 变量/文件上下文 | manifest catalog + content-addressed blobs |
 | `rlm()` admission handle | 后台 Subagent Job handle |
 | foreground independent work | Code Mode `Promise.all` 调用真实工具/Subagent |
@@ -106,8 +106,8 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 
 好的适配不是让 DSH 看起来像在运行 Prime 的 Python，而是让它拥有同一种工作感觉：模型用代码协调能力，把上下文当作可寻址状态，让 child 独立运行，并把稳定经验与过程数据分开。
 
-0.2 已交付 `prime_context + PTC/Code Mode + Subagent/Jobs + prime_refine` 闭环。DSH PTC 已经提供 Prime 式的可编程工具与递归 Agent 编排，`prime_context` 提供上下文外置；进一步对照确认的主要保真差距是持久计算 namespace。Prime 用 IPython 让函数、import、对象、索引与工具编排代码跨 turn 延续；`prime_context` 只能恢复显式序列化的数据。
+当前已交付 PTC/Code Mode + Persistent Realm + Subagent/Jobs + `prime_refine` 闭环。DSH PTC 提供 Prime 式的可编程工具与递归 Agent 编排；持久 Realm 让函数、对象、索引与工具编排代码跨 run 延续，对应 Prime 的持久计算 namespace。
 
-我们学习这一不变量，而不绑定其实现语言。v0.3 计划保留 DSH 原生 Code Mode bridge，通过带 challenge proof 的 `prime_realm_identity` binding handshake 取得不透明 Session Realm 身份；hybrid Runtime 将只让 Prime Session 进入 Persistent TypeScript Worker，其他请求继续委托官方 one-shot Worker。`prime_context` 仍是可靠数据层，IPython 只用于参考 cell 连续性、中断、snapshot 限制与恢复语义。Context Capsule 与 Agent family 顺延到 v0.4，自动学习顺延到 v0.5。具体边界见 [v0.3 路线](v0.3-roadmap.md)。
+我们学习这一不变量，而不绑定其实现语言。v0.3 保留 DSH 原生 Code Mode bridge，通过带 challenge proof 的 `prime_realm_identity` binding handshake 取得不透明 Session Realm 身份；hybrid Runtime 只让 Prime Session 进入 Persistent TypeScript Worker，其他请求继续委托官方 one-shot Worker。跨重启的可靠数据层是持久任务文件，IPython 只用于参考 cell 连续性、中断、snapshot 限制与恢复语义。Context Capsule 与 Agent family 顺延到 v0.4，自动学习顺延到 v0.5。具体边界见 [v0.3 路线](v0.3-roadmap.md)。
 
 Agent family 的学习同样关注控制语义而不是 API 名称：child 的中间发现应尽可能进入 parent 当前计算的最近 step，而不是无条件积压成多个独立后续轮次。DSH 当前默认 report 路由与此仍有差距；插件先记录并推动宿主提供调度扩展点，不直接修改宿主实现。

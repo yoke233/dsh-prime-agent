@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -10,6 +10,8 @@ import { CallId, createUserMessage, type GenerateOptions, type StreamChunk } fro
 import { installLlmReplay, type ReplayEntry } from '@deepseek-ai/dsh-llm-replay'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
+import LocalSpillStore from '@deepseek-ai/dsh-spill-local'
+import * as SpillPolicy from '@deepseek-ai/dsh-spill-policy'
 import { registerRealmIdentity } from '../src/realm/identity-tool.js'
 import * as primeRuntime from '../src/runtime.js'
 
@@ -71,11 +73,15 @@ describe('Prime realm across deterministic agent-loop turns', () => {
       { kind: 'chunks', chunks: textResponse('stored') },
       { kind: 'chunks', chunks: toolCallResponse('read-secret', 'return state.secret') },
       { kind: 'chunks', chunks: textResponse('424242') },
+      { kind: 'chunks', chunks: toolCallResponse('spill-large', 'return "SPILL-".repeat(1000)') },
+      { kind: 'chunks', chunks: textResponse('spilled') },
     ]
     await writeFile(overrideFile, JSON.stringify(script))
 
     ctx = new Context()
     await mountAgentLoopTestDependencies(ctx, { tools: { mode: 'code' } })
+    await ctx.plugin(LocalSpillStore, { root: join(root, 'spill') })
+    await ctx.plugin(SpillPolicy, { maxInlineBytes: 1024 })
     await ctx.plugin(AgentLoop, { agents: [] })
     await ctx.plugin(primeRuntime, { stateDirectory })
     registerRealmIdentity(ctx, { stateDirectory })
@@ -96,9 +102,10 @@ describe('Prime realm across deterministic agent-loop turns', () => {
     })
     await send(ctx, agent, 'Store the sentinel with run_code.')
     await send(ctx, agent, 'Read the sentinel with run_code.')
+    await send(ctx, agent, 'Return the large report with run_code.')
     replay.assertConsumed()
 
-    expect(requests).toHaveLength(4)
+    expect(requests).toHaveLength(6)
     for (const request of requests) {
       expect(request.tools?.map(tool => tool.name)).toEqual([RUN_CODE_NAME])
     }
@@ -109,21 +116,38 @@ describe('Prime realm across deterministic agent-loop turns', () => {
     }
 
     const calls = agent.session.events.filter(event => event.type === 'tool/call')
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(3)
     expect(calls.every(event => event.data.name === RUN_CODE_NAME)).toBe(true)
 
     const results = agent.session.events.filter(event => event.type === 'tool/result')
-    expect(results).toHaveLength(2)
-    expect(JSON.stringify(results.at(-1)?.data.message)).toContain('424242')
+    expect(results).toHaveLength(3)
+    expect(JSON.stringify(results[1]?.data.message)).toContain('424242')
+
+    // Plan 1.4: the DURABLE outer `tool/result` the agent loop committed for
+    // the oversized completion is bounded — preview plus locator, never the
+    // full body — and the artifact recovers the complete text.
+    const body = 'SPILL-'.repeat(1000)
+    expect(JSON.stringify(results[2]?.data.message)).not.toContain(body)
+    const spilled = results[2]?.type === 'tool/result'
+      ? results[2].data.message.content
+        .filter(block => block.type === 'tool-result')
+        .flatMap(block => block.content)
+        .filter(block => block.type === 'text').map(block => block.text).join('')
+      : ''
+    expect(spilled).toContain('Full formatted result stored at:')
+    expect(Buffer.byteLength(spilled, 'utf8')).toBeLessThanOrEqual(1024)
+    const locator = /Full formatted result stored at: (.+?)\. Use read with/.exec(spilled)?.[1]
+    if (locator === undefined) throw new Error(`no spill locator in: ${spilled.slice(-300)}`)
+    expect(await readFile(locator, 'utf8')).toContain(body)
 
     const handshakes = agent.session.events.filter(event => event.type === 'tool/code-dispatch'
       && event.data.name === 'prime_realm_identity')
-    expect(handshakes).toHaveLength(2)
+    expect(handshakes).toHaveLength(3)
 
     const final = agent.session.events.findLast(event => event.type === 'assistant/message')
     const finalText = final?.type === 'assistant/message'
       ? final.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
       : ''
-    expect(finalText).toBe('424242')
+    expect(finalText).toBe('spilled')
   })
 })

@@ -10,8 +10,6 @@ export interface ContinualConfig {
     allowGlobal: boolean;
     /** Registered model-facing tool name. */
     toolName: string;
-    /** Resolved RLM workspace tool name used by guidance. */
-    contextToolName: string;
     limits: HarnessLimits;
 }
 /** Register the tool plus static and replayable dynamic prompt contributions. */
