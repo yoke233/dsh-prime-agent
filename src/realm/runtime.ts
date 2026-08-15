@@ -8,7 +8,7 @@
  * request is handed to the official one-shot runtime UNCHANGED. What is
  * deliberately impossible is the third path: a Prime request whose handshake
  * fails never falls back to one-shot, because a session that silently changed
- * state semantics mid-conversation is worse than a session that fails loudly.
+ * persistence semantics mid-conversation is worse than a session that fails loudly.
  * @module dsh-prime-agent/realm/runtime
  */
 
@@ -20,7 +20,6 @@ import type { CodeBindingFunction, CodeRunFailure, CodeRunRequest, CodeRunResult
 import { RealmIdentityStore } from './identity.js'
 import type { RealmVerification } from './identity.js'
 import { HIDDEN_BINDING_MEMBER, MIN_OUTPUT_BYTES, OutputLedger } from './protocol.js'
-import type { RealmStateKeys } from './protocol.js'
 import { PersistentRealm } from './realm.js'
 import type { RealmBudgets } from './realm.js'
 
@@ -39,42 +38,11 @@ const MAX_SWEEP_INTERVAL_MS = 60_000
 
 /**
  * Bytes withheld from each realm's own output budget to pay for the trailing
- * state notice. The notice is appended after the realm finalized its ledger, so
- * without the reserve a program that filled its budget exactly would push the
- * result past the deployment's `maxOutputBytes`. Comfortably above the longest
- * notice this module can produce: the generation sentence plus the key census,
- * which {@link MAX_STATE_LINE_BYTES} bounds on its own.
+ * namespace lifecycle notice. The notice is appended after the realm finalized
+ * its ledger, so without the reserve a program that filled its budget exactly
+ * would push the result past the deployment's `maxOutputBytes`.
  */
 const NOTICE_RESERVE_BYTES = 512
-
-/**
- * Ceilings on the key census line. Three of them, because each bounds a
- * different thing the model's own program controls: how many names it holds,
- * how long one name may be, and how much of {@link NOTICE_RESERVE_BYTES} the
- * whole line may spend. Whatever they cut is counted, never silently dropped.
- */
-const MAX_STATE_KEYS = 24
-const MAX_STATE_KEY_CHARS = 40
-const MAX_STATE_LINE_BYTES = 320
-
-/** Charged before the first key: the line's own prefix plus the longest `+N more` tail. */
-const STATE_LINE_OVERHEAD_BYTES = 64
-
-/**
- * Characters a key name may not contribute to a one-line notice: controls and
- * formats (a newline would forge a second log entry, a bidi override would
- * reorder the line), line and paragraph separators, and the lone surrogates a
- * truncation can leave behind.
- */
-const UNSAFE_KEY_CHARS = /[\p{C}\p{Zl}\p{Zp}]/gu
-
-/**
- * Reclaimed-realm records kept for their state-loss report. Dropping the oldest
- * past this point costs only the generation NUMBER's continuity for a realm
- * nobody has touched in a very long time: without a record the realm is rebuilt
- * as a first run, which reports `started with an empty state` — still true.
- */
-const MAX_LOST_HEAP_RECORDS = 1024
 
 /** Everything the runtime needs that is not a per-run input. */
 export interface PrimeCodeRuntimeOptions {
@@ -94,22 +62,10 @@ export interface PrimeCodeRuntimeOptions {
   maxIdleMs: number
 }
 
-/** One live realm plus the generation history of the realm objects that preceded it. */
-interface PoolEntry {
-  realm: PersistentRealm
-  /**
-   * Generations already consumed for this realm id by EARLIER realm objects, so
-   * the number the model sees never restarts after a reclamation.
-   */
-  generationBase: number
-  /**
-   * A reclamation destroyed this id's previous heap and no run has reported it
-   * yet. Sticky until a run actually dispatches, so a run that never reaches a
-   * worker cannot swallow the report.
-   */
-  reclaimed: boolean
-  /** Whether any run has reached a worker on this realm object yet. */
-  everDispatched: boolean
+/** One Prime call's place in the pre-realm admission order. */
+interface PrimeAdmissionTurn {
+  previous: Promise<void>
+  release: () => void
 }
 
 /** Render an unknown thrown value as a message, `Error` or not, without throwing again. */
@@ -191,54 +147,11 @@ function parseHandshake(value: unknown): { token: string; proof: string } | unde
   }
 }
 
-/**
- * The bounded state line appended to every realm run.
- *
- * `retained` is the only claim a model may act on, so it is made only when this
- * run executed on a worker an earlier run already used. A first run — brand-new
- * realm, a realm rebuilt after reclamation, or a host restart, all of which
- * present as a fresh worker — says `started` instead, which is true whether or
- * not a heap existed before.
- */
-function generationNotice(generation: number, fresh: boolean, lost: boolean): string {
-  if (!fresh) return `[prime-realm] generation ${generation} retained`
-  return lost
-    ? `[prime-realm] generation ${generation} started; live-only state from the previous generation was lost`
-    : `[prime-realm] generation ${generation} started with an empty state`
-}
-
-/** Truncate and neutralize one model-chosen key name so it cannot reshape the notice. */
-function safeKeyName(name: string): string {
-  // Clipped BEFORE the substitution, so a cut through a surrogate pair is
-  // neutralized by the same pass as everything else.
-  const clipped = name.length > MAX_STATE_KEY_CHARS ? `${name.slice(0, MAX_STATE_KEY_CHARS)}…` : name
-  return clipped.replace(UNSAFE_KEY_CHARS, '�')
-}
-
-/**
- * The variable-browser line: which names `state` holds now the run has settled,
- * never what is in them. Keys are measured the way the ledger measures output,
- * so the line cannot outgrow its share of the reserve however a program names
- * its entries; the count of everything that did not fit is what tells the model
- * it is looking at a truncated census rather than a complete one.
- *
- * An empty `state` produces NO line: there is nothing to browse, and a run that
- * wrote nothing should not be told about it every time.
- */
-function stateKeysNotice(keys: RealmStateKeys): string | undefined {
-  if (keys.names.length === 0) return undefined
-  const shown: string[] = []
-  let bytes = STATE_LINE_OVERHEAD_BYTES
-  for (const name of keys.names) {
-    const safe = safeKeyName(name)
-    const cost = Buffer.byteLength(JSON.stringify(safe), 'utf8')
-    if (shown.length >= MAX_STATE_KEYS || bytes + cost > MAX_STATE_LINE_BYTES) break
-    bytes += cost
-    shown.push(safe)
-  }
-  const omitted = keys.omitted + keys.names.length - shown.length
-  const more = omitted > 0 ? `${shown.length > 0 ? ', ' : ''}… +${omitted} more` : ''
-  return `[prime-realm] state keys: ${shown.join(', ')}${more}`
+/** Render the one lifecycle fact a fresh worker needs to expose. */
+function namespaceNotice(fresh: boolean, lost: boolean): string | undefined {
+  if (lost) return '[prime-realm] live namespace restarted; previous bindings were lost'
+  if (fresh) return '[prime-realm] live namespace started empty'
+  return undefined
 }
 
 /** Sweep often enough that a realm is reclaimed within 1.5x its idle ceiling. */
@@ -285,21 +198,14 @@ export class PrimeCodeRuntime extends CodeRuntime {
   private readonly outputBytes: number
   private readonly maxActiveRealms: number
   private readonly maxIdleMs: number
-  private readonly pool = new Map<string, PoolEntry>()
-  /**
-   * Realm ids whose heap this runtime destroyed, mapped to the generation count
-   * they had reached. Presence means "the next run for this id must be told its
-   * live-only state is gone"; the record is consumed by that run. One small
-   * record per reclaimed realm id survives, which is what makes a reclamation
-   * distinguishable from a first-ever run.
-   *
-   * Deliberately PROCESS-LOCAL, and correct without durable state: realm ids
-   * persist, but a restarted host presents every realm as a fresh worker, and a
-   * fresh worker never reports `retained`. What a restart loses is only the
-   * continuity of the generation NUMBER, not the truthfulness of the claim.
-   */
-  private readonly lostHeaps = new Map<string, number>()
+  private readonly pool = new Map<string, PersistentRealm>()
   private readonly disposals = new Set<Promise<void>>()
+  // A request's realm id is authenticated asynchronously, so its place must be
+  // reserved before the handshake can finish out of order. The turn ends as
+  // soon as realm.run() has enqueued the cell; realm execution stays per-realm.
+  private admissionTail = Promise.resolve()
+  private releaseAdmissionStop!: () => void
+  private readonly admissionStopped = new Promise<void>((resolve) => { this.releaseAdmissionStop = resolve })
   private disposed = false
 
   constructor(ctx: Context, options: PrimeCodeRuntimeOptions) {
@@ -349,6 +255,10 @@ export class PrimeCodeRuntime extends CodeRuntime {
     }
 
     const challenge = randomBytes(CHALLENGE_BYTES)
+    const admission = this.reserveAdmission()
+    const finish = (action: () => CodeRunResult | Promise<CodeRunResult>): Promise<CodeRunResult> => {
+      return this.finishAdmission(admission, action)
+    }
     let issued: unknown
     try {
       issued = await (bootstrap.value as CodeBindingFunction)({
@@ -358,27 +268,55 @@ export class PrimeCodeRuntime extends CodeRuntime {
     } catch (error: unknown) {
       // An abort that fires while the bootstrap call is in flight surfaces as
       // the tool's own rejection; it is still an abort, not a failed handshake.
-      if (signal?.aborted) return this.aborted(signal)
-      return this.exception(`realm handshake binding failed: ${messageOf(error)}`)
+      if (signal?.aborted) return await finish(() => this.aborted(signal))
+      return await finish(() => this.exception(`realm handshake binding failed: ${messageOf(error)}`))
     }
-    if (signal?.aborted) return this.aborted(signal)
+    if (signal?.aborted) return await finish(() => this.aborted(signal))
 
     const handshake = parseHandshake(issued)
-    if (handshake === undefined) return this.exception('realm handshake returned a malformed response')
+    if (handshake === undefined) return await finish(() => this.exception('realm handshake returned a malformed response'))
 
     let verification: RealmVerification
     try {
       verification = await this.identity.verify(handshake.token, handshake.proof, challenge)
     } catch (error: unknown) {
-      return this.exception(storageFailure(error))
+      return await finish(() => this.exception(storageFailure(error)))
     }
-    if (!verification.ok) return this.exception(`realm handshake rejected: ${verification.reason}`)
-    if (signal?.aborted) return this.aborted(signal)
+    if (!verification.ok) return await finish(() => this.exception(`realm handshake rejected: ${verification.reason}`))
 
-    return await this.execute(verification.realmId, request)
+    return await finish(() => signal?.aborted
+      ? this.aborted(signal)
+      : this.execute(verification.realmId, request))
   }
 
-  /** Admit the run into its realm and append the state notice the model needs. */
+  /** Reserve call order before authentication reveals which realm owns it. */
+  private reserveAdmission(): PrimeAdmissionTurn {
+    const previous = this.admissionTail
+    let release!: () => void
+    this.admissionTail = new Promise<void>((resolve) => { release = resolve })
+    return { previous, release }
+  }
+
+  /**
+   * Start one authenticated outcome in call order, then immediately release the
+   * next admission. `action()` synchronously enqueues a valid cell before it
+   * returns its settlement promise, so this never serializes different realms.
+   */
+  private async finishAdmission(
+    turn: PrimeAdmissionTurn,
+    action: () => CodeRunResult | Promise<CodeRunResult>,
+  ): Promise<CodeRunResult> {
+    await Promise.race([turn.previous, this.admissionStopped])
+    let outcome: CodeRunResult | Promise<CodeRunResult>
+    try {
+      outcome = action()
+    } finally {
+      turn.release()
+    }
+    return await outcome
+  }
+
+  /** Admit the run into its realm and append a fresh-namespace notice when needed. */
   private async execute(realmId: string, request: CodeRunRequest): Promise<CodeRunResult> {
     // Re-checked AFTER the handshake awaits: teardown may have run while the
     // bootstrap tool call was in flight, and admitting here would build a realm
@@ -386,54 +324,30 @@ export class PrimeCodeRuntime extends CodeRuntime {
     if (this.disposed) {
       return this.failure({ kind: 'abort', message: 'runtime disposed' })
     }
-    const entry = this.acquire(realmId)
-    if (entry === undefined) {
+    const realm = this.acquire(realmId)
+    if (realm === undefined) {
       return this.failure({ kind: 'exception', message: 'realm admission rejected: active realm limit reached' })
     }
-    // The realm reports at DISPATCH, so the notice names the generation this
-    // program actually ran in even when it waited behind other runs, and a run
-    // that never reached a worker leaves the pending report for the one that does.
-    let dispatched: string | undefined
-    // Only a run the worker itself settled reports a census; one the host ended
-    // has no heap left to describe.
-    let census: RealmStateKeys | undefined
-    const result = await entry.realm.run(request, ({ generation, fresh, stateLost }) => {
-      dispatched = generationNotice(entry.generationBase + generation, fresh, stateLost || entry.reclaimed)
-      entry.reclaimed = false
-      entry.everDispatched = true
-    }, (keys) => { census = keys })
-    // A run that never reached a worker reports the realm's CURRENT standing
-    // without consuming it, so the run that does dispatch still gets told.
-    const pendingLoss = entry.realm.generationNoticePending || entry.reclaimed
-    const notice = dispatched ?? generationNotice(
-      entry.generationBase + entry.realm.generation,
-      pendingLoss || !entry.everDispatched,
-      pendingLoss,
-    )
+    // The realm reports at DISPATCH, so a run that never reaches a worker neither
+    // emits nor consumes the pending loss report.
+    let notice: string | undefined
+    const result = await realm.run(request, ({ fresh, namespaceLost }) => {
+      notice = namespaceNotice(fresh, namespaceLost)
+    })
+    if (notice === undefined) return result
     // Appended host-side rather than through the worker's ledger, which is why
-    // every realm runs against a budget reduced by `NOTICE_RESERVE_BYTES`. The
-    // census goes FIRST: the generation sentence is the last word on the run,
-    // being the line that says whether the heap may be trusted at all.
-    const keysNotice = census === undefined ? undefined : stateKeysNotice(census)
-    if (keysNotice === undefined) return { ...result, logs: [...result.logs, notice] }
-    return { ...result, logs: [...result.logs, keysNotice, notice] }
+    // every realm runs against a budget reduced by `NOTICE_RESERVE_BYTES`.
+    return { ...result, logs: [...result.logs, notice] }
   }
 
   /** The realm for one id, creating or reclaiming as the pool ceiling allows. */
-  private acquire(realmId: string): PoolEntry | undefined {
+  private acquire(realmId: string): PersistentRealm | undefined {
     const existing = this.pool.get(realmId)
     if (existing !== undefined) return existing
     if (this.pool.size >= this.maxActiveRealms && !this.reclaimLeastRecentlyUsed()) return undefined
-    const generationBase = this.lostHeaps.get(realmId)
-    this.lostHeaps.delete(realmId)
-    const entry: PoolEntry = {
-      realm: new PersistentRealm({ realmId, budgets: this.budgets }),
-      generationBase: generationBase ?? 0,
-      reclaimed: generationBase !== undefined,
-      everDispatched: false,
-    }
-    this.pool.set(realmId, entry)
-    return entry
+    const realm = new PersistentRealm({ realmId, budgets: this.budgets })
+    this.pool.set(realmId, realm)
+    return realm
   }
 
   /**
@@ -443,10 +357,10 @@ export class PrimeCodeRuntime extends CodeRuntime {
    */
   private reclaimLeastRecentlyUsed(): boolean {
     let victimId: string | undefined
-    let victim: PoolEntry | undefined
+    let victim: PersistentRealm | undefined
     for (const [candidateId, candidate] of this.pool) {
-      if (!candidate.realm.idle) continue
-      if (victim === undefined || candidate.realm.lastUsedAt < victim.realm.lastUsedAt) {
+      if (!candidate.idle) continue
+      if (victim === undefined || candidate.lastUsedAt < victim.lastUsedAt) {
         victim = candidate
         victimId = candidateId
       }
@@ -463,9 +377,9 @@ export class PrimeCodeRuntime extends CodeRuntime {
     // register a disposal nobody is waiting on any more.
     if (this.disposed) return
     const deadline = Date.now() - this.maxIdleMs
-    for (const [realmId, entry] of [...this.pool]) {
-      if (!entry.realm.idle || entry.realm.lastUsedAt > deadline) continue
-      this.reclaim(realmId, entry)
+    for (const [realmId, realm] of [...this.pool]) {
+      if (!realm.idle || realm.lastUsedAt > deadline) continue
+      this.reclaim(realmId, realm)
     }
   }
 
@@ -475,16 +389,9 @@ export class PrimeCodeRuntime extends CodeRuntime {
    * terminating worker can briefly overlap its replacement; the ceiling governs
    * admission, not the instantaneous thread count.
    */
-  private reclaim(realmId: string, entry: PoolEntry): void {
+  private reclaim(realmId: string, realm: PersistentRealm): void {
     this.pool.delete(realmId)
-    this.lostHeaps.set(realmId, entry.generationBase + entry.realm.generation)
-    // Insertion-ordered, so the first key is the oldest record.
-    while (this.lostHeaps.size > MAX_LOST_HEAP_RECORDS) {
-      const oldest = this.lostHeaps.keys().next()
-      if (oldest.done === true) break
-      this.lostHeaps.delete(oldest.value)
-    }
-    const disposal = entry.realm.dispose()
+    const disposal = realm.dispose()
     this.disposals.add(disposal)
     void disposal.finally(() => { this.disposals.delete(disposal) })
   }
@@ -495,10 +402,10 @@ export class PrimeCodeRuntime extends CodeRuntime {
    */
   private async teardown(): Promise<void> {
     this.disposed = true
-    const entries = [...this.pool.values()]
+    this.releaseAdmissionStop()
+    const realms = [...this.pool.values()]
     this.pool.clear()
-    this.lostHeaps.clear()
-    await Promise.all([...entries.map(entry => entry.realm.dispose()), ...this.disposals])
+    await Promise.all([...realms.map(realm => realm.dispose()), ...this.disposals])
   }
 
   /**

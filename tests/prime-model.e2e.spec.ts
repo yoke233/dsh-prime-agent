@@ -42,7 +42,7 @@ afterEach(async () => {
 })
 
 describe.skipIf(!process.env.DEEPSEEK_API_KEY)('Prime realm with a real DeepSeek model', () => {
-  it('retains state across two agent turns while exposing only run_code', async () => {
+  it('retains a live binding across two agent turns while exposing only run_code', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-prime-model-'))
     const stateDirectory = join(root, 'state')
 
@@ -50,7 +50,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('Prime realm with a real DeepSeek
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, {
-      persona: 'You are testing persistent Code Mode state. Follow the user instructions exactly.',
+      persona: 'You are testing persistent Code Mode bindings. Follow the user instructions exactly.',
     })
     await ctx.plugin(ToolRuntime, { mode: 'code' })
     await ctx.plugin(AgentRegistry)
@@ -66,12 +66,12 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('Prime realm with a real DeepSeek
     await send(
       ctx,
       agent,
-      `Use one run_code program to set state.secret to "${SENTINEL}" and return it. After the tool result, reply exactly STORED.`,
+      `Use one run_code cell to declare const secret = "${SENTINEL}" and make secret its final expression. After the tool result, reply exactly STORED.`,
     )
     await send(
       ctx,
       agent,
-      'Use one run_code program to return state.secret. Reply with exactly the returned value.',
+      'Use one run_code cell whose final expression is secret. Reply with exactly the returned value.',
     )
 
     const headers = agent.session.events.filter(event => event.type === 'request/header')

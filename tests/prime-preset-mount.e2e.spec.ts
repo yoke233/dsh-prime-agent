@@ -127,12 +127,11 @@ describe('Prime packaged preset realm rows', () => {
 
     const first = await runCode(
       handle.agent,
-      'state.presetSentinel = "mounted-prime"; return state.presetSentinel',
+      'const presetSentinel = "mounted-prime"; presetSentinel',
     )
     expect(first.result).toBe('mounted-prime')
 
-    const retained = await runCode(handle.agent, 'return state.presetSentinel')
-    expect(retained.result).toBe('mounted-prime')
-    expect(retained.logs.at(-1)).toContain('retained')
+    const second = await runCode(handle.agent, 'presetSentinel')
+    expect(second.result).toBe('mounted-prime')
   })
 })

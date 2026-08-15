@@ -38,7 +38,7 @@
     <rect x="912" y="56" width="232" height="120" rx="12" fill="#FDF6EC" stroke="#C97B22" stroke-width="1.5"/>
     <text x="1028" y="102" font-size="20" fill="#20262E" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">持久 Realm Worker</text>
     <text x="1028" y="130" font-size="18" fill="#4A5262" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">每个会话一个</text>
-    <text x="1028" y="156" font-size="18" fill="#8A8FA0" text-anchor="middle">state &#183; generations</text>
+    <text x="1028" y="156" font-size="18" fill="#8A8FA0" text-anchor="middle">live namespace &#183; cells</text>
 
     <!-- one-shot -->
     <rect x="912" y="244" width="232" height="120" rx="12" fill="#FFFFFF" stroke="#DDD7C6" stroke-width="1.5"/>

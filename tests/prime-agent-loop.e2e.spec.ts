@@ -64,16 +64,16 @@ afterEach(async () => {
 })
 
 describe('Prime realm across deterministic agent-loop turns', () => {
-  it('keeps state while every model request and outer call uses only run_code', async () => {
+  it('keeps live bindings while every model request and outer call uses only run_code', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-prime-agent-loop-'))
     const stateDirectory = join(root, 'state')
     const overrideFile = join(root, 'replay.override.json')
     const script: ReplayEntry[] = [
-      { kind: 'chunks', chunks: toolCallResponse('store-secret', 'state.secret = 424242; return "stored"') },
+      { kind: 'chunks', chunks: toolCallResponse('store-secret', 'const secret = 424242; "stored"') },
       { kind: 'chunks', chunks: textResponse('stored') },
-      { kind: 'chunks', chunks: toolCallResponse('read-secret', 'return state.secret') },
+      { kind: 'chunks', chunks: toolCallResponse('read-secret', 'secret') },
       { kind: 'chunks', chunks: textResponse('424242') },
-      { kind: 'chunks', chunks: toolCallResponse('spill-large', 'return "SPILL-".repeat(1000)') },
+      { kind: 'chunks', chunks: toolCallResponse('spill-large', '"SPILL-".repeat(1000)') },
       { kind: 'chunks', chunks: textResponse('spilled') },
     ]
     await writeFile(overrideFile, JSON.stringify(script))

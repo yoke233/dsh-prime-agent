@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { CodeBindingFunction, CodeBindingNamespace, CodeJsonValue } from '@deepseek-ai/dsh-code-runtime'
 import { PersistentRealm } from '../src/realm/realm.js'
@@ -11,6 +13,7 @@ const BUDGETS: RealmBudgets = {
 }
 
 const realms: PersistentRealm[] = []
+const execFileAsync = promisify(execFile)
 
 function createRealm(budgets: Partial<RealmBudgets> = {}): PersistentRealm {
   const realm = new PersistentRealm({ realmId: `realm-${realms.length}`, budgets: { ...BUDGETS, ...budgets } })
@@ -33,18 +36,28 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms) })
 }
 
+async function runHeadlessProbe(source: string, timeout = 4_000): Promise<string> {
+  const { stdout } = await execFileAsync(process.execPath, ['--input-type=module', '--eval', source], {
+    cwd: import.meta.dirname,
+    encoding: 'utf8',
+    timeout,
+    windowsHide: true,
+  })
+  return stdout
+}
+
 afterEach(async () => {
   await Promise.all(realms.splice(0).map(realm => realm.dispose()))
 })
 
-describe('persistent realm continuity', () => {
-  it('keeps state, Maps and closures across runs and rebinds tools every run', async () => {
+describe('persistent REPL cells', () => {
+  it('keeps ordinary bindings, Maps and closures across cells and rebinds tools every run', async () => {
     const realm = createRealm()
     const first = await realm.run({
       program: `
-        state.lookup = new Map([['a', { id: 'a', size: 1 }]])
-        state.review = async (id: string) => await tools.review_item({ item: state.lookup.get(id) })
-        return state.lookup.size
+        const lookup = new Map([['a', { id: 'a', size: 1 }]])
+        const review = async (id: string) => await globalThis.tools.review_item({ item: lookup.get(id) })
+        lookup.size
       `,
       bindings: [tools({ review_item: async args => ({ seen: 'first', item: args.item }) })],
     })
@@ -52,7 +65,7 @@ describe('persistent realm continuity', () => {
     expect(first.value).toBe(1)
 
     const second = await realm.run({
-      program: 'return await state.review("a")',
+      program: 'await review("a")',
       bindings: [tools({ review_item: async args => ({ seen: 'second', item: args.item }) })],
     })
     expect(second.error).toBeUndefined()
@@ -60,23 +73,152 @@ describe('persistent realm continuity', () => {
     expect(realm.generation).toBe(1)
   })
 
-  it('keeps state through a program exception', async () => {
+  it('keeps declarations and assignments completed before a program exception', async () => {
     const realm = createRealm()
-    const failed = await realm.run({ program: 'state.keep = "v1"\nthrow new Error("boom")', bindings: [] })
+    const failed = await realm.run({
+      program: 'const keptAfterFailure = { version: "v1" }\nkeptAfterFailure.touched = true\nthrow new Error("boom")',
+      bindings: [],
+    })
     expect(failed.error?.kind).toBe('exception')
     expect(failed.error?.message).toContain('boom')
 
-    const after = await realm.run({ program: 'return state.keep', bindings: [] })
-    expect(after.value).toBe('v1')
+    const after = await realm.run({ program: 'keptAfterFailure', bindings: [] })
+    expect(after.value).toEqual({ version: 'v1', touched: true })
     expect(realm.generation).toBe(1)
   })
 
-  it('captures console output per run', async () => {
+  it('captures console output per cell', async () => {
     const realm = createRealm()
-    const first = await realm.run({ program: 'console.log("hello", { a: 1 })\nreturn "ok"', bindings: [] })
+    const first = await realm.run({ program: 'console.log("hello", { a: 1 })\n"ok"', bindings: [] })
     expect(first.logs).toEqual(['hello { a: 1 }'])
-    const second = await realm.run({ program: 'return "ok"', bindings: [] })
+    const second = await realm.run({ program: '"ok"', bindings: [] })
     expect(second.logs).toEqual([])
+  })
+
+  it('allows const, let, var, function and class to be redeclared in later cells', async () => {
+    const realm = createRealm()
+    const pairs = [
+      ['const redeclaredConst = 1\nredeclaredConst', 'const redeclaredConst = 2\nredeclaredConst'],
+      ['let redeclaredLet = 1\nredeclaredLet', 'let redeclaredLet = 2\nredeclaredLet'],
+      ['var redeclaredVar = 1\nredeclaredVar', 'var redeclaredVar = 2\nredeclaredVar'],
+      ['function redeclaredFunction() { return 1 }\nredeclaredFunction()', 'function redeclaredFunction() { return 2 }\nredeclaredFunction()'],
+      ['class RedeclaredClass { static value = 1 }\nRedeclaredClass.value', 'class RedeclaredClass { static value = 2 }\nRedeclaredClass.value'],
+    ] as const
+
+    for (const [first, second] of pairs) {
+      expect((await realm.run({ program: first, bindings: [] })).value).toBe(1)
+      expect((await realm.run({ program: second, bindings: [] })).value).toBe(2)
+    }
+    expect(realm.generation).toBe(1)
+  })
+
+  it('supports top-level await and retains its result binding', async () => {
+    const realm = createRealm()
+    const first = await realm.run({
+      program: 'const awaitedValue = await Promise.resolve({ ready: true })\nawaitedValue.ready',
+      bindings: [],
+    })
+    expect(first.value).toBe(true)
+    expect((await realm.run({ program: 'awaitedValue', bindings: [] })).value).toEqual({ ready: true })
+  })
+
+  it('keeps destructured bindings across cells', async () => {
+    const realm = createRealm()
+    const first = await realm.run({
+      program: `
+        const { answer: destructuredAnswer, detail: { label: destructuredLabel } } = {
+          answer: 42,
+          detail: { label: 'kept' },
+        }
+        ;({ destructuredAnswer, destructuredLabel })
+      `,
+      bindings: [],
+    })
+    expect(first.value).toEqual({ destructuredAnswer: 42, destructuredLabel: 'kept' })
+
+    const second = await realm.run({
+      program: '({ destructuredAnswer, destructuredLabel })',
+      bindings: [],
+    })
+    expect(second.value).toEqual({ destructuredAnswer: 42, destructuredLabel: 'kept' })
+    expect(realm.generation).toBe(1)
+  })
+
+  it('keeps strict-mode behavior in every cell', async () => {
+    const realm = createRealm()
+
+    const undeclared = await realm.run({ program: 'primeUndeclared = 1', bindings: [] })
+    expect(undeclared.error?.kind).toBe('exception')
+    expect(undeclared.error?.message).toContain('primeUndeclared is not defined')
+    expect((await realm.run({ program: 'Object.hasOwn(globalThis, "primeUndeclared")', bindings: [] })).value).toBe(false)
+
+    const withStatement = await realm.run({ program: 'with ({ value: 1 }) { value }', bindings: [] })
+    expect(withStatement.error?.kind).toBe('exception')
+    expect(withStatement.error?.message).toMatch(/with/i)
+
+    const callee = await realm.run({
+      program: 'function strictCallee() { return arguments.callee }\nstrictCallee()',
+      bindings: [],
+    })
+    expect(callee.error?.kind).toBe('exception')
+    expect(callee.error?.message).toContain('callee')
+    expect(realm.generation).toBe(1)
+  })
+
+  it('does not expose a state global and lets state be an ordinary user binding', async () => {
+    const realm = createRealm()
+    const ambient = await realm.run({
+      program: '({ own: Object.hasOwn(globalThis, "state"), type: typeof globalThis.state })',
+      bindings: [],
+    })
+    expect(ambient.value).toEqual({ own: false, type: 'undefined' })
+
+    expect((await realm.run({ program: 'const state = { userOwned: true }\nstate.userOwned', bindings: [] })).value).toBe(true)
+    expect((await realm.run({ program: '({ lexical: state.userOwned, global: typeof globalThis.state })', bindings: [] })).value)
+      .toEqual({ lexical: true, global: 'undefined' })
+  })
+
+  it('reserves the tools name while keeping globalThis.tools usable after the rejected cell', async () => {
+    const realm = createRealm()
+    const shadowed = await realm.run({
+      program: `
+        const tools = { local: true };
+        ({ local: tools.local, globalCall: await globalThis.tools.echo({ turn: 1 }) })
+      `,
+      bindings: [tools({ echo: async args => args })],
+    })
+    expect(shadowed.error?.kind).toBe('exception')
+    expect(shadowed.error?.message).toMatch(/tools.*already been declared/i)
+    expect(realm.generation).toBe(1)
+
+    const next = await realm.run({
+      program: 'await globalThis.tools.echo({ turn: 2 })',
+      bindings: [tools({ echo: async args => args })],
+    })
+    expect(next.value).toEqual({ turn: 2 })
+  })
+
+  it('uses the final expression as completion and rejects a top-level return', async () => {
+    const realm = createRealm()
+    expect((await realm.run({ program: 'const completionValue = 20 + 22\ncompletionValue', bindings: [] })).value).toBe(42)
+
+    const returned = await realm.run({ program: 'return 42', bindings: [] })
+    expect(returned.error?.kind).toBe('exception')
+    expect(returned.error?.message).toContain('return')
+    expect(realm.generation).toBe(1)
+  })
+
+  it('does not pollute the namespace when a cell has a syntax error', async () => {
+    const realm = createRealm()
+    await realm.run({ program: 'const beforeSyntaxFailure = "kept"\nbeforeSyntaxFailure', bindings: [] })
+    const failed = await realm.run({ program: 'const neverDeclared =', bindings: [] })
+    expect(failed.error?.kind).toBe('exception')
+
+    const after = await realm.run({
+      program: '({ before: beforeSyntaxFailure, missing: typeof neverDeclared })',
+      bindings: [],
+    })
+    expect(after.value).toEqual({ before: 'kept', missing: 'undefined' })
   })
 })
 
@@ -84,24 +226,28 @@ describe('binding leases', () => {
   it('resolves a persisted tool reference against the current run bindings', async () => {
     const realm = createRealm()
     await realm.run({
-      program: 'state.echo = async () => await tools.echo({})\nreturn "stored"',
+      program: 'const echoCurrent = async () => await globalThis.tools.echo({})\n"stored"',
       bindings: [tools({ echo: async () => 'first' })],
     })
     const second = await realm.run({
-      program: 'return await state.echo()',
+      program: 'await echoCurrent()',
       bindings: [tools({ echo: async () => 'second' })],
     })
     expect(second.value).toBe('second')
   })
 
-  it('fails a wrapper held in state once its member is revoked', async () => {
+  it('fails a captured wrapper once its member is revoked', async () => {
     const realm = createRealm()
     await realm.run({
-      program: 'state.echo = tools.echo\nreturn "stored"',
+      program: 'const capturedEcho = globalThis.tools.echo\n"stored"',
       bindings: [tools({ echo: async args => args })],
     })
     const second = await realm.run({
-      program: 'try { await state.echo({ n: 1 }) } catch (error) { return error.message }\nreturn "called"',
+      program: `
+        let revokedMessage = 'called'
+        try { await capturedEcho({ n: 1 }) } catch (error) { revokedMessage = error.message }
+        revokedMessage
+      `,
       bindings: [tools({ other: async args => args })],
     })
     expect(second.value).toContain('unknown binding')
@@ -110,7 +256,7 @@ describe('binding leases', () => {
   it('hides the realm handshake bootstrap from the program lease', async () => {
     const realm = createRealm()
     const result = await realm.run({
-      program: 'return { member: typeof tools.prime_realm_identity, present: "prime_realm_identity" in tools, keys: Object.keys(tools) }',
+      program: '({ member: typeof globalThis.tools.prime_realm_identity, present: "prime_realm_identity" in globalThis.tools, keys: Object.keys(globalThis.tools) })',
       bindings: [tools({
         echo: async args => args,
         prime_realm_identity: async () => ({ token: 'must-not-be-reachable' }),
@@ -127,7 +273,13 @@ describe('binding leases', () => {
       errorClass: { name: 'ToolError', memberNameProperty: 'tool' },
     }
     const result = await realm.run({
-      program: 'try { await tools.boom({}) } catch (error) { return { name: error.name, tool: error.tool, message: error.message, typed: error instanceof ToolError } }\nreturn "no throw"',
+      program: `
+        let rejection
+        try { await globalThis.tools.boom({}) } catch (error) {
+          rejection = { name: error.name, tool: error.tool, message: error.message, typed: error instanceof ToolError }
+        }
+        rejection
+      `,
       bindings: [namespace],
     })
     expect(result.value).toEqual({ name: 'ToolError', tool: 'boom', message: 'host refused', typed: true })
@@ -137,25 +289,26 @@ describe('binding leases', () => {
     const realm = createRealm()
     const armed = await realm.run({
       program: `
-        state.trace = []
-        const gate = new Promise(resolve => { state.release = resolve })
-        void gate.then(async () => {
+        const detachedTrace = []
+        let releaseDetached
+        const detachedGate = new Promise(resolve => { releaseDetached = resolve })
+        void detachedGate.then(async () => {
           console.log('detached output')
           try {
-            await tools.echo({ n: 1 })
-            state.trace.push('called')
+            await globalThis.tools.echo({ n: 1 })
+            detachedTrace.push('called')
           } catch (error) {
-            state.trace.push(error.message)
+            detachedTrace.push(error.message)
           }
         })
-        return 'armed'
+        'armed'
       `,
       bindings: [tools({ echo: async args => args })],
     })
     expect(armed.value).toBe('armed')
 
     const observed = await realm.run({
-      program: 'state.release()\nawait new Promise(resolve => setTimeout(resolve, 30))\nreturn state.trace',
+      program: 'releaseDetached()\nawait new Promise(resolve => setTimeout(resolve, 30))\ndetachedTrace',
       bindings: [tools({ echo: async args => args })],
     })
     expect(observed.value).toEqual([expect.stringContaining('tool lease revoked')])
@@ -166,17 +319,18 @@ describe('binding leases', () => {
     const realm = createRealm()
     const armed = await realm.run({
       program: `
-        state.keep = 'v1'
-        const gate = new Promise(resolve => { state.release = resolve })
-        void gate.then(() => tools.echo({ n: 1 }))
-        return 'armed'
+        const keptThroughDetachedRejection = 'v1'
+        let releaseRejected
+        const rejectedGate = new Promise(resolve => { releaseRejected = resolve })
+        void rejectedGate.then(() => globalThis.tools.echo({ n: 1 }))
+        'armed'
       `,
       bindings: [tools({ echo: async args => args })],
     })
     expect(armed.value).toBe('armed')
 
     const observed = await realm.run({
-      program: 'state.release()\nawait new Promise(resolve => setTimeout(resolve, 30))\nreturn state.keep',
+      program: 'releaseRejected()\nawait new Promise(resolve => setTimeout(resolve, 30))\nkeptThroughDetachedRejection',
       bindings: [tools({ echo: async args => args })],
     })
     expect(observed.error).toBeUndefined()
@@ -188,28 +342,125 @@ describe('binding leases', () => {
   it('clears timers a run left behind so they cannot fire in a later run', async () => {
     const realm = createRealm()
     await realm.run({
-      program: 'state.fired = false\nsetTimeout(() => { state.fired = true }, 20)\nreturn "armed"',
+      program: 'let firedAfterSettlement = false\nsetTimeout(() => { firedAfterSettlement = true }, 20)\n"armed"',
       bindings: [],
     })
     await sleep(80)
-    const result = await realm.run({ program: 'return state.fired', bindings: [] })
+    const result = await realm.run({ program: 'firedAfterSettlement', bindings: [] })
     expect(result.value).toBe(false)
   })
+})
 
-  it('tracks timers armed through node:timers, not just the global slot', async () => {
+describe('host call settlement', () => {
+  it('waits for an accepted void host call before settling or dispatching the next cell', async () => {
     const realm = createRealm()
-    await realm.run({
-      program: `
-        state.fired = false
-        const timers = await import('node:timers')
-        timers.setTimeout(() => { state.fired = true }, 20)
-        return 'armed'
-      `,
+    const started = deferred<void>()
+    const release = deferred<void>()
+    const events: string[] = []
+
+    const first = realm.run({
+      program: 'void globalThis.tools.mutate({})\n"first"',
+      bindings: [tools({
+        mutate: async () => {
+          events.push('host started')
+          started.resolve(undefined)
+          await release.promise
+          events.push('host finished')
+          return null
+        },
+      })],
+    }).then((result) => {
+      events.push('first settled')
+      return result
+    })
+
+    await started.promise
+    const second = realm.run(
+      { program: '"second"', bindings: [] },
+      () => { events.push('second dispatched') },
+    ).then((result) => {
+      events.push('second settled')
+      return result
+    })
+
+    await sleep(50)
+    const beforeRelease = [...events]
+    release.resolve(undefined)
+
+    expect((await first).value).toBe('first')
+    expect((await second).value).toBe('second')
+    expect(beforeRelease).toEqual(['host started'])
+    expect(events).toEqual([
+      'host started',
+      'host finished',
+      'first settled',
+      'second dispatched',
+      'second settled',
+    ])
+  })
+
+  it('wall-times out and hard-kills a cell whose accepted void host call never settles', async () => {
+    const realm = createRealm({ maxWallMs: 150 })
+    const started = deferred<void>()
+    const parked = deferred<CodeJsonValue>()
+
+    const pending = realm.run({
+      program: 'const keptBeforeDetachedTimeout = "v1"\nvoid globalThis.tools.park({})\n"unreachable completion"',
+      bindings: [tools({
+        park: () => {
+          started.resolve(undefined)
+          return parked.promise
+        },
+      })],
+    })
+
+    await started.promise
+    const result = await pending
+    const after = await realm.run({
+      program: 'typeof keptBeforeDetachedTimeout === "undefined" ? "lost" : keptBeforeDetachedTimeout',
       bindings: [],
     })
-    await sleep(80)
-    const result = await realm.run({ program: 'return state.fired', bindings: [] })
-    expect(result.value).toBe(false)
+    parked.resolve(null)
+
+    expect(result.error?.kind).toBe('timeout')
+    expect(result.error?.message).toContain('wall-clock')
+    expect(after.value).toBe('lost')
+    expect(realm.generation).toBe(2)
+  })
+
+  it('waits for an accepted void host call before settling a program exception', async () => {
+    const realm = createRealm()
+    const started = deferred<void>()
+    const release = deferred<void>()
+    const events: string[] = []
+
+    const pending = realm.run({
+      program: 'void globalThis.tools.mutate({})\nthrow new Error("boom after call")',
+      bindings: [tools({
+        mutate: async () => {
+          events.push('host started')
+          started.resolve(undefined)
+          await release.promise
+          events.push('host finished')
+          return null
+        },
+      })],
+    }).then((result) => {
+      events.push('run settled')
+      return result
+    })
+
+    await started.promise
+    await sleep(50)
+    const beforeRelease = [...events]
+    release.resolve(undefined)
+    const result = await pending
+
+    expect(beforeRelease).toEqual(['host started'])
+    expect(events).toEqual(['host started', 'host finished', 'run settled'])
+    expect(result.error?.kind).toBe('exception')
+    expect(result.error?.message).toContain('boom after call')
+    expect(realm.generation).toBe(1)
   })
 })
 
@@ -218,10 +469,10 @@ describe('serialization and abort', () => {
     const realm = createRealm()
     const gate = deferred<CodeJsonValue>()
     const first = realm.run({
-      program: 'await tools.wait({})\nstate.order = ["first"]\nreturn "first"',
+      program: 'await globalThis.tools.wait({})\nconst admittedOrder = ["first"]\n"first"',
       bindings: [tools({ wait: () => gate.promise })],
     })
-    const second = realm.run({ program: 'state.order.push("second")\nreturn state.order', bindings: [] })
+    const second = realm.run({ program: 'admittedOrder.push("second")\nadmittedOrder', bindings: [] })
 
     await sleep(40)
     gate.resolve(null)
@@ -234,10 +485,10 @@ describe('serialization and abort', () => {
     const gate = deferred<CodeJsonValue>()
     const controller = new AbortController()
     const first = realm.run({
-      program: 'await tools.wait({})\nreturn "first"',
+      program: 'await globalThis.tools.wait({})\n"first"',
       bindings: [tools({ wait: () => gate.promise })],
     })
-    const second = realm.run({ program: 'return "second"', bindings: [], signal: controller.signal })
+    const second = realm.run({ program: '"second"', bindings: [], signal: controller.signal })
 
     await sleep(30)
     controller.abort('queued cancelled')
@@ -250,7 +501,7 @@ describe('serialization and abort', () => {
 
   it('hard-kills the worker when the active run is aborted', async () => {
     const realm = createRealm()
-    await realm.run({ program: 'state.keep = "v1"\nreturn "ok"', bindings: [] })
+    await realm.run({ program: 'const keptBeforeAbort = "v1"\n"ok"', bindings: [] })
 
     const controller = new AbortController()
     const pending = realm.run({ program: 'await new Promise(() => {})', bindings: [], signal: controller.signal })
@@ -259,25 +510,31 @@ describe('serialization and abort', () => {
 
     expect((await pending).error).toEqual({ kind: 'abort', message: 'stop now' })
     expect(realm.generation).toBe(2)
-    expect(realm.generationNoticePending).toBe(true)
-    realm.acknowledgeGenerationNotice()
-    expect(realm.generationNoticePending).toBe(false)
 
-    const after = await realm.run({ program: 'return state.keep ?? "lost"', bindings: [] })
+    const after = await realm.run({
+      program: 'typeof keptBeforeAbort === "undefined" ? "lost" : keptBeforeAbort',
+      bindings: [],
+    })
     expect(after.value).toBe('lost')
     expect(realm.generation).toBe(2)
   })
 })
 
-describe('budgets', () => {
+describe('budgets and completion', () => {
   it('times out an active run on the wall clock and starts a new generation', async () => {
     const realm = createRealm({ maxWallMs: 150 })
-    const result = await realm.run({ program: 'state.keep = "v1"\nawait new Promise(() => {})', bindings: [] })
+    const result = await realm.run({
+      program: 'const keptBeforeWallTimeout = "v1"\nawait new Promise(() => {})',
+      bindings: [],
+    })
     expect(result.error?.kind).toBe('timeout')
     expect(result.error?.message).toContain('wall-clock')
     expect(realm.generation).toBe(2)
 
-    const after = await realm.run({ program: 'return state.keep ?? "lost"', bindings: [] })
+    const after = await realm.run({
+      program: 'typeof keptBeforeWallTimeout === "undefined" ? "lost" : keptBeforeWallTimeout',
+      bindings: [],
+    })
     expect(after.value).toBe('lost')
   })
 
@@ -291,7 +548,7 @@ describe('budgets', () => {
 
   it('meters the compute budget per run rather than cumulatively', async () => {
     const realm = createRealm({ computeMs: 500 })
-    const burn = 'const end = Date.now() + 300\nwhile (Date.now() < end) {}\nreturn "burned"'
+    const burn = 'const burnEnd = Date.now() + 300\nwhile (Date.now() < burnEnd) {}\n"burned"'
     expect((await realm.run({ program: burn, bindings: [] })).value).toBe('burned')
     expect((await realm.run({ program: burn, bindings: [] })).value).toBe('burned')
     expect(realm.generation).toBe(1)
@@ -299,7 +556,7 @@ describe('budgets', () => {
 
   it('fails a run whose logs exceed the output cap and loses the generation', async () => {
     const realm = createRealm({ maxOutputBytes: 512 })
-    const result = await realm.run({ program: 'console.log("x".repeat(2000))\nreturn "ok"', bindings: [] })
+    const result = await realm.run({ program: 'console.log("x".repeat(2000))\n"ok"', bindings: [] })
     expect(result.error?.kind).toBe('output-limit')
     expect(result.logs).toEqual([])
     expect(realm.generation).toBe(2)
@@ -307,16 +564,50 @@ describe('budgets', () => {
 
   it('fails an oversized completion without losing the realm heap', async () => {
     const realm = createRealm({ maxOutputBytes: 512 })
-    const result = await realm.run({ program: 'state.keep = "v1"\nreturn "y".repeat(2000)', bindings: [] })
+    const result = await realm.run({
+      program: 'const keptAfterOversizedCompletion = "v1"\n"y".repeat(2000)',
+      bindings: [],
+    })
     expect(result.error?.kind).toBe('output-limit')
     expect(realm.generation).toBe(1)
-    expect((await realm.run({ program: 'return state.keep', bindings: [] })).value).toBe('v1')
+    expect((await realm.run({ program: 'keptAfterOversizedCompletion', bindings: [] })).value).toBe('v1')
   })
 
-  it('rejects a completion value that is not lossless JSON', async () => {
+  it('rejects a non-lossless completion without rolling back the cell', async () => {
     const realm = createRealm()
-    const result = await realm.run({ program: 'return { size: NaN }', bindings: [] })
+    const result = await realm.run({
+      program: 'const keptAfterInvalidCompletion = "v1";\n({ size: NaN })',
+      bindings: [],
+    })
     expect(result.error).toEqual({ kind: 'invalid-output', message: 'program completion must be lossless JSON' })
+    expect(realm.generation).toBe(1)
+    expect((await realm.run({ program: 'keptAfterInvalidCompletion', bindings: [] })).value).toBe('v1')
+  })
+
+  it('accepts an undefined completion and rejects other non-lossless completion shapes', async () => {
+    const realm = createRealm()
+    const completionCases = [
+      { program: 'undefined', valid: true },
+      { program: '() => 42', valid: false },
+      { program: 'new Map([["answer", 42]])', valid: false },
+      {
+        program: 'const cyclicCompletion = {}; cyclicCompletion.self = cyclicCompletion; cyclicCompletion',
+        valid: false,
+      },
+    ] as const
+
+    for (const completionCase of completionCases) {
+      const result = await realm.run({ program: completionCase.program, bindings: [] })
+      if (completionCase.valid) {
+        expect(result.error).toBeUndefined()
+        expect(result.value).toBeUndefined()
+      } else {
+        expect(result.error).toEqual({
+          kind: 'invalid-output',
+          message: 'program completion must be lossless JSON',
+        })
+      }
+    }
     expect(realm.generation).toBe(1)
   })
 })
@@ -324,34 +615,48 @@ describe('budgets', () => {
 describe('substrate failures and disposal', () => {
   it('reports a worker that exits on its own and starts a new generation', async () => {
     const realm = createRealm()
-    await realm.run({ program: 'state.keep = "v1"\nreturn "ok"', bindings: [] })
+    await realm.run({ program: 'const keptBeforeExit = "v1"\n"ok"', bindings: [] })
 
-    const result = await realm.run({ program: 'process.exit(3)\nreturn "unreachable"', bindings: [] })
+    const result = await realm.run({ program: 'process.exit(3)\n"unreachable"', bindings: [] })
     expect(result.error?.kind).toBe('worker-exit')
     expect(realm.generation).toBe(2)
 
-    const after = await realm.run({ program: 'return state.keep ?? "lost"', bindings: [] })
+    const after = await realm.run({
+      program: 'typeof keptBeforeExit === "undefined" ? "lost" : keptBeforeExit',
+      bindings: [],
+    })
     expect(after.value).toBe('lost')
     expect(realm.generation).toBe(2)
   })
 
   it('reports a program that does not survive the type strip without spawning a worker', async () => {
     const realm = createRealm()
-    const result = await realm.run({ program: 'enum Color { Red }\nreturn Color.Red', bindings: [] })
+    const result = await realm.run({ program: 'enum Color { Red }\nColor.Red', bindings: [] })
     expect(result.error?.kind).toBe('exception')
     expect(realm.generation).toBe(1)
     expect(realm.idle).toBe(true)
   })
 
+  it('rejects native dynamic import without damaging the generation', async () => {
+    const realm = createRealm()
+    await realm.run({ program: 'const keptBeforeImportFailure = "v1"\nkeptBeforeImportFailure', bindings: [] })
+
+    const imported = await realm.run({ program: 'await import("node:path")', bindings: [] })
+    expect(imported.error?.kind).toBe('exception')
+    expect(imported.error?.message).toContain('dynamic import callback')
+    expect(realm.generation).toBe(1)
+    expect((await realm.run({ program: 'keptBeforeImportFailure', bindings: [] })).value).toBe('v1')
+  })
+
   it('rejects a namespace that names a backend-owned global', async () => {
     const realm = createRealm()
-    await expect(realm.run({ program: 'return 1', bindings: [{ global: 'console', functions: {} }] }))
+    await expect(realm.run({ program: '1', bindings: [{ global: 'console', functions: {} }] }))
       .rejects.toThrow('reserved binding global')
   })
 
   it('rejects a namespace with no functions record instead of throwing synchronously', async () => {
     const realm = createRealm()
-    const pending = realm.run({ program: 'return 1', bindings: [{ global: 'tools' } as CodeBindingNamespace] })
+    const pending = realm.run({ program: '1', bindings: [{ global: 'tools' } as CodeBindingNamespace] })
     await expect(pending).rejects.toThrow('must declare a functions record')
     expect(realm.idle).toBe(true)
   })
@@ -363,7 +668,11 @@ describe('substrate failures and disposal', () => {
       toString(): string { throw new Error('no string') },
     }
     const result = await realm.run({
-      program: 'try { await tools.boom({}) } catch (error) { return "rejected: " + typeof error.message }\nreturn "resolved"',
+      program: `
+        let hostileRejection = 'resolved'
+        try { await globalThis.tools.boom({}) } catch (error) { hostileRejection = 'rejected: ' + typeof error.message }
+        hostileRejection
+      `,
       bindings: [{ global: 'tools', functions: { boom: () => Promise.reject(hostile) } }],
     })
     expect(result.value).toBe('rejected: string')
@@ -384,14 +693,14 @@ describe('substrate failures and disposal', () => {
     const realm = createRealm()
     const gate = deferred<CodeJsonValue>()
     const pending = realm.run({
-      program: 'await tools.wait({})\nreturn "never"',
+      program: 'await globalThis.tools.wait({})\n"never"',
       bindings: [tools({ wait: () => gate.promise })],
     })
     await sleep(30)
     await realm.dispose()
 
     expect((await pending).error).toEqual({ kind: 'abort', message: 'realm disposed' })
-    await expect(realm.run({ program: 'return 1', bindings: [] })).rejects.toThrow('after disposal')
+    await expect(realm.run({ program: '1', bindings: [] })).rejects.toThrow('after disposal')
     expect(realm.idle).toBe(true)
   })
 
@@ -401,11 +710,9 @@ describe('substrate failures and disposal', () => {
 
     const preAborted = new AbortController()
     preAborted.abort(hostile)
-    const queued = await realm.run({ program: 'return 1', bindings: [], signal: preAborted.signal })
+    const queued = await realm.run({ program: '1', bindings: [], signal: preAborted.signal })
     expect(queued.error).toEqual({ kind: 'abort', message: 'aborted' })
 
-    // The active path renders inside an `abort` listener, where a throw would
-    // reach the host's event loop instead of any caller.
     const live = new AbortController()
     const pending = realm.run({ program: 'await new Promise(() => {})', bindings: [], signal: live.signal })
     await sleep(30)
@@ -418,9 +725,34 @@ describe('substrate failures and disposal', () => {
     expect(realm.idle).toBe(true)
     const before = realm.lastUsedAt
     await sleep(5)
-    await realm.run({ program: 'return "ok"', bindings: [] })
+    await realm.run({ program: '"ok"', bindings: [] })
     expect(realm.idle).toBe(true)
     expect(realm.lastUsedAt).toBeGreaterThan(before)
+  })
+
+  it('lets a headless host exit while idle and wakes the same worker for later queued cells', async () => {
+    // This child cannot inherit Vitest's TypeScript resolver; `npm test` builds
+    // the package before the suite, so exercise the exact emitted headless path.
+    const realmModule = new URL('../lib/realm/realm.js', import.meta.url).href
+    const stdout = await runHeadlessProbe(`
+      import { PersistentRealm } from ${JSON.stringify(realmModule)}
+      const realm = new PersistentRealm({
+        realmId: 'headless-idle-lifecycle',
+        budgets: { computeMs: 5_000, maxWallMs: 10_000, maxOutputBytes: 65_536, maxOldGenerationSizeMb: 128 },
+      })
+      const seeded = await realm.run({ program: 'const retainedForHeadless = 41; retainedForHeadless', bindings: [] })
+      await new Promise(resolve => setTimeout(resolve, 50))
+      const active = realm.run({
+        program: 'await new Promise(resolve => setTimeout(resolve, 100)); retainedForHeadless',
+        bindings: [],
+      })
+      const queued = realm.run({ program: 'retainedForHeadless + 1', bindings: [] })
+      const [activeResult, queuedResult] = await Promise.all([active, queued])
+      console.log(JSON.stringify({ seed: seeded.value, active: activeResult.value, queued: queuedResult.value }))
+      // Deliberately do not dispose: an idle persistent Worker must not own the
+      // lifetime of a completed headless invocation.
+    `)
+    expect(JSON.parse(stdout.trim())).toEqual({ seed: 41, active: 41, queued: 42 })
   })
 })
 
@@ -429,44 +761,42 @@ describe('hostile program code', () => {
     const realm = createRealm()
     const result = await realm.run({
       program: `
-        const { MessageChannel, MessagePort } = await import('node:worker_threads')
-        let intercepted = 0
-        const original = MessagePort.prototype.postMessage
+        const { MessageChannel, MessagePort } = process.getBuiltinModule('node:worker_threads')
+        let interceptedPorts = 0
+        let capturedPort
+        const originalPostMessage = MessagePort.prototype.postMessage
         MessagePort.prototype.postMessage = function (...args) {
-          intercepted += 1
-          state.captured = this
-          return original.apply(this, args)
+          interceptedPorts += 1
+          capturedPort = this
+          return Reflect.apply(originalPostMessage, this, args)
         }
-        // Proves the patch is live on the very prototype the control port uses:
-        // the program's OWN port goes through it.
-        const channel = new MessageChannel()
-        channel.port1.postMessage('own port')
-        channel.port1.close()
-        channel.port2.close()
-        const echoed = await tools.echo({ ping: true })
-        console.log('a log line')
-        return { intercepted, echoed, captured: state.captured === channel.port1 }
+        const ownChannel = new MessageChannel()
+        ownChannel.port1.postMessage('own port')
+        ownChannel.port1.close()
+        ownChannel.port2.close()
+        const echoedThroughPrivatePort = await globalThis.tools.echo({ ping: true })
+        console.log('a log line');
+        ({ interceptedPorts, echoedThroughPrivatePort, capturedOwnPort: capturedPort === ownChannel.port1 })
       `,
       bindings: [tools({ echo: async args => args as CodeJsonValue })],
     })
     expect(result.error).toBeUndefined()
-    // One interception: the program's own port. The binding call and the log
-    // both crossed the control channel without touching the patched method, so
-    // the program never got `this` bound to the private port.
-    expect(result.value).toEqual({ intercepted: 1, echoed: { ping: true }, captured: true })
+    expect(result.value).toEqual({
+      interceptedPorts: 1,
+      echoedThroughPrivatePort: { ping: true },
+      capturedOwnPort: true,
+    })
     expect(result.logs).toContain('a log line')
   })
 
-  it('cannot settle its own run early by forging a terminal message', async () => {
+  it('cannot settle its own run through the ambient parentPort', async () => {
     const realm = createRealm()
     const result = await realm.run({
       program: `
-        const { parentPort } = await import('node:worker_threads')
-        // The ambient port the program CAN reach is wired to nothing host-side,
-        // and the run nonce it would have to quote never enters the isolate.
+        const { parentPort } = process.getBuiltinModule('node:worker_threads')
         parentPort?.postMessage({ type: 'done', runId: 1, nonce: 'guessed', json: '"forged"' })
-        await new Promise(resolve => setTimeout(resolve, 100))
-        return 'real completion'
+        await new Promise(resolve => setTimeout(resolve, 40))
+        'real completion'
       `,
       bindings: [],
     })
@@ -474,34 +804,31 @@ describe('hostile program code', () => {
     expect(result.value).toBe('real completion')
   })
 
-  it('cancels a promise-based timer the run left behind', async () => {
+  it('cancels a promise-based timer left behind by a settled cell', async () => {
     const realm = createRealm()
     const armed = await realm.run({
       program: `
-        const timers = await import('node:timers/promises')
-        state.marks = []
-        timers.setTimeout(150, 'late').then(() => { state.marks.push('ran') }).catch(() => {})
-        return 'armed'
+        const promiseTimers = process.getBuiltinModule('node:timers/promises')
+        const promiseTimerMarks = []
+        promiseTimers.setTimeout(150, 'late').then(() => { promiseTimerMarks.push('ran') }).catch(() => {})
+        'armed'
       `,
       bindings: [],
     })
     expect(armed.value).toBe('armed')
 
-    await sleep(500)
-    const after = await realm.run({ program: 'return state.marks', bindings: [] })
-    // The detached continuation was cancelled with the run that armed it, so it
-    // never reached `state` on somebody else's turn.
-    expect(after.value).toEqual([])
+    await sleep(300)
+    expect((await realm.run({ program: 'promiseTimerMarks', bindings: [] })).value).toEqual([])
   })
 
-  it('still honours a promise-based timer awaited inside its own run', async () => {
+  it('still honors a promise-based timer awaited inside its own cell', async () => {
     const realm = createRealm()
     const result = await realm.run({
       program: `
-        const timers = await import('node:timers/promises')
-        const started = Date.now()
-        await timers.setTimeout(40)
-        return Date.now() - started >= 30
+        const promiseTimers = process.getBuiltinModule('node:timers/promises')
+        const promiseTimerStarted = Date.now()
+        await promiseTimers.setTimeout(40)
+        Date.now() - promiseTimerStarted >= 30
       `,
       bindings: [],
     })
@@ -509,26 +836,184 @@ describe('hostile program code', () => {
     expect(result.value).toBe(true)
   })
 
-  it('charges output that stepped over the patched write to the run that wrote it', async () => {
+  it('rejects control-port enumeration and runtime module-loader entry points', async () => {
+    const realm = createRealm()
+    const result = await realm.run({
+      program: `
+        const runtimeCapabilityAttacks = [
+          () => process._getActiveHandles(),
+          () => process._getActiveRequests(),
+          () => process.getBuiltinModule('node:async_hooks'),
+          () => process.getBuiltinModule('node:module'),
+          () => process.getBuiltinModule('node:inspector'),
+          () => process.getBuiltinModule('node:inspector/promises'),
+          () => process.binding('inspector'),
+        ]
+        const controlledRejections = []
+        for (const attack of runtimeCapabilityAttacks) {
+          try {
+            attack()
+            controlledRejections.push(false)
+          } catch (error) {
+            controlledRejections.push(error instanceof Error && error.message.includes('disabled'))
+          }
+        }
+        controlledRejections
+      `,
+      bindings: [],
+    })
+    expect(result.error).toBeUndefined()
+    expect(result.value).toEqual([true, true, true, true, true, true, true])
+    expect(realm.generation).toBe(1)
+    expect((await realm.run({ program: '21 * 2', bindings: [] })).value).toBe(42)
+  })
+
+  it('keeps tools, timers and later cells isolated from collection prototype hooks', async () => {
+    const realm = createRealm()
+    const attacked = await realm.run({
+      program: `
+        let runtimePrototypeHookCalls = 0
+        const runtimePrototypeHooks = [
+          [Map.prototype, 'clear'],
+          [Map.prototype, 'delete'],
+          [Map.prototype, 'forEach'],
+          [Map.prototype, 'get'],
+          [Map.prototype, 'set'],
+          [Set.prototype, 'add'],
+          [Set.prototype, 'clear'],
+          [Set.prototype, 'delete'],
+          [Set.prototype, 'forEach'],
+          [Set.prototype, 'has'],
+          [Array.prototype, 'push'],
+          [Array.prototype, Symbol.iterator],
+        ]
+        const runtimePrototypeDescriptors = new Array(runtimePrototypeHooks.length)
+        for (let index = 0; index < runtimePrototypeHooks.length; index++) {
+          const target = runtimePrototypeHooks[index][0]
+          const key = runtimePrototypeHooks[index][1]
+          const descriptor = Object.getOwnPropertyDescriptor(target, key)
+          const original = descriptor.value
+          runtimePrototypeDescriptors[index] = descriptor
+          Object.defineProperty(target, key, {
+            ...descriptor,
+            value: function (...args) {
+              runtimePrototypeHookCalls += 1
+              return Reflect.apply(original, this, args)
+            },
+          })
+        }
+
+        const hookedEcho = await globalThis.tools.echo({ answer: 41 })
+        const promiseTimers = process.getBuiltinModule('node:timers/promises')
+        const callerController = new AbortController()
+        const hookedTimerValue = await promiseTimers.setTimeout(20, 'timer', { signal: callerController.signal })
+        ;({ hookedEcho, hookedTimerValue, completion: 42, hookCalls: runtimePrototypeHookCalls })
+      `,
+      bindings: [tools({ echo: async args => args })],
+    })
+    expect(attacked.error).toBeUndefined()
+    expect(attacked.value).toEqual({
+      hookedEcho: { answer: 41 },
+      hookedTimerValue: 'timer',
+      completion: 42,
+      hookCalls: 0,
+    })
+
+    const next = await realm.run({
+      program: `
+        const hookCallsAfterSettlement = runtimePrototypeHookCalls
+        for (let index = 0; index < runtimePrototypeHooks.length; index++) {
+          Object.defineProperty(
+            runtimePrototypeHooks[index][0],
+            runtimePrototypeHooks[index][1],
+            runtimePrototypeDescriptors[index],
+          )
+        }
+        ({ nextCell: 21 * 2, hookCalls: hookCallsAfterSettlement })
+      `,
+      bindings: [],
+    })
+    expect(next.error).toBeUndefined()
+    expect(next.value).toEqual({ nextCell: 42, hookCalls: 0 })
+    expect(realm.generation).toBe(1)
+  })
+
+  it('keeps Inspector requests working after prototype-hook attacks are rejected', async () => {
+    const realm = createRealm()
+    const attacked = await realm.run({
+      program: `
+        const rejectedPrototypeAttacks = []
+        const prototypeAttacks = [
+          () => Object.defineProperty(Object.prototype, 'toJSON', { value() { return null } }),
+          () => Object.defineProperty(Array.prototype, 'toJSON', { value() { return null } }),
+          () => Object.defineProperty(Object.prototype, 'params', { set() {} }),
+          () => Object.defineProperty(Object.prototype, 'params', { writable: false }),
+          () => { Object.prototype.params = { forged: true } },
+        ]
+        for (const attack of prototypeAttacks) {
+          try { attack(); rejectedPrototypeAttacks.push(false) } catch { rejectedPrototypeAttacks.push(true) }
+        }
+        rejectedPrototypeAttacks
+      `,
+      bindings: [],
+    })
+    expect(attacked.value).toEqual([true, true, true, true, true])
+    expect((await realm.run({ program: '21 * 2', bindings: [] })).value).toBe(42)
+  })
+
+  it('snapshots arrays through captured intrinsics when a getter patches Array.prototype.push', async () => {
+    const realm = createRealm()
+    const result = await realm.run({
+      program: `
+        const originalArrayPush = Array.prototype.push
+        const hostileArrayGetter = {}
+        Object.defineProperty(hostileArrayGetter, 'values', {
+          enumerable: true,
+          get() {
+            Array.prototype.push = () => 0
+            queueMicrotask(() => { Array.prototype.push = originalArrayPush })
+            return [2]
+          },
+        })
+        hostileArrayGetter
+      `,
+      bindings: [],
+    })
+    expect(result.error).toBeUndefined()
+    expect(result.value).toEqual({ values: [2] })
+  })
+
+  it('captures direct process stream output in the run that wrote it', async () => {
+    const realm = createRealm()
+    const first = await realm.run({
+      program: 'process.stdout.write("direct output")\n"wrote"',
+      bindings: [],
+    })
+    expect(first.value).toBe('wrote')
+    expect(first.logs).toContain('direct output')
+
+    const second = await realm.run({ program: 'console.log("second run output")\n"second"', bindings: [] })
+    expect(second.error).toBeUndefined()
+    expect(second.value).toBe('second')
+    expect(second.logs).toEqual(['second run output'])
+  })
+
+  it('charges output that bypasses the patched write method to the cell that wrote it', async () => {
     const realm = createRealm()
     const first = await realm.run({
       program: `
-        const { Writable } = await import('node:stream')
-        // Steps over the own-property \`write\` the worker installed, which is
-        // what would otherwise put these bytes on the host's native pipe with
-        // nothing to say which run produced them.
+        const { Writable } = process.getBuiltinModule('node:stream')
         for (let index = 0; index < 40; index++) {
           Writable.prototype.write.call(process.stdout, 'STRAY-MARKER-' + index)
         }
-        return 'wrote'
+        'wrote'
       `,
       bindings: [],
     })
     expect(first.value).toBe('wrote')
-    // Attributed, not merely suppressed: the bypass lands in its own run's logs.
     expect(first.logs.filter(line => line.includes('STRAY-MARKER'))).toHaveLength(40)
 
-    const second = await realm.run({ program: 'console.log("second run output")\nreturn "second"', bindings: [] })
+    const second = await realm.run({ program: 'console.log("second run output")\n"second"', bindings: [] })
     expect(second.error).toBeUndefined()
     expect(second.value).toBe('second')
     expect(second.logs.some(line => line.includes('STRAY-MARKER'))).toBe(false)
@@ -541,7 +1026,7 @@ describe('hostile program code', () => {
       program: `
         process.nextTick(() => { throw new Error('/host/secret/path.js exploded') })
         await new Promise(resolve => setTimeout(resolve, 1000))
-        return 'never'
+        'never'
       `,
       bindings: [],
     })

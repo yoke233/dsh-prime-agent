@@ -1,6 +1,6 @@
 /**
  * Long-lived realm worker: one V8 isolate per realm generation that owns a
- * `state` namespace surviving across runs, executes at most one program at a
+ * REPL namespace surviving across cells, executes at most one program at a
  * time, and leases binding members only for the duration of the run that
  * declared them.
  *

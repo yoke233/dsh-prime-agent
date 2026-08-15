@@ -12,8 +12,6 @@ import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { registerRealmIdentity } from '../src/realm/identity-tool.js'
 import * as primeRuntime from '../src/runtime.js'
 
-const FRESH_GENERATION = '[prime-realm] generation 1 started with an empty state'
-const RETAINED_GENERATION = '[prime-realm] generation 1 retained'
 const signal = new AbortController().signal
 
 let ctx: Context | undefined
@@ -85,29 +83,24 @@ describe('Prime realm through the real run_code transport', () => {
 
     const first = await runCode(alpha, `
       const lookup = new Map([['a', { id: 'a' }]])
-      state.lookup = lookup
-      state.read = (id: string) => lookup.get(id)
-      return state.lookup.size
+      const read = (id: string) => lookup.get(id)
+      lookup.size
     `)
     expect(first.result).toBe(1)
-    expect(first.logs).toContain(FRESH_GENERATION)
 
-    const second = await runCode(alpha, 'return state.read("a")')
+    const second = await runCode(alpha, 'read("a")')
     expect(second.result).toEqual({ id: 'a' })
-    expect(second.logs).toContain(RETAINED_GENERATION)
 
-    const isolated = await runCode(beta, 'return { empty: Object.keys(state).length === 0, keys: Object.keys(state) }')
-    expect(isolated.result).toEqual({ empty: true, keys: [] })
-    expect(isolated.logs).toContain(FRESH_GENERATION)
+    const isolated = await runCode(beta, '({ empty: typeof read === "undefined" })')
+    expect(isolated.result).toEqual({ empty: true })
 
     const hidden = await runCode(alpha, `
-      return {
+      ({
         member: 'prime_realm_identity' in tools,
         keys: Object.keys(tools),
         access: tools.prime_realm_identity === undefined,
-      }
+      })
     `)
     expect(hidden.result).toEqual({ member: false, keys: [], access: true })
-    expect(hidden.logs).toContain(RETAINED_GENERATION)
   })
 })

@@ -1,5 +1,5 @@
 /**
- * Phase 2 of `docs/plan/tool-failure-recovery.md`: the real `run_code` transport
+ * Failure recovery acceptance through the real `run_code` transport
  * over the real ToolRuntime, the real Prime runtime, and the real realm identity
  * tool. Every assertion here is about what a FAILURE leaves behind — which
  * independent results survive, whether the realm generation is still trustworthy,
@@ -26,9 +26,7 @@ import * as primeAgent from '../src/index.js'
 import { registerRealmIdentity } from '../src/realm/identity-tool.js'
 import * as primeRuntime from '../src/runtime.js'
 
-const FRESH = '[prime-realm] generation 1 started with an empty state'
-const RETAINED = '[prime-realm] generation 1 retained'
-const LOST = '[prime-realm] generation 2 started; live-only state from the previous generation was lost'
+const LOST = '[prime-realm] live namespace restarted; previous bindings were lost'
 const MISSING_PATH = 'missing.txt'
 const READABLE_PATH = 'alpha.txt'
 
@@ -253,6 +251,7 @@ describe('ordinary tool failure inside a Prime program', () => {
     await startHost({ tools: [readTool(observed)] })
     const alpha = testAgent('failure-percall', root as string)
 
+    // A captured tool failure is the program's business, not the realm's.
     const run = await completes(alpha.agent, `
       const attempt = async (path: string) => {
         try {
@@ -266,7 +265,7 @@ describe('ordinary tool failure inside a Prime program', () => {
           throw error
         }
       }
-      return await Promise.all([attempt(${JSON.stringify(READABLE_PATH)}), attempt(${JSON.stringify(MISSING_PATH)})])
+      await Promise.all([attempt(${JSON.stringify(READABLE_PATH)}), attempt(${JSON.stringify(MISSING_PATH)})])
     `)
 
     expect(Array.isArray(run.result)).toBe(true)
@@ -286,8 +285,6 @@ describe('ordinary tool failure inside a Prime program', () => {
     expect(observed.maxInFlight).toBe(2)
     expect(observed.reads.sort()).toEqual([READABLE_PATH, MISSING_PATH].sort())
     expect(dispatches(alpha, 'probe_read').map(entry => entry.isError).sort()).toEqual([false, true])
-    // A captured tool failure is the program's business, not the realm's.
-    expect(run.logs).toContain(FRESH)
   }, 30_000)
 
   it('fails the run on a bare Promise.all rejection while the realm generation survives', async () => {
@@ -296,17 +293,16 @@ describe('ordinary tool failure inside a Prime program', () => {
     await startHost({ tools: [readTool(observed)] })
     const alpha = testAgent('failure-promise-all', root as string)
 
-    const seeded = await completes(alpha.agent, 'state.progress = "seeded"; return state.progress')
+    const seeded = await completes(alpha.agent, 'let progress = "seeded"; progress')
     expect(seeded.result).toBe('seeded')
-    expect(seeded.logs).toContain(FRESH)
 
     const failure = await fails(alpha.agent, `
       const both = await Promise.all([
         tools.probe_read({ path: ${JSON.stringify(READABLE_PATH)} }),
         tools.probe_read({ path: ${JSON.stringify(MISSING_PATH)} }),
       ])
-      state.progress = "never reached"
-      return both
+      progress = "never reached"
+      both
     `)
     expect(failure.message).toContain('code run failed (exception)')
     expect(failure.message).toContain('ENOENT')
@@ -315,11 +311,10 @@ describe('ordinary tool failure inside a Prime program', () => {
     // Fail-fast does not unwind the sibling that had already been dispatched.
     expect(observed.reads).toContain(READABLE_PATH)
 
-    // An ordinary program failure ends the run, not the realm: the heap the
-    // first run wrote is still there, and the notice says so.
-    const after = await completes(alpha.agent, 'return state.progress ?? null')
+    // An ordinary program failure ends the run, not the realm: the live binding
+    // created by the first cell remains available.
+    const after = await completes(alpha.agent, 'progress')
     expect(after.result).toBe('seeded')
-    expect(after.logs).toContain(RETAINED)
   }, 30_000)
 })
 
@@ -343,14 +338,10 @@ describe('program failure inside a Prime program', () => {
     // is what lets it write a smaller repair program instead of replaying.
     expect(failure.message).toContain('Captured output:')
     for (let index = 0; index < 5; index++) expect(failure.message).toContain(`checkpoint ${index}`)
-    // The generation notice rides in the same captured output, so the failure
-    // itself tells the model the realm is still trustworthy.
-    expect(failure.message).toContain(FRESH)
     // Bounded: the whole failure text stays inside the deployment's output cap.
     expect(Buffer.byteLength(failure.message, 'utf8')).toBeLessThanOrEqual(maxOutputBytes)
 
-    const after = await completes(alpha.agent, 'return 1')
-    expect(after.logs).toContain(RETAINED)
+    await completes(alpha.agent, '1')
   }, 30_000)
 
   it('leaves a completed mutation in place and never claims it was rolled back', async () => {
@@ -378,16 +369,15 @@ describe('program failure inside a Prime program', () => {
     // Nothing in the failure text may suggest the harness undid the write.
     expect(failure.message).not.toMatch(/roll(ed|ing)? ?back|rollback|reverted|undone|restored/i)
 
-    // And no automatic replay happens on the next run either: the realm is
-    // retained, and the mutation was performed exactly once.
-    const after = await completes(alpha.agent, 'return 1')
-    expect(after.logs).toContain(RETAINED)
+    // And no automatic replay happens on the next run either: the mutation was
+    // performed exactly once.
+    await completes(alpha.agent, '1')
     expect(calls).toEqual(['ledger.txt'])
   }, 30_000)
 })
 
 describe('generation loss recovery through durable checkpoints', () => {
-  it('reports the lost generation and rebuilds state from the durable checkpoint', async () => {
+  it('reports the lost generation and rebuilds live bindings from the durable checkpoint', async () => {
     await makeRoot('dsh-prime-fail-generation-')
     const notes: string[] = []
     await startHost({
@@ -397,38 +387,36 @@ describe('generation loss recovery through durable checkpoints', () => {
     })
     const alpha = testAgent('failure-generation', root as string)
 
-    // The checkpoint is an EXPLICIT program decision: reduce the live state and
+    // The checkpoint is an EXPLICIT program decision: reduce the live data and
     // write it to a durable task file before the risky stretch.
     const seeded = await completes(alpha.agent, `
-      state.processed = ["a", "b"]
+      const processed = ["a", "b"]
       const note = await tools.append_note({
         name: "recovery_checkpoint.json",
-        text: JSON.stringify({ processed: state.processed, nextIndex: 2 }),
+        text: JSON.stringify({ processed, nextIndex: 2 }),
       })
-      return { bytes: note.bytes, live: state.processed.length }
+      ;({ bytes: note.bytes, live: processed.length })
     `)
     expect(seeded.result).toMatchObject({ live: 2 })
-    expect(seeded.logs).toContain(FRESH)
 
     // Wall-clock hard kill: the worker dies with the live-only heap.
     const killed = await fails(alpha.agent, 'for (;;) {}')
     expect(killed.message).toContain('code run failed (timeout)')
 
     const recovered = await completes(alpha.agent, `
-      const lost = state.processed === undefined
+      const lost = typeof processed === "undefined"
       const read = await tools.read_note({ name: "recovery_checkpoint.json" })
       const checkpoint = JSON.parse(read.text)
-      state.processed = checkpoint.processed
-      return { lost, nextIndex: checkpoint.nextIndex, rebuilt: state.processed }
+      const rebuilt = checkpoint.processed
+      ;({ lost, nextIndex: checkpoint.nextIndex, rebuilt })
     `)
     expect(recovered.result).toEqual({ lost: true, nextIndex: 2, rebuilt: ['a', 'b'] })
     // The run that actually inherits the new heap is the one that is told.
     expect(recovered.logs.at(-1)).toBe(LOST)
 
-    // The rebuilt state is ordinary retained state from here on.
-    const settled = await completes(alpha.agent, 'return state.processed')
+    // The rebuilt binding is available to later cells in the new generation.
+    const settled = await completes(alpha.agent, 'rebuilt')
     expect(settled.result).toEqual(['a', 'b'])
-    expect(settled.logs.at(-1)).toBe('[prime-realm] generation 2 retained')
   }, 60_000)
 })
 
@@ -447,8 +435,8 @@ describe('identity failure on the automatic binding path', () => {
 
     const failure = await fails(alpha.agent, `
       await tools.mark_reached({ label: "program body" })
-      state.ran = true
-      return "ran"
+      const ran = true
+      "ran"
     `)
 
     expect(failure.message).toContain('realm handshake rejected')
@@ -464,7 +452,7 @@ describe('identity failure on the automatic binding path', () => {
 
     // It also did not silently degrade to the official one-shot runtime, which
     // would have run this program and returned "ran".
-    const repeated = await fails(alpha.agent, 'return "ran"')
+    const repeated = await fails(alpha.agent, '"ran"')
     expect(repeated.message).toContain('realm handshake rejected')
     expect(marks).toEqual([])
   }, 30_000)

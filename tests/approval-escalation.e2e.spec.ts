@@ -1,6 +1,5 @@
 /**
- * Phase 3 acceptance for the tool-failure-recovery plan
- * (`docs/plan/tool-failure-recovery.md`): sandbox escalation through a REAL
+ * Sandbox escalation acceptance through a REAL
  * escalating tool. The chain under test is genuine end to end — the `write`
  * tool from `@deepseek-ai/dsh-tool-fs` with its advertised
  * `sandbox_permissions`/`justification` protocol, the shared

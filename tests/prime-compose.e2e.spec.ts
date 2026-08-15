@@ -154,15 +154,13 @@ describe('Prime host patch composition', () => {
 
     const alpha = testAgent('compose-alpha', root)
     const beta = testAgent('compose-beta', root)
-    const first = await runCode(alpha.agent, 'state.answer = 424242; return state.answer')
+    const first = await runCode(alpha.agent, 'const answer = 424242; answer')
     expect(first.result).toBe(424242)
-    expect(first.logs.at(-1)).toBe('[prime-realm] generation 1 started with an empty state')
 
-    const retained = await runCode(alpha.agent, 'return state.answer')
-    expect(retained.result).toBe(424242)
-    expect(retained.logs.at(-1)).toBe('[prime-realm] generation 1 retained')
+    const second = await runCode(alpha.agent, 'answer')
+    expect(second.result).toBe(424242)
 
-    const isolated = await runCode(beta.agent, 'return state.answer ?? null')
+    const isolated = await runCode(beta.agent, 'typeof answer === "undefined" ? null : answer')
     expect(isolated.result).toBeNull()
     expect(alpha.events.some(event => event.type === 'tool/code-dispatch'
       && isRecord(event.data) && event.data.name === 'prime_realm_identity')).toBe(true)
@@ -180,7 +178,7 @@ describe('Prime host patch composition', () => {
     const big = await ctx.tools.execute({
       callId: CallId(`prime-compose-${++callNumber}`),
       name: RUN_CODE_NAME,
-      arguments: { code: 'return "SPILL-".repeat(1000)', description: 'Exercise the composed spill chain' },
+      arguments: { code: '"SPILL-".repeat(1000)', description: 'Exercise the composed spill chain' },
       signal: testSignal,
       agent: alpha.agent,
     })

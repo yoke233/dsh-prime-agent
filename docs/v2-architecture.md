@@ -17,7 +17,7 @@ Prime Agent 最有辨识度的部分不是一组 memory 条目，而是 RLM 工�
 ```text
 用户任务
   → run_code（组合、过滤、并发）
-  → Realm state（跨 run 保留中间值、函数与索引）
+  → Realm live namespace（跨 cell 保留中间值、函数与索引）
   → subagent / jobs（独立执行与后台生命周期）
   → 持久任务文件（跨重启检查点）
   → 反复验证后的经验才进入 prime_refine
@@ -34,9 +34,9 @@ Prime Agent 最有辨识度的部分不是一组 memory 条目，而是 RLM 工�
 
 ### `realm/` 与 `runtime.ts`：持久计算命名空间
 
-选择 Prime preset 的 Session 经 `prime_realm_identity` handshake 路由到长期 TypeScript Worker：显式写入 `state` 的函数、对象、Map、索引和 module cache 在正常的后续 `run_code` 之间保留。普通 Session 继续使用官方 one-shot Worker。身份、generation 语义、binding lease 与资源治理见 [v0.3 路线](v0.3-roadmap.md)。
+选择 Prime preset 的 Session 经 `prime_realm_identity` handshake 路由到长期 TypeScript Worker：普通顶层变量、函数、对象、Map 和索引在后续 `run_code` cell 中自然可用。普通 Session 继续使用官方 one-shot Worker。身份、namespace 生命周期、binding lease 与资源治理见 [v0.3 路线](v0.3-roadmap.md)。
 
-Realm 是 live-only 的：hard kill 后 heap 丢失,下一次 run 收到明确的 generation 通知。需要跨重启存活的检查点由程序显式写入持久任务文件。
+Realm 是 live-only 的：hard kill 后 namespace 丢失，下一次真实执行会明确提示之前的 bindings 已丢失。需要跨重启存活的检查点由程序显式写入持久任务文件。
 
 ### Code Mode：唯一模型控制面
 
@@ -44,7 +44,8 @@ Realm 是 live-only 的：hard kill 后 heap 丢失,下一次 run 收到明确�
 
 控制面 policy（`src/policy.ts`）明确要求：
 
-- Realm `state` 是默认工作区，中间值赋值即保留。
+- 每次 `run_code` 是同一 live namespace 的下一 cell；普通顶层 binding 自动保留。
+- cell 的末尾表达式是结果，不使用顶层 `return`。
 - 先归约、后返回：大结果在程序内过滤、聚合，只返回当前决策需要的摘要。
 - 阶段边界把必须跨重启存活的内容写入持久任务文件。
 - 独立前台工作用 `Promise.all`；best-effort 探测逐项捕获；副作用型 mutation 顺序执行。
@@ -86,7 +87,7 @@ continual prompt snapshot 只包含有界的稳定经验。每条经验以 JSON-
 1. 控制面 policy。
 2. 有界 continual learning snapshot。
 
-大值不进入 prompt：它们要么以 Realm `state` 活值存在于 Worker heap，要么落在持久任务文件里,进入上下文的只有程序显式返回的归约结果。
+大值不进入 prompt：它们要么以 live binding 存在于 Worker heap，要么落在持久任务文件里，进入上下文的只有程序显式返回的归约结果。
 
 ## 状态布局
 
@@ -106,7 +107,7 @@ local 文件名使用 Session id 的散列，不把原始 id 暴露到文件名�
 
 持久 IPython 的优势是保留活 Python 对象、函数和 Kernel 命名空间；代价是另一套进程、Comm/RPC、资源配额、崩溃恢复、安全和 Agent scope 绑定。
 
-DSH TypeScript Code Runtime 已提供唯一模型可见 `run_code` 界面、scoped tool SDK、并发组合、日志、取消、输出约束以及与 Subagent/Jobs 的原生集成。持久 Realm 在此之上补齐了 Prime 的持久计算命名空间：函数、import、对象、索引和 client 跨 run 延续，而无需第二套 Kernel 生命周期。
+DSH TypeScript Code Runtime 已提供唯一模型可见 `run_code` 界面、scoped tool SDK、并发组合、日志、取消、输出约束以及与 Subagent/Jobs 的原生集成。持久 Realm 在此之上补齐了 Prime 的持久计算命名空间：普通顶层变量、函数、对象、索引和 client 跨 cell 延续，而无需第二套 Kernel 生命周期。
 
 ## 配置与部署不变量
 
@@ -115,7 +116,7 @@ DSH TypeScript Code Runtime 已提供唯一模型可见 `run_code` 界面、scop
 - `requireOrchestrationTools` 默认 true。
 - global refinement 默认 false。
 - refine 工具名必须匹配小写字母、数字和下划线规则。
-- 所有 limit 必须为正整数；Schemastery 还对 state 的最低安全值做约束。
+- 所有 limit 必须为正整数。
 - bundle patch 替换 host `code-runtime` provider 并接管 subagent-report 投递；随包 Prime preset 由 runtime 启动时落位。默认 preset、`tools` mode 与既有 preset 均不变。
 
 ## 后续边界

@@ -1,6 +1,6 @@
 /**
  * Host side of one Persistent Realm: a long-lived worker thread that keeps its
- * `state` heap across runs, executes runs strictly one at a time, and leases
+ * live namespace across runs, executes runs strictly one at a time, and leases
  * binding members only for the run that declared them.
  *
  * The seam contract is unchanged from the shipped one-shot runtime: a program
@@ -15,14 +15,13 @@
 import { randomBytes } from 'node:crypto'
 import { stripTypeScriptTypes } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { MessageChannel, Worker } from 'node:worker_threads'
-import type { MessagePort } from 'node:worker_threads'
+import { MessageChannel, MessagePort, Worker } from 'node:worker_threads'
 import type { EventLoopUtilization } from 'node:perf_hooks'
 import type { Readable } from 'node:stream'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import type { CodeBindingNamespace, CodeJsonValue, CodeRunFailure, CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
 import { HIDDEN_BINDING_MEMBER, MIN_OUTPUT_BYTES, OutputLedger } from './protocol.js'
-import type { HostToRealm, RealmNamespaceSpec, RealmStateKeys, RealmToHost } from './protocol.js'
+import type { HostToRealm, RealmNamespaceSpec, RealmToHost } from './protocol.js'
 
 /** Per-run resource ceilings. Every field is an increment for ONE run, not a realm lifetime total. */
 export interface RealmBudgets {
@@ -45,12 +44,6 @@ export interface RealmBudgets {
    * as {@link maxHostCallsPerRun}. Unbounded when absent.
    */
   maxParallelHostCallsPerRun?: number
-  /**
-   * Own keys `state` may hold when a run settles. Over the cap the run fails
-   * with an exception and the heap is LEFT ALONE, so the next run can prune it.
-   * Unbounded when absent.
-   */
-  maxStateEntries?: number
 }
 
 /**
@@ -60,17 +53,14 @@ export interface RealmBudgets {
  * against and whether the heap it inherits is a fresh one.
  */
 export interface RealmRunNotice {
-  /** The generation the program is about to execute in. */
-  generation: number
   /**
    * Whether this is the FIRST run to dispatch on this worker, i.e. the program
-   * starts from an empty `state`. True for a brand-new realm and for the
-   * replacement worker after a hard kill; false for every later run, which is
-   * exactly when a caller may tell the model its heap carried over.
+   * starts from an empty live namespace. True for a brand-new realm and for the
+   * replacement worker after a hard kill; false for every later run.
    */
   fresh: boolean
-  /** Whether a hard kill destroyed a live-only heap since the previous run reported. */
-  stateLost: boolean
+  /** Whether a hard kill destroyed the previous live namespace. */
+  namespaceLost: boolean
 }
 
 /**
@@ -198,21 +188,21 @@ function waitForPipeDrain(stream: Readable): Promise<void> {
 }
 
 /**
- * Rebuild the key census a settlement reported, or nothing. The worker executes
- * model code, so the census is inbound data like every other field: an entry
- * that is not a string, or a count that is not a whole number, discards the
- * whole census rather than putting model-shaped junk in front of the caller.
+ * Node's public Worker API cannot unref the shared MessagePort that backs
+ * `worker.stdout` and `worker.stderr` once either stream starts reading. Find
+ * that port by value rather than by Node's private symbol name, so an idle realm
+ * can release every handle while keeping the pipes reusable for the next run.
  */
-function parseStateKeys(raw: unknown): RealmStateKeys | undefined {
-  if (typeof raw !== 'object' || raw === null) return undefined
-  const { names, omitted } = raw as Record<string, unknown>
-  if (!Array.isArray(names) || !Number.isSafeInteger(omitted) || (omitted as number) < 0) return undefined
-  const rebuilt: string[] = []
-  for (const name of names as unknown[]) {
-    if (typeof name !== 'string') return undefined
-    rebuilt.push(name)
+function workerStdioPorts(worker: Worker): MessagePort[] {
+  const ports = new Set<MessagePort>()
+  for (const stream of [worker.stdout, worker.stderr]) {
+    const record = stream as unknown as Record<symbol, unknown>
+    for (const symbol of Object.getOwnPropertySymbols(stream)) {
+      const value = record[symbol]
+      if (value instanceof MessagePort) ports.add(value)
+    }
   }
-  return { names: rebuilt, omitted: omitted as number }
+  return [...ports]
 }
 
 /**
@@ -241,18 +231,16 @@ function parseWorkerMessage(raw: unknown): RealmToHost | undefined {
     }
     case 'output-limit': return { type: 'output-limit', runId, nonce }
     case 'done': {
-      const keys = parseStateKeys(message.state)
-      const census = keys !== undefined ? { state: keys } : {}
       if (message.error !== undefined) {
         if (typeof message.error !== 'object' || message.error === null) return undefined
         const { kind, message: detail } = message.error as Record<string, unknown>
         if (kind !== 'exception' && kind !== 'invalid-output' && kind !== 'output-limit') return undefined
         if (typeof detail !== 'string') return undefined
-        return { type: 'done', runId, nonce, error: { kind, message: detail }, ...census }
+        return { type: 'done', runId, nonce, error: { kind, message: detail } }
       }
-      if (message.json === undefined) return { type: 'done', runId, nonce, ...census }
+      if (message.json === undefined) return { type: 'done', runId, nonce }
       if (typeof message.json !== 'string') return undefined
-      return { type: 'done', runId, nonce, json: message.json, ...census }
+      return { type: 'done', runId, nonce, json: message.json }
     }
     default: return undefined
   }
@@ -262,6 +250,7 @@ function parseWorkerMessage(raw: unknown): RealmToHost | undefined {
 interface RealmSession {
   worker: Worker
   port: MessagePort
+  stdioPorts: MessagePort[]
   dead: boolean
   /**
    * The run that currently owns this worker's NATIVE pipes. Native-level bytes
@@ -277,7 +266,7 @@ interface RealmSession {
    * window those bytes would land on whichever run dispatched next.
    */
   draining: boolean
-  /** Whether any run has dispatched on this worker, i.e. whether `state` can hold anything. */
+  /** Whether any run has dispatched on this worker. */
   dispatched: boolean
 }
 
@@ -286,7 +275,6 @@ interface RunEntry {
   readonly request: CodeRunRequest
   readonly bindings: Map<string, CodeBindingNamespace>
   readonly onStart: ((notice: RealmRunNotice) => void) | undefined
-  readonly onState: ((keys: RealmStateKeys) => void) | undefined
   readonly resolve: (result: CodeRunResult) => void
   readonly finished: Promise<void>
   finish: () => void
@@ -300,15 +288,25 @@ interface RunEntry {
   answered: Set<number>
   hostCalls: number
   hostCallsInFlight: number
+  /** Worker terminal held until every host call accepted before it has settled. */
+  pendingDone: Extract<RealmToHost, { type: 'done' }> | undefined
   eluBaseline: EventLoopUtilization | undefined
   eluTimer: NodeJS.Timeout | undefined
   wallTimer: NodeJS.Timeout | undefined
 }
 
+interface InjectedErrorClassSchema {
+  name: string
+  memberNameProperty: string
+}
+
+/** Namespace globals persist for a Realm lifetime; callable members are leased per run. */
+type InjectedGlobalSchema = ReadonlyMap<string, InjectedErrorClassSchema | null>
+
 /**
  * One realm: a lazily spawned worker, a strictly serial run queue, and the
- * generation bookkeeping a caller needs to tell the model its live-only state
- * is gone.
+ * lifecycle bookkeeping a caller needs to tell the model its live namespace is
+ * gone.
  */
 export class PersistentRealm {
   /** Opaque routing identity; never rendered into a result or diagnostic. */
@@ -324,6 +322,7 @@ export class PersistentRealm {
   private generationValue = 1
   private generationBumpPending = false
   private noticePending = false
+  private injectedGlobalSchema: InjectedGlobalSchema | undefined
   private lastUsed = Date.now()
   private disposed = false
 
@@ -357,16 +356,6 @@ export class PersistentRealm {
     return this.generationValue
   }
 
-  /** Whether a hard kill has happened that no caller has reported to the model yet. */
-  get generationNoticePending(): boolean {
-    return this.noticePending
-  }
-
-  /** Clear the pending notice once a caller has told the model its live-only state was lost. */
-  acknowledgeGenerationNotice(): void {
-    this.noticePending = false
-  }
-
   /** No run is active and none is waiting. */
   get idle(): boolean {
     return this.activeRun === undefined && this.queue.length === 0
@@ -381,23 +370,19 @@ export class PersistentRealm {
    * Admit one run. Runs execute in admission order, one at a time; a run still
    * queued when its signal fires cancels only itself.
    * @param request - the program, its bindings, and the abort signal.
-   * @param onStart - called once if and when the run reaches a worker, with the
-   *   generation it will execute in. A run that never dispatches (cancelled
+   * @param onStart - called once if and when the run reaches a worker. A run
+   *   that never dispatches (cancelled
    *   while queued, rejected by the type-strip, or unable to start a worker)
-   *   never calls it, so a pending state-loss report survives for the run that
+   *   never calls it, so a pending namespace-loss report survives for the run that
    *   actually inherits the new heap.
-   * @param onState - called once if and when the worker reports the run
-   *   settled, with the bounded census of `state` as it stands afterwards. A
-   *   run the host ended itself (abort, budget, worker death) never calls it:
-   *   the heap it would describe no longer exists. Delivered as DATA — this
-   *   module never renders a model-facing notice.
    * @returns the run's outcome; rejects only on caller misuse.
    */
-  run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void, onState?: (keys: RealmStateKeys) => void): Promise<CodeRunResult> {
+  run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<CodeRunResult> {
     if (this.disposed) return Promise.reject(new Error('dsh-prime-agent: realm run() after disposal'))
     let bindings: Map<string, CodeBindingNamespace>
     try {
       bindings = this.validateBindings(request)
+      this.validateInjectedGlobalSchema(bindings)
     } catch (error: unknown) {
       return Promise.reject(error instanceof Error ? error : new Error(String(error)))
     }
@@ -411,7 +396,6 @@ export class PersistentRealm {
       request,
       bindings,
       onStart,
-      onState,
       resolve,
       finished,
       finish,
@@ -425,6 +409,7 @@ export class PersistentRealm {
       answered: new Set<number>(),
       hostCalls: 0,
       hostCallsInFlight: 0,
+      pendingDone: undefined,
       eluBaseline: undefined,
       eluTimer: undefined,
       wallTimer: undefined,
@@ -508,6 +493,40 @@ export class PersistentRealm {
     return bindings
   }
 
+  /**
+   * Freeze structural globals on the first valid admission. Later runs may
+   * omit and restore known namespaces or change their leased function members,
+   * but cannot change globals already installed in the live namespace.
+   */
+  private validateInjectedGlobalSchema(bindings: ReadonlyMap<string, CodeBindingNamespace>): void {
+    const candidate = new Map<string, InjectedErrorClassSchema | null>()
+    for (const [global, namespace] of bindings) {
+      const descriptor = namespace.errorClass
+      candidate.set(global, descriptor
+        ? { name: descriptor.name, memberNameProperty: descriptor.memberNameProperty }
+        : null)
+    }
+    const frozen = this.injectedGlobalSchema
+    if (frozen === undefined) {
+      this.injectedGlobalSchema = candidate
+      return
+    }
+    for (const [global, descriptor] of candidate) {
+      if (!frozen.has(global)) {
+        throw new Error(`dsh-prime-agent: binding namespace ${JSON.stringify(global)} was not declared by this Realm's first Prime run`)
+      }
+      const expected = frozen.get(global) as InjectedErrorClassSchema | null
+      const same = expected === null
+        ? descriptor === null
+        : descriptor !== null
+          && expected.name === descriptor.name
+          && expected.memberNameProperty === descriptor.memberNameProperty
+      if (!same) {
+        throw new Error(`dsh-prime-agent: binding namespace ${JSON.stringify(global)} changed its frozen error class descriptor`)
+      }
+    }
+  }
+
   /** A signal fired: cancel a queued run alone, or hard-kill the worker running an active one. */
   private onSignalAbort(entry: RunEntry): void {
     if (entry.settled) return
@@ -547,7 +566,7 @@ export class PersistentRealm {
       code = stripped.slice(STRIP_WRAP.prefix.length, stripped.length - STRIP_WRAP.suffix.length)
     } catch (error: unknown) {
       // A program that does not survive the type-strip never reaches the
-      // worker, so it can neither disturb `state` nor cost a generation.
+      // worker, so it can neither disturb the live namespace nor cost a generation.
       this.settle(entry, entry.ledger.failure([], { kind: 'exception', message: messageOf(error) }))
       return
     }
@@ -565,6 +584,7 @@ export class PersistentRealm {
     let session: RealmSession
     try {
       session = this.ensureSession()
+      this.refSession(session)
     } catch (error: unknown) {
       // The substrate refused to start; that is a failed run, not caller misuse.
       // The diagnostic is this module's own text plus Node's stable error code:
@@ -578,15 +598,13 @@ export class PersistentRealm {
     // This run owns the worker's native pipes until it settles.
     session.strayOwner = entry
     if (entry.onStart) {
-      // `ensureSession` has already materialized any pending generation bump, so
-      // this names the worker the program is about to run in. Consuming the
-      // notice here — rather than when the caller admitted the run — is what
+      // Consuming the loss here — rather than when the caller admitted the run —
       // keeps it attached to the run that actually inherits the fresh heap.
-      const stateLost = this.noticePending
+      const namespaceLost = this.noticePending
       this.noticePending = false
       const fresh = !session.dispatched
       try {
-        entry.onStart({ generation: this.generationValue, fresh, stateLost })
+        entry.onStart({ fresh, namespaceLost })
       } catch {
         // Bookkeeping for the caller's benefit; a throw there is not the run's
         // problem and must not strand an armed dispatch.
@@ -619,7 +637,6 @@ export class PersistentRealm {
       code,
       namespaces,
       maxOutputBytes: this.budgets.maxOutputBytes,
-      ...this.budgets.maxStateEntries !== undefined ? { maxStateEntries: this.budgets.maxStateEntries } : {},
     })
   }
 
@@ -653,7 +670,15 @@ export class PersistentRealm {
     // Materialize a pending increment now that the worker it names exists, so
     // the generation number a caller reads cannot disagree with the heap.
     void this.generation
-    const session: RealmSession = { worker, port: channel.port1, dead: false, strayOwner: undefined, draining: false, dispatched: false }
+    const session: RealmSession = {
+      worker,
+      port: channel.port1,
+      stdioPorts: workerStdioPorts(worker),
+      dead: false,
+      strayOwner: undefined,
+      draining: false,
+      dispatched: false,
+    }
     this.session = session
     channel.port1.on('message', (raw: unknown) => { this.onControlMessage(session, raw) })
     // The program's own exceptions never arrive here — the worker catches those
@@ -665,6 +690,22 @@ export class PersistentRealm {
     worker.stdout.on('data', (chunk: Buffer) => { this.onStrayOutput(session, chunk) })
     worker.stderr.on('data', (chunk: Buffer) => { this.onStrayOutput(session, chunk) })
     return session
+  }
+
+  /** Keep an admitted run alive when it reuses a Worker parked while idle. */
+  private refSession(session: RealmSession): void {
+    if (session.dead) return
+    session.worker.ref()
+    session.port.ref()
+    for (const port of session.stdioPorts) port.ref()
+  }
+
+  /** Let a live but idle generation survive without owning the host lifetime. */
+  private unrefIdleSession(session: RealmSession | undefined): void {
+    if (!session || session.dead || this.session !== session || !this.idle) return
+    session.port.unref()
+    for (const port of session.stdioPorts) port.unref()
+    session.worker.unref()
   }
 
   /** Post one control message, tolerating a session torn down underneath us. */
@@ -680,9 +721,16 @@ export class PersistentRealm {
   /** Route one inbound control message, escalating anything outside the protocol. */
   private onControlMessage(session: RealmSession, raw: unknown): void {
     if (session.dead) return
+    const active = this.activeRun
+    // A terminal closes the worker-to-host side of the run immediately. The
+    // host may still be waiting for calls it already accepted, but the worker
+    // has no legitimate log, call, limit, or second terminal left to send.
+    if (active && !active.settled && active.session === session && active.pendingDone !== undefined) {
+      this.hardKill(session, run => run.ledger.failure(run.logs, PROTOCOL_VIOLATION))
+      return
+    }
     const message = parseWorkerMessage(raw)
     if (!message) return
-    const active = this.activeRun
     // The nonce is the part model code cannot supply: it never reaches the
     // program, so traffic quoting it is the worker's own bookkeeping rather
     // than something forged over a stolen port.
@@ -726,22 +774,23 @@ export class PersistentRealm {
       void this.dispatchCall(session, active, message).catch(() => {
         /* c8 ignore next 2 -- dispatchCall answers every call itself; this keeps a stray throw off the host's unhandled-rejection path. */
         this.post(session, { type: 'reply', runId: message.runId, id: message.id, ok: false, message: 'binding call failed' })
-      }).finally(() => { active.hostCallsInFlight -= 1 })
+      }).finally(() => { this.onHostCallSettled(active) })
       return
     }
-    this.onDone(active, message)
+    active.pendingDone = message
+    if (active.hostCallsInFlight === 0) this.onDone(active, message)
   }
 
-  /** Settle one run from the worker's terminal message. */
+  /** Release one accepted host call and consume a waiting normal terminal. */
+  private onHostCallSettled(entry: RunEntry): void {
+    entry.hostCallsInFlight -= 1
+    if (entry.hostCallsInFlight !== 0 || entry.settled || entry.session?.dead === true) return
+    const pendingDone = entry.pendingDone
+    if (pendingDone !== undefined) this.onDone(entry, pendingDone)
+  }
+
+  /** Settle one run after its worker terminal and accepted host calls are both complete. */
   private onDone(entry: RunEntry, message: Extract<RealmToHost, { type: 'done' }>): void {
-    if (entry.onState && message.state) {
-      try {
-        entry.onState(message.state)
-      } catch {
-        // Bookkeeping for the caller's benefit, exactly like `onStart`: a throw
-        // there is not the run's problem and must not strand its settlement.
-      }
-    }
     if (message.error) {
       // A completion that overflowed the cap is reported by a worker that has
       // already finished the program, so the realm keeps its heap.
@@ -883,6 +932,7 @@ export class PersistentRealm {
   private settle(entry: RunEntry, result: CodeRunResult): void {
     if (entry.settled) return
     entry.settled = true
+    entry.pendingDone = undefined
     if (entry.eluTimer) clearInterval(entry.eluTimer)
     if (entry.wallTimer) clearTimeout(entry.wallTimer)
     entry.detachAbort?.()
@@ -902,6 +952,7 @@ export class PersistentRealm {
     // from here on is out of protocol.
     if (this.activeRun === entry) this.activeRun = undefined
     this.lastUsed = Date.now()
+    this.unrefIdleSession(session)
     entry.resolve(result)
     entry.finish()
   }

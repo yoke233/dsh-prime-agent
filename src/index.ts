@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-system-prompt'
+import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import { registerContinual } from './continual/plugin.js'
 import type { HarnessLimits } from './continual/types.js'
 import { registerPolicy } from './policy.js'
@@ -61,6 +61,49 @@ const CONTINUAL_DEFAULTS: HarnessLimits = {
   maxPromptCharsPerScope: 16000,
 }
 
+const SDK_ASYNC_BODY = 'the body of an async TypeScript function'
+const SDK_REPL_CELL = 'a persistent TypeScript REPL cell'
+const SDK_RETURN_RULE = '- Emit results with `return` and/or `console.log(...)`. ONLY what you print or return comes back to you — intermediate tool results never enter the conversation, so extract just what you need.'
+const SDK_COMPLETION_RULE = '- The final expression is the result; top-level `return` is invalid. `console.log(...)` still emits logs. Only logs and the final-expression result come back, so extract just what you need.'
+const RUN_CODE_DESCRIPTION = 'Execute one persistent TypeScript REPL cell against the available tools. Top-level `await` works and ordinary top-level bindings remain available to later cells. The final expression is the result; top-level `return` is invalid. Call tools as `await tools.name(args)` per the system-prompt declarations.'
+const RUN_CODE_CODE_DESCRIPTION = 'One persistent TypeScript REPL cell; use its final expression as the result, without a top-level return.'
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Keep the public Code Mode presentation aligned with Prime's REPL executor. */
+function applyReplPresentation(assembly: PromptAssembly): PromptAssembly {
+  const sdk = assembly.sections.find(section => section.name === 'tools:sdk')
+  if (sdk === undefined || !sdk.text.includes(SDK_ASYNC_BODY) || !sdk.text.includes(SDK_RETURN_RULE)) {
+    throw new Error('dsh-prime-agent: tools:sdk does not match the supported TypeScript Code Mode contract')
+  }
+  sdk.text = sdk.text
+    .replace(SDK_ASYNC_BODY, SDK_REPL_CELL)
+    .replace(SDK_RETURN_RULE, SDK_COMPLETION_RULE)
+
+  assembly.tools = assembly.tools.map((tool) => {
+    if (tool.name !== RUN_CODE_NAME) return tool
+    const properties = tool.parameters.properties
+    const code = isRecord(properties) ? properties.code : undefined
+    if (!isRecord(properties) || !isRecord(code)) {
+      throw new Error('dsh-prime-agent: run_code schema does not match the supported TypeScript Code Mode contract')
+    }
+    return {
+      ...tool,
+      description: RUN_CODE_DESCRIPTION,
+      parameters: {
+        ...tool.parameters,
+        properties: {
+          ...properties,
+          code: { ...code, description: RUN_CODE_CODE_DESCRIPTION },
+        },
+      },
+    }
+  })
+  return assembly
+}
+
 function toolName(value: string | undefined, fallback: string, field: string): string {
   const resolved = (value ?? fallback).trim()
   if (!/^[a-z][a-z0-9_]*$/.test(resolved)) {
@@ -103,7 +146,7 @@ export function apply(ctx: Context, config: Config): void {
         // not worth putting it into a host log.
         throw new Error(`dsh-prime-agent: this agent must use Code Mode; expected the sole model-visible tool to be ${RUN_CODE_NAME}`)
       }
-      return result
+      return applyReplPresentation(result)
     })
   }
 }

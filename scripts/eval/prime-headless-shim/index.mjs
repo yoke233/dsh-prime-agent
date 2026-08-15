@@ -1,7 +1,7 @@
-// Test-only copy of @deepseek-ai/dsh-headless lib/index.js with ONE addition:
-// the agent setup hook mounts the roster's default agent preset, which the
-// shipped runner never does. Task text arrives via the headlessStartup service
-// instead of row config so this row needs no Config schema.
+// Test-only copy of @deepseek-ai/dsh-headless lib/index.js with two additions:
+// mount the roster's default preset, and force exit only if a handle remains
+// after the launcher's graceful shutdown. Task text arrives via the
+// headlessStartup service instead of row config so this row needs no Config.
 import { randomUUID } from 'node:crypto'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -50,7 +50,9 @@ async function run(ctx, task, io) {
   const outcome = summarize(agent.session.events, firstSeq)
   io.stdout.write(outcome.text + '\n')
   if (outcome.reason?.kind === 'error') io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
-  io.exit(outcome.reason?.kind === 'completed' ? 0 : 1)
+  const exitCode = outcome.reason?.kind === 'completed' ? 0 : 1
+  io.exit(exitCode)
+  setTimeout(() => process.exit(exitCode), 6_000).unref()
 }
 
 export function apply(ctx) {

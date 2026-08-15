@@ -8,7 +8,7 @@
  * request is handed to the official one-shot runtime UNCHANGED. What is
  * deliberately impossible is the third path: a Prime request whose handshake
  * fails never falls back to one-shot, because a session that silently changed
- * state semantics mid-conversation is worse than a session that fails loudly.
+ * persistence semantics mid-conversation is worse than a session that fails loudly.
  * @module dsh-prime-agent/realm/runtime
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -49,20 +49,10 @@ export declare class PrimeCodeRuntime extends CodeRuntime {
     private readonly maxActiveRealms;
     private readonly maxIdleMs;
     private readonly pool;
-    /**
-     * Realm ids whose heap this runtime destroyed, mapped to the generation count
-     * they had reached. Presence means "the next run for this id must be told its
-     * live-only state is gone"; the record is consumed by that run. One small
-     * record per reclaimed realm id survives, which is what makes a reclamation
-     * distinguishable from a first-ever run.
-     *
-     * Deliberately PROCESS-LOCAL, and correct without durable state: realm ids
-     * persist, but a restarted host presents every realm as a fresh worker, and a
-     * fresh worker never reports `retained`. What a restart loses is only the
-     * continuity of the generation NUMBER, not the truthfulness of the claim.
-     */
-    private readonly lostHeaps;
     private readonly disposals;
+    private admissionTail;
+    private releaseAdmissionStop;
+    private readonly admissionStopped;
     private disposed;
     constructor(ctx: Context, options: PrimeCodeRuntimeOptions);
     /**
@@ -72,7 +62,15 @@ export declare class PrimeCodeRuntime extends CodeRuntime {
      * @returns the run's outcome per the seam contract.
      */
     run(request: CodeRunRequest): Promise<CodeRunResult>;
-    /** Admit the run into its realm and append the state notice the model needs. */
+    /** Reserve call order before authentication reveals which realm owns it. */
+    private reserveAdmission;
+    /**
+     * Start one authenticated outcome in call order, then immediately release the
+     * next admission. `action()` synchronously enqueues a valid cell before it
+     * returns its settlement promise, so this never serializes different realms.
+     */
+    private finishAdmission;
+    /** Admit the run into its realm and append a fresh-namespace notice when needed. */
     private execute;
     /** The realm for one id, creating or reclaiming as the pool ceiling allows. */
     private acquire;

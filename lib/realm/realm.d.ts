@@ -1,6 +1,6 @@
 /**
  * Host side of one Persistent Realm: a long-lived worker thread that keeps its
- * `state` heap across runs, executes runs strictly one at a time, and leases
+ * live namespace across runs, executes runs strictly one at a time, and leases
  * binding members only for the run that declared them.
  *
  * The seam contract is unchanged from the shipped one-shot runtime: a program
@@ -12,7 +12,6 @@
  * @module dsh-prime-agent/realm/realm
  */
 import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
-import type { RealmStateKeys } from './protocol.js';
 /** Per-run resource ceilings. Every field is an increment for ONE run, not a realm lifetime total. */
 export interface RealmBudgets {
     /** Event-loop busy-time budget for one run, measured as the worker's ELU delta since that run started. */
@@ -34,12 +33,6 @@ export interface RealmBudgets {
      * as {@link maxHostCallsPerRun}. Unbounded when absent.
      */
     maxParallelHostCallsPerRun?: number;
-    /**
-     * Own keys `state` may hold when a run settles. Over the cap the run fails
-     * with an exception and the heap is LEFT ALONE, so the next run can prune it.
-     * Unbounded when absent.
-     */
-    maxStateEntries?: number;
 }
 /**
  * What a run saw when it actually began executing. Delivered at DISPATCH, not
@@ -48,22 +41,19 @@ export interface RealmBudgets {
  * against and whether the heap it inherits is a fresh one.
  */
 export interface RealmRunNotice {
-    /** The generation the program is about to execute in. */
-    generation: number;
     /**
      * Whether this is the FIRST run to dispatch on this worker, i.e. the program
-     * starts from an empty `state`. True for a brand-new realm and for the
-     * replacement worker after a hard kill; false for every later run, which is
-     * exactly when a caller may tell the model its heap carried over.
+     * starts from an empty live namespace. True for a brand-new realm and for the
+     * replacement worker after a hard kill; false for every later run.
      */
     fresh: boolean;
-    /** Whether a hard kill destroyed a live-only heap since the previous run reported. */
-    stateLost: boolean;
+    /** Whether a hard kill destroyed the previous live namespace. */
+    namespaceLost: boolean;
 }
 /**
  * One realm: a lazily spawned worker, a strictly serial run queue, and the
- * generation bookkeeping a caller needs to tell the model its live-only state
- * is gone.
+ * lifecycle bookkeeping a caller needs to tell the model its live namespace is
+ * gone.
  */
 export declare class PersistentRealm {
     /** Opaque routing identity; never rendered into a result or diagnostic. */
@@ -78,6 +68,7 @@ export declare class PersistentRealm {
     private generationValue;
     private generationBumpPending;
     private noticePending;
+    private injectedGlobalSchema;
     private lastUsed;
     private disposed;
     constructor(options: {
@@ -90,10 +81,6 @@ export declare class PersistentRealm {
      * so repeated reads between two runs stay stable.
      */
     get generation(): number;
-    /** Whether a hard kill has happened that no caller has reported to the model yet. */
-    get generationNoticePending(): boolean;
-    /** Clear the pending notice once a caller has told the model its live-only state was lost. */
-    acknowledgeGenerationNotice(): void;
     /** No run is active and none is waiting. */
     get idle(): boolean;
     /** Epoch milliseconds of the most recent admission or settlement, for pool LRU/TTL. */
@@ -102,19 +89,14 @@ export declare class PersistentRealm {
      * Admit one run. Runs execute in admission order, one at a time; a run still
      * queued when its signal fires cancels only itself.
      * @param request - the program, its bindings, and the abort signal.
-     * @param onStart - called once if and when the run reaches a worker, with the
-     *   generation it will execute in. A run that never dispatches (cancelled
+     * @param onStart - called once if and when the run reaches a worker. A run
+     *   that never dispatches (cancelled
      *   while queued, rejected by the type-strip, or unable to start a worker)
-     *   never calls it, so a pending state-loss report survives for the run that
+     *   never calls it, so a pending namespace-loss report survives for the run that
      *   actually inherits the new heap.
-     * @param onState - called once if and when the worker reports the run
-     *   settled, with the bounded census of `state` as it stands afterwards. A
-     *   run the host ended itself (abort, budget, worker death) never calls it:
-     *   the heap it would describe no longer exists. Delivered as DATA — this
-     *   module never renders a model-facing notice.
      * @returns the run's outcome; rejects only on caller misuse.
      */
-    run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void, onState?: (keys: RealmStateKeys) => void): Promise<CodeRunResult>;
+    run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<CodeRunResult>;
     /**
      * Stop admission, terminate the worker, and await complete settlement: no
      * worker, timer, or unsettled run outlives this call.
@@ -122,6 +104,12 @@ export declare class PersistentRealm {
     dispose(): Promise<void>;
     /** Reject malformed binding globals or typed-error declarations as caller misuse. */
     private validateBindings;
+    /**
+     * Freeze structural globals on the first valid admission. Later runs may
+     * omit and restore known namespaces or change their leased function members,
+     * but cannot change globals already installed in the live namespace.
+     */
+    private validateInjectedGlobalSchema;
     /** A signal fired: cancel a queued run alone, or hard-kill the worker running an active one. */
     private onSignalAbort;
     /** Start the next queued run, if the realm is free to take one. */
@@ -130,11 +118,17 @@ export declare class PersistentRealm {
     private dispatch;
     /** The live worker, spawning a new generation when the previous one is gone. */
     private ensureSession;
+    /** Keep an admitted run alive when it reuses a Worker parked while idle. */
+    private refSession;
+    /** Let a live but idle generation survive without owning the host lifetime. */
+    private unrefIdleSession;
     /** Post one control message, tolerating a session torn down underneath us. */
     private post;
     /** Route one inbound control message, escalating anything outside the protocol. */
     private onControlMessage;
-    /** Settle one run from the worker's terminal message. */
+    /** Release one accepted host call and consume a waiting normal terminal. */
+    private onHostCallSettled;
+    /** Settle one run after its worker terminal and accepted host calls are both complete. */
     private onDone;
     /**
      * Charge one binding call against this run's host-call budgets, or report why

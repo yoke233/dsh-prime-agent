@@ -36,8 +36,6 @@ export interface Config {
     maxHostCallsPerRun?: number;
     /** Host binding calls one run may have in flight at once. */
     maxParallelHostCallsPerRun?: number;
-    /** Own keys `state` may hold when a run settles. */
-    maxStateEntries?: number;
 }
 export declare const Config: z<Config>;
 /**

@@ -1,6 +1,6 @@
 /**
  * Long-lived realm worker: one V8 isolate per realm generation that owns a
- * `state` namespace surviving across runs, executes at most one program at a
+ * REPL namespace surviving across cells, executes at most one program at a
  * time, and leases binding members only for the duration of the run that
  * declared them.
  *
@@ -12,22 +12,32 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
+import type { Runtime } from 'node:inspector'
+import { Session as InspectorSession } from 'node:inspector/promises'
 import { createRequire } from 'node:module'
 import { inspect } from 'node:util'
 import { workerData } from 'node:worker_threads'
 import type { MessagePort } from 'node:worker_threads'
-import type { HostToRealm, RealmNamespaceSpec, RealmProgramFailure, RealmStateKeys, RealmToHost } from './protocol.js'
+import type { HostToRealm, RealmNamespaceSpec, RealmProgramFailure, RealmToHost } from './protocol.js'
 
 const CapturedAbortController = AbortController
 const CapturedAbortSignal = AbortSignal
 const CapturedError = Error
 const CapturedMap = Map
 const CapturedSet = Set
+const capturedAsyncLocalStorageGetStore = AsyncLocalStorage.prototype.getStore
+const capturedAsyncLocalStorageRun = AsyncLocalStorage.prototype.run
 const capturedAbortSignalAny = AbortSignal.any
+const capturedArrayPush = Array.prototype.push
 const capturedArrayIsArray = Array.isArray
 const capturedBufferByteLength = Buffer.byteLength
 const capturedJsonParse = JSON.parse
 const capturedJsonStringify = JSON.stringify
+const capturedMapClear = Map.prototype.clear
+const capturedMapDelete = Map.prototype.delete
+const capturedMapForEach = Map.prototype.forEach
+const capturedMapGet = Map.prototype.get
+const capturedMapSet = Map.prototype.set
 const capturedNumberIsFinite = Number.isFinite
 const capturedObjectCreate = Object.create
 const capturedObjectDefineProperty = Object.defineProperty
@@ -36,16 +46,17 @@ const capturedObjectHasOwn = Object.hasOwn
 const capturedObjectIs = Object.is
 const capturedObjectPrototype = Object.prototype
 const capturedPropertyIsEnumerable = Object.prototype.propertyIsEnumerable
+const capturedReflectApply = Reflect.apply
+const capturedReflectDeleteProperty = Reflect.deleteProperty
 const capturedReflectOwnKeys = Reflect.ownKeys
+const capturedSetAdd = Set.prototype.add
+const capturedSetClear = Set.prototype.clear
+const capturedSetDelete = Set.prototype.delete
+const capturedSetForEach = Set.prototype.forEach
+const capturedSetHas = Set.prototype.has
 const capturedStringSlice = String.prototype.slice
-const capturedSymbolToString = Symbol.prototype.toString
-
-/**
- * The async function constructor, reached through an instance because
- * `AsyncFunction` is not a global.
- */
-/* c8 ignore next -- the arrow exists only to reach the AsyncFunction constructor; it is never invoked. */
-const AsyncFunction = (async () => {}).constructor as new (...args: string[]) => (...fnArgs: unknown[]) => Promise<unknown>
+const capturedStringStartsWith = String.prototype.startsWith
+const capturedSymbolIterator = Symbol.iterator
 
 /**
  * Mirrors `HIDDEN_BINDING_MEMBER` in `./protocol.ts`, which this module cannot
@@ -53,15 +64,6 @@ const AsyncFunction = (async () => {}).constructor as new (...args: string[]) =>
  * every namespace declaration it sends.
  */
 const HIDDEN_BINDING_MEMBER = 'prime_realm_identity'
-
-/**
- * Ceilings on the key census one settlement carries. They bound the WIRE, not
- * the notice: these names are model-chosen text, so the host clamps again when
- * it renders. Reporting more keys, or longer ones, than the host can ever show
- * would only cost a copy across the port.
- */
-const MAX_REPORTED_STATE_KEYS = 24
-const MAX_REPORTED_KEY_CHARS = 64
 
 /** Bounded inspect options, so a pathological value cannot explode the rendering. */
 const INSPECT_OPTIONS = { depth: 4, maxArrayLength: 100, maxStringLength: 10_000 } as const
@@ -90,16 +92,83 @@ const port = bootPort
  */
 const capturedPostMessage = (capturedObjectGetPrototypeOf(port) as { postMessage: (message: unknown) => void }).postMessage
 
-// The cross-run namespace, defined exactly once per generation. The local
-// reference is what the entry-count check reads: the program cannot rebind the
-// global, but reaching the namespace through it would still be a lookup model
-// code participates in.
-const state = capturedObjectCreate(null) as object
-capturedObjectDefineProperty(globalThis, 'state', {
-  value: state,
+/** Install one immutable program-visible global owned by the runtime. */
+function installReadonlyGlobal(name: string, value: unknown): void {
+  capturedObjectDefineProperty(globalThis, name, {
+    value,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  })
+}
+
+// Inspector's own request serializer uses ordinary objects and arrays. An
+// inherited `toJSON` can therefore rewrite the command before V8 sees it. Lock
+// the two absent hooks before any model code runs. Session.post assigns
+// `message.params` after creating its request object, so the fixed inherited
+// accessor materializes that own data property. The model cannot replace the
+// non-configurable setter or freeze a writable inherited data slot underneath
+// the Inspector.
+capturedObjectDefineProperty(capturedObjectPrototype, 'toJSON', {
+  value: undefined,
+  enumerable: false,
   writable: false,
   configurable: false,
 })
+capturedObjectDefineProperty(Array.prototype, 'toJSON', {
+  value: undefined,
+  enumerable: false,
+  writable: false,
+  configurable: false,
+})
+capturedObjectDefineProperty(capturedObjectPrototype, 'params', {
+  get: (): undefined => undefined,
+  set(this: object, value: unknown): void {
+    capturedObjectDefineProperty(this, 'params', {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+  },
+  enumerable: false,
+  configurable: false,
+})
+
+const capturedGetBuiltinModule = process.getBuiltinModule
+
+/** Prevent a cell from recovering the runtime Inspector or a module loader. */
+function restrictedGetBuiltinModule(id: string): object | undefined {
+  const normalized = capturedReflectApply(capturedStringStartsWith, id, ['node:'])
+    ? capturedReflectApply(capturedStringSlice, id, ['node:'.length]) as string
+    : id
+  if (normalized === 'module' || normalized === 'async_hooks' || normalized === 'inspector'
+    || capturedReflectApply(capturedStringStartsWith, normalized, ['inspector/'])) {
+    throw new CapturedError(`program access to ${capturedJsonStringify(id)} is disabled`)
+  }
+  return capturedReflectApply(capturedGetBuiltinModule, process, [id]) as object | undefined
+}
+
+capturedObjectDefineProperty(process, 'getBuiltinModule', {
+  value: restrictedGetBuiltinModule,
+  enumerable: false,
+  writable: false,
+  configurable: false,
+})
+capturedObjectDefineProperty(process, 'binding', {
+  value: (): never => { throw new CapturedError('process.binding is disabled in the persistent realm') },
+  enumerable: false,
+  writable: false,
+  configurable: false,
+})
+for (const name of ['_getActiveHandles', '_getActiveRequests'] as const) {
+  capturedObjectDefineProperty(process, name, {
+    value: (): never => { throw new CapturedError(`${name} is disabled in the persistent realm`) },
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  })
+}
 
 /** Constructor type for one program-visible binding rejection class. */
 type BindingErrorConstructor = new (memberName: string, message: string) => Error
@@ -145,7 +214,7 @@ let active: ActiveRun | undefined
 /** Post one control message, tolerating a host that already closed the port. */
 function post(message: RealmToHost): void {
   try {
-    capturedPostMessage.call(port, message)
+    capturedReflectApply(capturedPostMessage, port, [message])
   } catch {
     // The host tore the realm down; there is nobody left to report to.
   }
@@ -160,7 +229,7 @@ function post(message: RealmToHost): void {
 function leasedRunId(): number | undefined {
   const run = active
   if (run === undefined) return undefined
-  return runContext.getStore() === run.id ? run.id : undefined
+  return capturedReflectApply(capturedAsyncLocalStorageGetStore, runContext, []) === run.id ? run.id : undefined
 }
 
 /** Ordered per-run text capture under the run's share of the outer output cap. */
@@ -224,6 +293,7 @@ const consoleShim = capturedObjectCreate(null) as Record<string, (...args: unkno
 for (const level of CONSOLE_LEVELS) {
   consoleShim[level] = (...args: unknown[]): void => { emit(render(args)) }
 }
+installReadonlyGlobal('console', consoleShim)
 
 /** One writable stream as far as this module needs to reshape it. */
 interface CapturableStream {
@@ -253,9 +323,9 @@ function chunkText(chunk: unknown): string {
 function captureStreamWrites(stream: CapturableStream): void {
   stream.write = (chunk: unknown, ...rest: unknown[]): boolean => {
     emit(chunkText(chunk))
-    const callback = [rest[0], rest[1]].find(
-      (arg): arg is (error?: Error | null) => void => typeof arg === 'function',
-    )
+    const callback = typeof rest[0] === 'function'
+      ? rest[0] as (error?: Error | null) => void
+      : typeof rest[1] === 'function' ? rest[1] as (error?: Error | null) => void : undefined
     if (callback) queueMicrotask(() => { callback(null) })
     return true
   }
@@ -264,7 +334,7 @@ function captureStreamWrites(stream: CapturableStream): void {
     callback(null)
   }
   stream._writev = (chunks: { chunk: unknown }[], callback: (error?: Error | null) => void): void => {
-    for (const entry of chunks) emit(chunkText(entry.chunk))
+    for (let index = 0; index < chunks.length; index++) emit(chunkText((chunks[index] as { chunk: unknown }).chunk))
     callback(null)
   }
 }
@@ -290,9 +360,9 @@ function wrapTimerFactory(factoryName: string, clearName: string): void {
   const create = globals[factoryName] as (...args: unknown[]) => unknown
   const clear = globals[clearName] as (handle: unknown) => void
   const wrapper = (...args: unknown[]): unknown => {
-    const handle = create(...args)
+    const handle = capturedReflectApply(create, undefined, args)
     const run = active
-    if (run !== undefined) run.timers.push({ clear, handle })
+    if (run !== undefined) capturedReflectApply(capturedArrayPush, run.timers, [{ clear, handle }])
     return handle
   }
   globals[factoryName] = wrapper
@@ -318,12 +388,41 @@ wrapTimerFactory('setImmediate', 'clearImmediate')
  */
 const promiseTimersModule = createRequire(import.meta.url)('node:timers/promises') as Record<string, unknown>
 
+/** A two-signal array whose iteration never consults mutable Array prototypes. */
+function ownedSignalPair(first: AbortSignal, second: AbortSignal): AbortSignal[] {
+  const signals = [first, second]
+  capturedObjectDefineProperty(signals, capturedSymbolIterator, {
+    value: (): Iterator<AbortSignal> => {
+      let index = 0
+      const iterator = capturedObjectCreate(null) as Iterator<AbortSignal>
+      capturedObjectDefineProperty(iterator, 'next', {
+        value: (): IteratorResult<AbortSignal> => {
+          if (index === 0) {
+            index = 1
+            return { value: first, done: false }
+          }
+          if (index === 1) {
+            index = 2
+            return { value: second, done: false }
+          }
+          return { value: undefined, done: true }
+        },
+      })
+      return iterator
+    },
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  })
+  return signals
+}
+
 /** The current run's cancellation signal merged with whatever the caller passed. */
 function runCancellation(supplied: unknown): AbortSignal | undefined {
   const run = active
   const callerSignal = supplied instanceof CapturedAbortSignal ? supplied : undefined
   if (run === undefined) return callerSignal
-  return callerSignal ? capturedAbortSignalAny([run.cancel.signal, callerSignal]) : run.cancel.signal
+  return callerSignal ? capturedAbortSignalAny(ownedSignalPair(run.cancel.signal, callerSignal)) : run.cancel.signal
 }
 
 /**
@@ -341,9 +440,9 @@ function wrapPromiseTimer(factoryName: string, optionsIndex: number): void {
     const signal = runCancellation((options as { signal?: unknown }).signal)
     // Padded to the options position: called as `setTimeout(50)`, the bag would
     // otherwise land in the value slot.
-    while (args.length < optionsIndex) args.push(undefined)
+    while (args.length < optionsIndex) capturedReflectApply(capturedArrayPush, args, [undefined])
     args[optionsIndex] = { ...options, ...signal ? { signal } : {} }
-    return original(...args)
+    return capturedReflectApply(original, undefined, args)
   }
 }
 wrapPromiseTimer('setTimeout', 2)
@@ -362,7 +461,7 @@ if (typeof scheduler === 'object' && scheduler !== null) {
       const options = typeof supplied === 'object' && supplied !== null ? { ...supplied } : {}
       const signal = runCancellation((options as { signal?: unknown }).signal)
       args[1] = { ...options, ...signal ? { signal } : {} }
-      return originalWait(...args)
+      return capturedReflectApply(originalWait, undefined, args)
     }
   }
 }
@@ -394,13 +493,13 @@ function defineBindingErrorField(error: Error, key: string, value: string): void
 
 /**
  * Materialize one namespace's rejection class, cached across runs so a
- * constructor the program stored in `state` keeps its identity.
+ * constructor captured by a retained binding keeps its identity.
  */
 function ensureErrorClass(descriptor: { name: string; memberNameProperty: string }): BindingErrorConstructor {
   // A JSON pair, not a delimiter-joined string: no member name can forge a
   // collision with a different class name.
   const cacheKey = capturedJsonStringify([descriptor.name, descriptor.memberNameProperty])
-  const cached = errorClasses.get(cacheKey)
+  const cached = capturedReflectApply(capturedMapGet, errorClasses, [cacheKey]) as BindingErrorConstructor | undefined
   if (cached) return cached
   const created = class BindingCallError extends CapturedError {
     constructor(memberName: string, message: string) {
@@ -409,7 +508,8 @@ function ensureErrorClass(descriptor: { name: string; memberNameProperty: string
       defineBindingErrorField(this, descriptor.memberNameProperty, memberName)
     }
   }
-  errorClasses.set(cacheKey, created)
+  installReadonlyGlobal(descriptor.name, created)
+  capturedReflectApply(capturedMapSet, errorClasses, [cacheKey, created])
   return created
 }
 
@@ -421,14 +521,14 @@ function bindingFailure(handle: NamespaceHandle, name: string, message: string):
 
 /**
  * The stable wrapper for one member name: created once per namespace and reused
- * forever, so a function the program captured in `state` still resolves to the
- * CURRENT run's host implementation on a later run.
+ * forever, so a retained closure still resolves to the CURRENT run's host
+ * implementation on a later run.
  */
 function wrapperFor(handle: NamespaceHandle, name: string): (args: unknown) => Promise<unknown> {
-  const cached = handle.wrappers.get(name)
+  const cached = capturedReflectApply(capturedMapGet, handle.wrappers, [name]) as ((args: unknown) => Promise<unknown>) | undefined
   if (cached) return cached
   const wrapper = (args: unknown): Promise<unknown> => callBinding(handle, name, args)
-  handle.wrappers.set(name, wrapper)
+  capturedReflectApply(capturedMapSet, handle.wrappers, [name, wrapper])
   return wrapper
 }
 
@@ -438,7 +538,7 @@ function callBinding(handle: NamespaceHandle, name: string, args: unknown): Prom
   if (runId === undefined) {
     return Promise.reject(bindingFailure(handle, name, `tool lease revoked for ${handle.global}.${name}: it is not callable outside its own run`))
   }
-  if (!handle.allowed.has(name)) {
+  if (!capturedReflectApply(capturedSetHas, handle.allowed, [name])) {
     return Promise.reject(bindingFailure(handle, name, `unknown binding ${capturedJsonStringify(`${handle.global}.${name}`)}`))
   }
   const run = active as ActiveRun
@@ -450,10 +550,10 @@ function callBinding(handle: NamespaceHandle, name: string, args: unknown): Prom
   }
   return new Promise<unknown>((resolve, reject) => {
     const id = run.nextCallId++
-    run.pending.set(id, {
+    capturedReflectApply(capturedMapSet, run.pending, [id, {
       resolve,
       reject: (message: string) => { reject(bindingFailure(handle, name, message)) },
-    })
+    }])
     post({ type: 'call', runId, nonce: run.nonce, id, global: handle.global, name, json })
   })
 }
@@ -464,7 +564,7 @@ function callBinding(handle: NamespaceHandle, name: string, args: unknown): Prom
  * leased member set behind it.
  */
 function ensureHandle(global: string): NamespaceHandle {
-  const cached = handles.get(global)
+  const cached = capturedReflectApply(capturedMapGet, handles, [global]) as NamespaceHandle | undefined
   if (cached) return cached
   const target = capturedObjectCreate(null) as object
   const handle: NamespaceHandle = {
@@ -475,10 +575,19 @@ function ensureHandle(global: string): NamespaceHandle {
     errorClass: undefined,
   }
   handle.proxy = new Proxy(target, {
-    get: (_target, property) => typeof property === 'string' && handle.allowed.has(property) ? wrapperFor(handle, property) : undefined,
-    has: (_target, property) => typeof property === 'string' && handle.allowed.has(property),
-    ownKeys: () => [...handle.allowed],
-    getOwnPropertyDescriptor: (_target, property) => typeof property === 'string' && handle.allowed.has(property)
+    get: (_target, property) => typeof property === 'string' && capturedReflectApply(capturedSetHas, handle.allowed, [property])
+      ? wrapperFor(handle, property)
+      : undefined,
+    has: (_target, property) => typeof property === 'string' && capturedReflectApply(capturedSetHas, handle.allowed, [property]),
+    ownKeys: () => {
+      const names: string[] = []
+      capturedReflectApply(capturedSetForEach, handle.allowed, [(name: string) => {
+        capturedReflectApply(capturedArrayPush, names, [name])
+      }])
+      return names
+    },
+    getOwnPropertyDescriptor: (_target, property) => typeof property === 'string'
+      && capturedReflectApply(capturedSetHas, handle.allowed, [property])
       ? { value: wrapperFor(handle, property), enumerable: true, configurable: true, writable: false }
       : undefined,
     getPrototypeOf: () => null,
@@ -486,21 +595,24 @@ function ensureHandle(global: string): NamespaceHandle {
     defineProperty: () => false,
     deleteProperty: () => false,
   })
-  handles.set(global, handle)
+  installReadonlyGlobal(global, handle.proxy)
+  capturedReflectApply(capturedMapSet, handles, [global, handle])
   return handle
 }
 
 /** Install exactly this run's lease across every namespace the realm has ever seen. */
 function installNamespaces(specs: RealmNamespaceSpec[]): void {
-  for (const handle of handles.values()) {
-    handle.allowed.clear()
+  capturedReflectApply(capturedMapForEach, handles, [(handle: NamespaceHandle) => {
+    capturedReflectApply(capturedSetClear, handle.allowed, [])
     handle.errorClass = undefined
-  }
-  for (const spec of specs) {
+  }])
+  for (let specIndex = 0; specIndex < specs.length; specIndex++) {
+    const spec = specs[specIndex] as RealmNamespaceSpec
     const handle = ensureHandle(spec.global)
-    for (const name of spec.names) {
+    for (let nameIndex = 0; nameIndex < spec.names.length; nameIndex++) {
+      const name = spec.names[nameIndex] as string
       if (name === HIDDEN_BINDING_MEMBER) continue
-      handle.allowed.add(name)
+      capturedReflectApply(capturedSetAdd, handle.allowed, [name])
     }
     handle.errorClass = spec.errorClass ? ensureErrorClass(spec.errorClass) : undefined
   }
@@ -508,7 +620,9 @@ function installNamespaces(specs: RealmNamespaceSpec[]): void {
 
 /** Revoke every lease. Called before a run's terminal message reaches the host. */
 function revokeLeases(): void {
-  for (const handle of handles.values()) handle.allowed.clear()
+  capturedReflectApply(capturedMapForEach, handles, [(handle: NamespaceHandle) => {
+    capturedReflectApply(capturedSetClear, handle.allowed, [])
+  }])
 }
 
 /**
@@ -531,8 +645,8 @@ function snapshotValue(value: unknown, seen: Set<object>): unknown {
   }
   if (kind !== 'object') throw new CapturedError('value is not lossless JSON')
   const source = value as object
-  if (seen.has(source)) throw new CapturedError('value is not lossless JSON')
-  seen.add(source)
+  if (capturedReflectApply(capturedSetHas, seen, [source])) throw new CapturedError('value is not lossless JSON')
+  capturedReflectApply(capturedSetAdd, seen, [source])
   let snapshot: unknown
   if (capturedArrayIsArray(source)) {
     const items = source as unknown[]
@@ -540,20 +654,24 @@ function snapshotValue(value: unknown, seen: Set<object>): unknown {
     const target: unknown[] = []
     for (let index = 0; index < items.length; index++) {
       if (!capturedObjectHasOwn(items, index)) throw new CapturedError('value is not lossless JSON')
-      target.push(snapshotValue(items[index], seen))
+      capturedReflectApply(capturedArrayPush, target, [snapshotValue(items[index], seen)])
     }
     snapshot = target
   } else {
     const prototype: unknown = capturedObjectGetPrototypeOf(source)
     if (prototype !== null && prototype !== capturedObjectPrototype) throw new CapturedError('value is not lossless JSON')
     const target = capturedObjectCreate(null) as Record<string, unknown>
-    for (const key of capturedReflectOwnKeys(source)) {
-      if (typeof key !== 'string' || !capturedPropertyIsEnumerable.call(source, key)) throw new CapturedError('value is not lossless JSON')
+    const keys = capturedReflectOwnKeys(source)
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index] as string | symbol
+      if (typeof key !== 'string' || !capturedReflectApply(capturedPropertyIsEnumerable, source, [key])) {
+        throw new CapturedError('value is not lossless JSON')
+      }
       target[key] = snapshotValue((source as Record<string, unknown>)[key], seen)
     }
     snapshot = target
   }
-  seen.delete(source)
+  capturedReflectApply(capturedSetDelete, seen, [source])
   return snapshot
 }
 
@@ -596,41 +714,122 @@ function prepareException(error: unknown, remaining: number, maxOutputBytes: num
   return boundedFailure('exception', message, remaining, maxOutputBytes)
 }
 
-/**
- * Report `state` holding more own keys than the run was allowed, or `undefined`
- * when it is within budget. Checked at settlement rather than on write: the
- * heap is deliberately LEFT as the program built it, so the next run can prune
- * it instead of losing a generation.
- */
-function stateOverflow(maxStateEntries: number | undefined): string | undefined {
-  if (maxStateEntries === undefined) return undefined
-  // Every own key, not just the enumerable string ones: a cap the program can
-  // step around with `Object.defineProperty(state, k, { enumerable: false })`
-  // or a symbol key would constrain nobody but a cooperative program.
-  const entries = capturedReflectOwnKeys(state).length
-  if (entries <= maxStateEntries) return undefined
-  return `realm state holds ${entries} entries, over the cap of ${maxStateEntries}; delete entries from state before the next run`
+type BoundaryKind = 'completion' | 'exception'
+type ReplEvaluateParameters = Runtime.EvaluateParameterType & { disableBreaks: boolean; replMode: boolean }
+
+const INTERNAL_BOUNDARY_GROUP = 'dsh-prime-internal-boundary'
+const INTERNAL_BOUNDARY_GLOBAL = '__dsh_prime_internal_boundary__'
+const CALL_BOUNDARY = 'function(kind, value, remaining, maxOutputBytes) { return this(kind, value, remaining, maxOutputBytes); }'
+
+/** One retained module-local entry point shared by completion and exception values. */
+function prepareBoundary(
+  kind: BoundaryKind,
+  value: unknown,
+  remaining: number,
+  maxOutputBytes: number,
+): DoneFragment {
+  return kind === 'completion'
+    ? prepareCompletion(value, remaining, maxOutputBytes)
+    : prepareException(value, remaining, maxOutputBytes)
 }
 
-/**
- * The bounded census of `state` for the run notice, over the SAME own keys
- * {@link stateOverflow} counts, so what the model is shown is what the cap
- * governs. Names only; a value never crosses on this field.
- *
- * Total by construction — it runs after the program's own guard, where a throw
- * would leave the run without its terminal message: own-key enumeration invokes
- * no getter, and the symbol rendering goes through the captured intrinsic
- * rather than a `String` the program may have replaced.
- */
-function stateKeys(): RealmStateKeys {
-  const own = capturedReflectOwnKeys(state)
-  const names: string[] = []
-  for (const key of own) {
-    if (names.length >= MAX_REPORTED_STATE_KEYS) break
-    const name = typeof key === 'string' ? key : capturedSymbolToString.call(key)
-    names.push(capturedStringSlice.call(name, 0, MAX_REPORTED_KEY_CHARS))
+/** Convert one Inspector value into a same-world call argument without serializing it. */
+function callArgument(value: Runtime.RemoteObject): Runtime.CallArgument {
+  const argument = capturedObjectCreate(null) as Runtime.CallArgument
+  if (capturedObjectHasOwn(value, 'objectId') && value.objectId !== undefined) {
+    argument.objectId = value.objectId
+  } else if (capturedObjectHasOwn(value, 'unserializableValue') && value.unserializableValue !== undefined) {
+    argument.unserializableValue = value.unserializableValue
+  } else if (capturedObjectHasOwn(value, 'value')) {
+    argument.value = value.value
   }
-  return { names, omitted: own.length - names.length }
+  return argument
+}
+
+/** Detach the trusted, already-validated boundary envelope returned by value. */
+function doneFragment(value: Runtime.RemoteObject): DoneFragment {
+  if (!capturedObjectHasOwn(value, 'value') || typeof value.value !== 'object' || value.value === null) {
+    throw new CapturedError('Inspector boundary returned an invalid terminal fragment')
+  }
+  const fragment = value.value as Record<string, unknown>
+  const hasJson = capturedObjectHasOwn(fragment, 'json')
+  const hasError = capturedObjectHasOwn(fragment, 'error')
+  if (hasJson && hasError) throw new CapturedError('Inspector boundary returned an ambiguous terminal fragment')
+  if (hasJson) {
+    if (typeof fragment.json !== 'string') throw new CapturedError('Inspector boundary returned invalid completion JSON')
+    return { json: fragment.json }
+  }
+  if (!hasError) return {}
+  const error = fragment.error
+  if (typeof error !== 'object' || error === null) throw new CapturedError('Inspector boundary returned an invalid failure')
+  const record = error as Record<string, unknown>
+  const kind = record.kind
+  if ((kind !== 'exception' && kind !== 'invalid-output' && kind !== 'output-limit') || typeof record.message !== 'string') {
+    throw new CapturedError('Inspector boundary returned an invalid failure')
+  }
+  return { error: { kind, message: record.message } }
+}
+
+const inspectorSession = new InspectorSession()
+inspectorSession.connect()
+await inspectorSession.post('Runtime.enable')
+
+// Inspector has no API for turning a module-local JS value into a RemoteObject.
+// Expose the dispatcher only long enough to retain its handle, before any model
+// code can run, then delete the sole program-visible route to it.
+capturedObjectDefineProperty(globalThis, INTERNAL_BOUNDARY_GLOBAL, {
+  value: prepareBoundary,
+  enumerable: false,
+  writable: false,
+  configurable: true,
+})
+let retainedBoundary: Runtime.EvaluateReturnType
+try {
+  retainedBoundary = await inspectorSession.post('Runtime.evaluate', {
+    expression: `globalThis[${capturedJsonStringify(INTERNAL_BOUNDARY_GLOBAL)}]`,
+    objectGroup: INTERNAL_BOUNDARY_GROUP,
+    includeCommandLineAPI: false,
+    silent: true,
+    returnByValue: false,
+    generatePreview: false,
+  })
+} finally {
+  if (!capturedReflectDeleteProperty(globalThis, INTERNAL_BOUNDARY_GLOBAL)) {
+    throw new CapturedError('failed to hide the Inspector boundary bridge')
+  }
+}
+if (capturedObjectHasOwn(retainedBoundary, 'exceptionDetails') || retainedBoundary.result.objectId === undefined) {
+  throw new CapturedError('failed to retain the Inspector boundary bridge')
+}
+const boundaryObjectId = retainedBoundary.result.objectId
+
+/** Run the existing boundary policy against a RemoteObject in its own V8 world. */
+async function prepareRemoteBoundary(
+  kind: BoundaryKind,
+  value: Runtime.RemoteObject,
+  remaining: number,
+  maxOutputBytes: number,
+  objectGroup: string,
+): Promise<DoneFragment> {
+  const prepared = await inspectorSession.post('Runtime.callFunctionOn', {
+    objectId: boundaryObjectId,
+    functionDeclaration: CALL_BOUNDARY,
+    arguments: [
+      { value: kind },
+      callArgument(value),
+      { value: remaining },
+      { value: maxOutputBytes },
+    ],
+    silent: true,
+    returnByValue: true,
+    generatePreview: false,
+    awaitPromise: false,
+    objectGroup,
+  })
+  if (capturedObjectHasOwn(prepared, 'exceptionDetails')) {
+    throw new CapturedError('Inspector boundary execution failed')
+  }
+  return doneFragment(prepared.result)
 }
 
 /** Execute one program body, then settle exactly once. */
@@ -650,38 +849,50 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
   // reach exactly one terminal message even if the SETUP fails, or the host
   // waits out its wall clock for a message that is never coming.
   let done: DoneFragment
+  const objectGroup = `dsh-prime-run-${run.id}`
   try {
     installNamespaces(message.namespaces)
-    const parameterNames: string[] = []
-    const parameterValues: unknown[] = []
-    for (const spec of message.namespaces) {
-      parameterNames.push(spec.global)
-      parameterValues.push(ensureHandle(spec.global).proxy)
+    const parameters: ReplEvaluateParameters = {
+      // The directive and the program's first line deliberately share a
+      // physical line, so every later source line keeps its original number.
+      expression: `'use strict';${message.code}\n//# sourceURL=dsh-prime-cell-${run.id}.mjs`,
+      objectGroup,
+      includeCommandLineAPI: false,
+      silent: true,
+      returnByValue: false,
+      generatePreview: false,
+      awaitPromise: true,
+      disableBreaks: true,
+      replMode: true,
     }
-    for (const spec of message.namespaces) {
-      if (!spec.errorClass) continue
-      parameterNames.push(spec.errorClass.name)
-      parameterValues.push(ensureErrorClass(spec.errorClass))
-    }
-    const program = new AsyncFunction(...parameterNames, 'console', `'use strict';\n${message.code}`)
-    const value = await runContext.run(run.id, () => program(...parameterValues, consoleShim))
-    done = prepareCompletion(value, run.logs.remaining(), message.maxOutputBytes)
+    const evaluated = await capturedReflectApply(capturedAsyncLocalStorageRun, runContext, [
+      run.id,
+      () => inspectorSession.post('Runtime.evaluate', parameters),
+    ]) as Runtime.EvaluateReturnType
+    const exceptionDetails = capturedObjectHasOwn(evaluated, 'exceptionDetails') ? evaluated.exceptionDetails : undefined
+    done = await prepareRemoteBoundary(
+      exceptionDetails === undefined ? 'completion' : 'exception',
+      exceptionDetails?.exception ?? evaluated.result,
+      run.logs.remaining(),
+      message.maxOutputBytes,
+      objectGroup,
+    )
   } catch (error: unknown) {
     done = prepareException(error, run.logs.remaining(), message.maxOutputBytes)
-  }
-  if (done.error === undefined) {
-    // A run that already failed keeps its own diagnostic: the cap will bite
-    // again on the next run, and replacing the program's error here would hide
-    // the bug that produced it.
-    const overflow = stateOverflow(message.maxStateEntries)
-    if (overflow !== undefined) done = boundedFailure('exception', overflow, run.logs.remaining(), message.maxOutputBytes)
+  } finally {
+    try {
+      await inspectorSession.post('Runtime.releaseObjectGroup', { objectGroup })
+    } catch (error: unknown) {
+      done = prepareException(error, run.logs.remaining(), message.maxOutputBytes)
+    }
   }
 
   // Revoke first, then release the run slot, then clean up the managed handles
   // this run left behind: nothing the program armed may outlive its settlement.
   revokeLeases()
   active = undefined
-  for (const timer of run.timers) {
+  for (let timerIndex = 0; timerIndex < run.timers.length; timerIndex++) {
+    const timer = run.timers[timerIndex] as ActiveRun['timers'][number]
     try {
       timer.clear(timer.handle)
     } catch {
@@ -695,12 +906,11 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
   // Calls the program fired without awaiting can never be answered now: the
   // host stops replying at settlement. Failing them keeps a program that
   // persisted one from hanging its next run on a promise nobody will settle.
-  for (const call of run.pending.values()) call.reject('tool lease revoked: the run that issued this call has ended')
-  run.pending.clear()
-  // The census travels with every settlement, failed runs included: a failure
-  // leaves the heap exactly as the program built it, so the names it holds are
-  // still what the next run will inherit.
-  post({ type: 'done', runId: run.id, nonce: run.nonce, state: stateKeys(), ...done })
+  capturedReflectApply(capturedMapForEach, run.pending, [(call: PendingCall) => {
+    call.reject('tool lease revoked: the run that issued this call has ended')
+  }])
+  capturedReflectApply(capturedMapClear, run.pending, [])
+  post({ type: 'done', runId: run.id, nonce: run.nonce, ...done })
 }
 
 port.on('message', (message: HostToRealm) => {
@@ -712,9 +922,9 @@ port.on('message', (message: HostToRealm) => {
   if (message.type !== 'reply') return
   const run = active
   if (run === undefined || run.id !== message.runId) return
-  const entry = run.pending.get(message.id)
+  const entry = capturedReflectApply(capturedMapGet, run.pending, [message.id]) as PendingCall | undefined
   if (!entry) return
-  run.pending.delete(message.id)
+  capturedReflectApply(capturedMapDelete, run.pending, [message.id])
   if (!message.ok) {
     entry.reject(message.message)
     return

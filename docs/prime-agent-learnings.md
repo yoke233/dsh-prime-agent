@@ -20,7 +20,7 @@ Prime Agent 把 Agent 视为长期运行的计算过程，而不是一次性聊�
 
 模型上下文只保留当前决策需要的信息。大文件、搜索结果和中间数据留在模型请求之外，通过 catalog、范围读取、结构化选择或搜索窗口按需进入推理。
 
-在 DSH 适配中，这一原则由持久 Realm 与程序内归约实现：大结果在 `run_code` 程序内过滤、聚合后留在 Realm `state`，需要跨重启存活的检查点写入持久任务文件；进入上下文的只有当前决策需要的摘要。
+在 DSH 适配中，这一原则由持久 Realm 与程序内归约实现：大结果在 `run_code` 程序内过滤、聚合后留在 live namespace，需要跨重启存活的检查点写入持久任务文件；进入上下文的只有当前决策需要的摘要。
 
 ### 控制面应当可编程
 
@@ -42,7 +42,7 @@ Prime 的 Python shim 表达意图，Host 验证并执行。凭据、Session、A
 
 DSH 插件遵循同一边界：
 
-- 持久 Realm 拥有自己的身份、generation 与资源治理。
+- 持久 Realm 拥有自己的身份、live namespace 与资源治理。
 - Agent、Subagent、Jobs、Goal、Session 和 Code Runtime 继续拥有各自权威状态。
 - 插件只组合公开服务，不复制 registry 或绕过权限。
 - 模型可见工具调用与结果仍进入 DSH 日志路径。

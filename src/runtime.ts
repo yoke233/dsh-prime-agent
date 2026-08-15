@@ -49,7 +49,6 @@ const DEFAULT_MAX_ACTIVE_REALMS = 8
 const DEFAULT_MAX_IDLE_MS = 600_000
 const DEFAULT_MAX_HOST_CALLS_PER_RUN = 200
 const DEFAULT_MAX_PARALLEL_HOST_CALLS_PER_RUN = 16
-const DEFAULT_MAX_STATE_ENTRIES = 256
 
 /** Plugin config: the official budgets passed through, plus realm-pool governance. */
 export interface Config {
@@ -75,8 +74,6 @@ export interface Config {
   maxHostCallsPerRun?: number
   /** Host binding calls one run may have in flight at once. */
   maxParallelHostCallsPerRun?: number
-  /** Own keys `state` may hold when a run settles. */
-  maxStateEntries?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -89,7 +86,6 @@ export const Config: z<Config> = z.object({
   maxIdleMs: z.natural().min(1).default(DEFAULT_MAX_IDLE_MS),
   maxHostCallsPerRun: z.natural().min(1).default(DEFAULT_MAX_HOST_CALLS_PER_RUN),
   maxParallelHostCallsPerRun: z.natural().min(1).default(DEFAULT_MAX_PARALLEL_HOST_CALLS_PER_RUN),
-  maxStateEntries: z.natural().min(1).default(DEFAULT_MAX_STATE_ENTRIES),
 }) as unknown as z<Config>
 
 /**
@@ -180,7 +176,6 @@ function realmBudgets(config: Config): RealmBudgets {
     maxOldGenerationSizeMb: config.maxOldGenerationSizeMb ?? OFFICIAL_DEFAULTS.maxOldGenerationSizeMb,
     maxHostCallsPerRun: config.maxHostCallsPerRun ?? DEFAULT_MAX_HOST_CALLS_PER_RUN,
     maxParallelHostCallsPerRun: config.maxParallelHostCallsPerRun ?? DEFAULT_MAX_PARALLEL_HOST_CALLS_PER_RUN,
-    maxStateEntries: config.maxStateEntries ?? DEFAULT_MAX_STATE_ENTRIES,
   }
 }
 

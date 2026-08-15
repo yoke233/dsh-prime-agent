@@ -62,15 +62,25 @@ describe('Prime Code Mode composition', () => {
     expect(sdk).toContain('prime_refine:')
     expect(sdk).toContain('subagent:')
     expect(sdk).toContain('ToolCallError')
+    expect(sdk).toContain('a persistent TypeScript REPL cell')
+    expect(sdk).toContain('The final expression is the result; top-level `return` is invalid')
+    expect(sdk).not.toContain('the body of an async TypeScript function')
+    expect(sdk).not.toContain('Emit results with `return`')
+    const runCode = initialAssembly.tools[0]
+    expect(runCode?.description).toContain('persistent TypeScript REPL cell')
+    expect(runCode?.description).toContain('top-level `return` is invalid')
+    const codeSchema = (runCode?.parameters.properties as Record<string, Record<string, unknown>> | undefined)?.code
+    expect(codeSchema?.description).toContain('final expression as the result')
     const policy = initialAssembly.sections.find(section => section.name === 'prime-agent:rlm-policy')?.text ?? ''
     expect(policy).toContain('Promise.all')
     expect(policy).toContain('Promise.allSettled')
     expect(policy).toMatch(/bare Promise\.all only for an atomic group/)
     expect(policy).toMatch(/best-effort probes with a per-call catch or Promise\.allSettled/)
     expect(policy).toMatch(/side-effecting mutations sequentially/)
-    expect(policy).toContain('Realm state is the working namespace')
-    expect(policy).toContain('Reduce first, return second')
-    expect(policy).toContain('keep only the reduced form in state')
+    expect(policy).toContain('Each run_code call is the next cell in the same live session')
+    expect(policy).toContain("A cell's result is its final expression; do not use a top-level return")
+    expect(policy).toContain('Reduce first, finish with the summary')
+    expect(policy).toContain('keep reusable intermediates in ordinary top-level bindings')
     expect(policy).toContain('spill locator')
     expect(policy).toContain('do not blindly repeat it')
     expect(policy).toMatch(/sandbox denial, ask once for the minimum permission/)
@@ -78,15 +88,8 @@ describe('Prime Code Mode composition', () => {
     expect(policy).not.toMatch(/rollback|roll back|rolled back/i)
     expect(policy).not.toMatch(/automatic/i)
 
-    // One mental model in one section: hydrate/dehydrate between runs, and the
-    // same verbs one scope out for the handoff to a child.
-    expect(policy).toContain('Hydrate and dehydrate')
-    expect(policy).toContain('const { helper, planIndex } = state')
-    expect(policy).toContain('Object.assign(state, { files, summary })')
-    expect(policy).toMatch(/do not redeclare the same helper, recompute a value, or re-read/)
     // The handoff recipe: material by file, instructions by prompt, snapshot
     // semantics, and a report that only carries conclusions and paths.
-    expect(policy).toMatch(/dehydrate the selected keys to a file instead of to state/)
     expect(policy).toMatch(/Material travels by file, instructions travel in the prompt/)
     expect(policy).toContain('A handoff file is not edited after it is written')
     expect(policy).toContain('never bury task instructions in a data file')
@@ -124,9 +127,9 @@ describe('Prime Code Mode composition', () => {
     const policy = assembly.sections.find(section => section.name === 'prime-agent:policy')?.text
     expect(sdk).toContain('refine_rules:')
     expect(sdk).not.toContain('prime_refine:')
-    expect(policy).toContain('realm state and durable task files')
+    expect(policy).toContain('live namespace and durable task files')
 
     const rlmPolicy = assembly.sections.find(section => section.name === 'prime-agent:rlm-policy')?.text ?? ''
-    expect(rlmPolicy).toContain('Reduce first, return second')
+    expect(rlmPolicy).toContain('Reduce first, finish with the summary')
   })
 })

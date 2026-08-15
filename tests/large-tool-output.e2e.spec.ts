@@ -10,7 +10,7 @@
  * Here we prove the five properties that only appear once a persistent realm
  * sits behind the bridge — the program keeps the whole canonical value while the
  * durable log shrinks, the recovered artifact is the renderer's own text, the
- * realm survives a spill with its generation retained, and neither the hard
+ * realm survives a spill with its live bindings intact, and neither the hard
  * `maxOutputBytes` failure nor a refusing backend is papered over.
  */
 
@@ -34,8 +34,6 @@ import * as SpillPolicy from '@deepseek-ai/dsh-spill-policy'
 import { registerRealmIdentity } from '../src/realm/identity-tool.js'
 import * as primeRuntime from '../src/runtime.js'
 
-const FRESH_GENERATION = '[prime-realm] generation 1 started with an empty state'
-const RETAINED_GENERATION = '[prime-realm] generation 1 retained'
 const signal = new AbortController().signal
 
 /** The model-facing cap every test in this file composes the policy with. */
@@ -277,7 +275,7 @@ async function spillFiles(spillRoot: string): Promise<string[]> {
   return files
 }
 
-describe('scenario 1: nested full value, bounded dispatch log, retained generation', () => {
+describe('scenario 1: nested full value, bounded dispatch log, retained live binding', () => {
   it('gives the program the whole canonical value while the durable log keeps only a preview and locator', async () => {
     const { spillRoot, events, agent } = await bootPrime({ backend: 'local' })
     const expectedRows = reportRows(300, false)
@@ -285,20 +283,19 @@ describe('scenario 1: nested full value, bounded dispatch log, retained generati
 
     const first = await runCode(agent, `
       const report = await tools.big_report({ rows: 300, marker: 'ALPHA' })
-      state.summary = {
+      const summary = {
         rows: report.rows.length,
         chars: report.rows.reduce((total, row) => total + row.length, 0),
         first: report.rows[0],
         last: report.rows[report.rows.length - 1],
       }
-      return { rows: state.summary.rows, chars: state.summary.chars }
+      ;({ rows: summary.rows, chars: summary.chars })
     `)
 
     // The program computed over the COMPLETE structured value: a truncated or
     // locator-substituted binding could not reproduce these two numbers.
     const firstValue = runValue(first)
     expect(firstValue.result).toEqual({ rows: 300, chars: expectedChars })
-    expect(firstValue.logs).toContain(FRESH_GENERATION)
 
     // The durable dispatch copy is bounded, carries the locator, and drops the body.
     const logged = dispatchLogText(events, 'big_report')
@@ -316,8 +313,8 @@ describe('scenario 1: nested full value, bounded dispatch log, retained generati
     // Exactly one artifact: the small outer result was never spilled as well.
     expect(await spillFiles(spillRoot)).toHaveLength(1)
 
-    // The realm survived the spill: the reduced state is still readable next run.
-    const second = await runCode(agent, 'return state.summary')
+    // The realm survived the spill: the reduced live binding is readable next run.
+    const second = await runCode(agent, 'summary')
     const secondValue = runValue(second)
     expect(secondValue.result).toEqual({
       rows: 300,
@@ -325,7 +322,6 @@ describe('scenario 1: nested full value, bounded dispatch log, retained generati
       first: expectedRows[0],
       last: expectedRows[299],
     })
-    expect(secondValue.logs).toContain(RETAINED_GENERATION)
   })
 })
 
@@ -334,7 +330,7 @@ describe('scenario 2: oversized outer completion', () => {
     const { spillRoot, events, agent } = await bootPrime({ backend: 'local' })
     const body = 'OUTER-'.repeat(1000)
 
-    const execution = await runCode(agent, `return "OUTER-".repeat(1000)`)
+    const execution = await runCode(agent, `"OUTER-".repeat(1000)`)
     const value = runValue(execution)
 
     // Execution-local canonical value: complete, untouched by the presentation policy.
@@ -363,7 +359,7 @@ describe('scenario 3: the hard output cap is unchanged', () => {
     // 1024 − the 512-byte trailing-notice reserve leaves the realm 512 bytes.
     const { spillRoot, agent } = await bootPrime({ backend: 'local', maxOutputBytes: 1024 })
 
-    const execution = await runCode(agent, `return "Z".repeat(2000)`)
+    const execution = await runCode(agent, `"Z".repeat(2000)`)
 
     expect(execution.isError).toBe(true)
     if (!execution.isError) throw new Error('expected the hard cap to fail the run')
@@ -385,7 +381,7 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
     const execution = await runCode(agent, `
       const report = await tools.big_report({ rows: 60, marker: 'UNI', unicode: true })
       const joined = report.rows.join('')
-      return { rows: report.rows.length, units: joined.length, points: [...joined].length }
+      ;({ rows: report.rows.length, units: joined.length, points: [...joined].length })
     `)
 
     const joined = expectedRows.join('')
@@ -417,7 +413,7 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
     const body = 'x'.repeat(500)
     const echoProgram = `
       const echoed = await tools.echo_text({ text: 'x'.repeat(500) })
-      return echoed.text.length
+      echoed.text.length
     `
     const cap = Buffer.byteLength(stubNotice(500), 'utf8')
     const exact = await bootPrime({ backend: 'stub', maxInlineBytes: cap })
@@ -454,13 +450,13 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
 
     const empty = await runCode(agent, `
       const echoed = await tools.echo_text({ text: '' })
-      return echoed.text.length
+      echoed.text.length
     `)
     expect(runValue(empty).result).toBe(0)
 
     const atCap = await runCode(agent, `
       const echoed = await tools.echo_text({ text: 'y'.repeat(100) })
-      return echoed.text.length
+      echoed.text.length
     `)
     expect(runValue(atCap).result).toBe(100)
     expect(dispatchTexts(events, 'echo_text')).toEqual(['', 'y'.repeat(100)])
@@ -469,7 +465,7 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
     // One byte past the cap is the first size that spills: the boundary is `>`.
     const overCap = await runCode(agent, `
       const echoed = await tools.echo_text({ text: 'y'.repeat(101) })
-      return echoed.text.length
+      echoed.text.length
     `)
     expect(runValue(overCap).result).toBe(101)
     expect(store?.saves).toHaveLength(1)
@@ -484,7 +480,7 @@ describe('scenario 5: a refusing spill backend', () => {
 
     const execution = await runCode(agent, `
       const report = await tools.big_report({ rows: 300, marker: 'ALPHA' })
-      return report.rows.length
+      report.rows.length
     `)
 
     // A storage failure must never turn a successful call into an error, nor hide content.
