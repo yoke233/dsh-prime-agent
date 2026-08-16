@@ -22,13 +22,13 @@ Synchronize behavioral contracts and architecture, not implementation language o
 
 | Prime Agent source concept | DSH adapter counterpart | Sync policy |
 | --- | --- | --- |
-| Persistent IPython control environment | v0.2 ephemeral Code Mode + durable data; v0.3 Persistent TypeScript Realm | Use IPython only as a behavioral reference; do not adopt its runtime stack or plan it as a backend |
-| Python variables and files as external context | Manifest catalog and content-addressed blobs | Adapt retrieval, budgeting, and recovery behavior |
-| `rlm()` admission handle | DSH Subagent background admission and Job id | Preserve admission-first semantics using DSH lifecycle ownership |
-| `agent_message` replies and family roster | DSH completion delivery, `job_output`, and available Agent/Subagent services | Review semantic gaps; never invent a second message bus casually |
-| `rlm.list_subagents()` / `delete_subagent()` | DSH job/subagent observation and cancellation tools | Reuse installed tools and their authority checks |
+| Persistent IPython control environment | Code Mode + Persistent TypeScript Realm | Use IPython only as a behavioral reference; do not adopt its runtime stack or plan it as a backend |
+| Python variables and files as external context | Realm live namespace + workspace handoff/result files | Adapt retrieval, budgeting, snapshot handoff, and recovery behavior |
+| `rlm()` admission handle | DSH continuable Subagent id | Preserve admission-first semantics through inbox acceptance and Session persistence |
+| `agent_message` replies and family roster | `report`, `send_message`, `list_agents`, and DSH Agent/Subagent services | Reuse DSH direct-parent authority and inboxes; do not invent a second message bus |
+| `rlm.list_subagents()` / `delete_subagent()` | `list_agents` / no current delete | Reuse the existing catalog and authority checks; never present interrupt as delete |
 | Continual Harness | `prime_refine` | Adapt evidence, scope, concurrency, and rollback rules |
-| Auto-refine and refine review | Future learning-loop work | Defer until proposals, approvals, and outcome observation are explicit |
+| Auto-refine and refine review | Not currently adapted | Re-review the upstream contract before implementation; do not infer it from a local roadmap label |
 | Goals, compaction, heartbeat, daemon lifecycle | Existing DSH Goal, Compaction, Jobs, Schedule, and Session capabilities | Compose; do not duplicate |
 | TUI, ACP, providers, billing, installer | Outside this plugin | Ignore unless they change an RLM-visible contract |
 
@@ -82,7 +82,7 @@ Before changing code, identify the DSH owner of the behavior. If Agent, Jobs, Su
 After a synchronization pass:
 
 1. Update `docs/prime-agent-learnings.md` when the mental model changed.
-2. Update `docs/v2-architecture.md`, README files, and tool policy when the public behavior changed.
+2. Update `docs/architecture.md`, README, and tool policy when the public behavior changed.
 3. Diff the packaged Prime preset (`agent-presets/prime/`, once it ships) against the upstream shipped `code` preset and port composition changes; it is a full copy because DSH has no preset inheritance.
 4. Add a regression test for every adopted or adapted contract.
 5. Run `npm run check`.
@@ -95,8 +95,8 @@ After a synchronization pass:
 
 | Reviewed baseline | Upstream change | Decision | Adapter result |
 | --- | --- | --- | --- |
-| `7787f074` | Admission-first `rlm()`, explicit child reporting, recoverable child handles | Adapt | Background DSH Subagent returns a Job id; parent continues and later collects through `job_output` |
-| `7787f074` | Persistent IPython as the only model-facing control plane | Adapt | Code Mode remains the sole surface; v0.3 will use an authenticated `prime_realm_identity` binding handshake to route Prime sessions into a Persistent TypeScript Realm while ordinary sessions retain the official one-shot runtime |
+| `7787f074` | Admission-first `rlm()`, explicit child reporting, recoverable child handles | Adapt | A continuable Subagent returns a durable child id; DSH Session owns recovery and the child reports explicitly |
+| `7787f074` | Persistent IPython as the only model-facing control plane | Adapt | Code Mode is the sole surface; an authenticated `prime_realm_identity` handshake routes Prime sessions into a Persistent TypeScript Realm while ordinary sessions retain the official one-shot runtime |
 | `7787f074` | Local/global Continual Harness with refine/rollback | Adapt | `prime_refine` is secondary, evidence-gated, optimistic, bounded, and conflict-safe |
 | `7787f074` | Host owns agent lifecycle, messages, goals, and cancellation | Adopt | The plugin composes DSH services and creates no worker registry or second Agent Loop |
 | `7787f074` | Automatic refinement enabled by default | Defer | Requires explicit proposal/review/outcome design before model-authored automation |
@@ -104,8 +104,8 @@ After a synchronization pass:
 ## Semantic gaps to re-check each time
 
 - Prime child answers can inform the parent's active computation. Implemented: the bundle patch retires the host `tool-subagent-report` (fixed `wakeup`, one separate later turn per report) and mounts `dsh-prime-agent/subagent-report`, which chooses the delivery per call over the public `reportFrom` — `quiet` for a running parent (inject → the current turn's next step, exactly where a steer would land) and `wakeup` for an idle one. No DSH source change and no plugin-private inbox. Remaining upstream ask: a DSH-native steer delivery (with a wake) would close the narrow busy→idle window in which a quiet report waits for the child's settled notice to wake the parent.
-- Prime's Python heap preserves live objects and functions; v0.2 preserves only JSON, text, and artifact references. The planned [v0.3 P0](v0.3-roadmap.md) will close the cross-turn computation gap with a Persistent TypeScript Realm selected through a plugin-private authenticated binding handshake. IPython remains reference material for behavior and failure semantics, not a product backend.
-- v0.2 has no immutable context capsule `share`/`mount` contract and no blob garbage collection; these are deferred to v0.4.
+- Prime's Python heap preserves live objects and functions; the current adapter selects a Persistent TypeScript Realm through an authenticated binding handshake and retains TypeScript live objects inside one Worker generation. IPython remains reference material for behavior and failure semantics, not a product backend.
+- Cross-agent context currently uses workspace handoff files. Write-once behavior is a policy convention; there is no separate Capsule store, `share`/`mount`, or file-access grant.
 - `prime_refine` is explicit; it does not yet observe outcomes or propose refinements automatically.
 
 These gaps are deliberate until a product requirement and a DSH-native ownership path justify closing them.

@@ -32,7 +32,7 @@ DSH 的对应物是 Code Mode。`run_code` 是模型唯一可见工具，普通�
 
 上游 `rlm()` 的返回值代表 admission，不代表完成。child answer 通过后续消息或文件到达。这避免父 Agent 把递归任务误当成普通同步函数，也让 parent/child 生命周期真正解耦。
 
-DSH 适配保留的核心行为是：后台 Subagent admission 返回 Job handle，父 Agent 随即可继续，稍后通过 `job_output` 收集结果。DSH 目前的结果回收与上游显式 family message 并不完全相同；这是需要持续评估的语义差距，不应通过插件私建消息总线草率解决。
+DSH 适配保留的核心行为是：continuable Subagent 在 child inbox 接受初始消息后返回持久 child id，父 Agent 随即可继续；后续通过 `send_message`、`list_agents`、`interrupt_agent` 和 child `report` 协作。child 详细过程保存在自己的 Session，不被包装成 Job result。Jobs 只承载 one-shot background provider 和其他通用后台任务。
 
 前台独立子任务仍可在 Code Mode 使用 `Promise.all`，但它表达的是“本轮需要 fan-in 的并发工作”，不是 admission-first 的长期 child 协作。
 
@@ -62,7 +62,7 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 - 记录 before/after 并支持冲突安全 rollback；
 - 不保存任务过程数据和大上下文。
 
-上游已经提供自动 refinement，但 DSH 适配不会仅因为上游默认开启就直接复制。自动模型写入需要先把 proposal、review、权限与效果观察设计完整。
+上游已经提供自动 refinement，但当前 DSH 适配只实现显式 inspect/apply/rollback。没有完成新的上游行为审阅前，不从本地路线名称反推 proposal、review、权限或效果观察契约。
 
 ## Continual Harness 数据分类
 
@@ -79,7 +79,7 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 
 - Jupyter ZeroMQ、Control Channel 与 IPython Kernel 是技术选择，不是 RLM 唯一路径。
 - Prime Daemon、Worker、Session JSONL 与 child registry 在 DSH 已有不同所有者。
-- `agent_message` 的协议不能在没有 DSH 原生 family contract 时被表面仿造。
+- `agent_message` 适配必须继续走 DSH 原生 continuable child、inbox 与 `reportFrom` 所有权检查，不能另建消息总线。
 - Prime 针对 Python Kernel 的 system prompt 不能原样注入 TypeScript Code Mode。
 - Prime Harness 文件格式不能冒充 DSH Session Event。
 - TUI、ACP、模型 provider、计费和安装器通常不属于本插件范围。
@@ -90,11 +90,12 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 | Prime Agent | dsh-prime-agent / DSH |
 | --- | --- |
 | 持久 IPython 控制面 | Code Mode + Persistent TypeScript Realm；IPython 仅作语义参考 |
-| Python 变量/文件上下文 | manifest catalog + content-addressed blobs |
-| `rlm()` admission handle | 后台 Subagent Job handle |
+| Python 变量/文件上下文 | Realm live namespace + 共享工作区 handoff/result files |
+| `rlm()` admission handle | continuable Subagent id；inbox acceptance 后立即返回 |
 | foreground independent work | Code Mode `Promise.all` 调用真实工具/Subagent |
-| child 显式 reply | 当前主要是 completion delivery / `job_output`；保留语义差距 |
-| list/delete child | DSH 可见 Job/Subagent 观察与取消工具 |
+| child 显式 reply | child `report`；父忙时 quiet/next-step，父闲时 wakeup/next-turn |
+| list/follow-up/cancel child | `list_agents` / `send_message` / `interrupt_agent` |
+| delete child | 当前无对应操作；持久 child Session 不由插件删除 |
 | `rlm.harness` | `prime_refine` |
 | `/refine` / auto-refine | 显式 inspect/apply/rollback；自动 proposal 尚未实现 |
 | Persistent Goal | DSH Goal 与 round driver |
@@ -106,8 +107,8 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 
 好的适配不是让 DSH 看起来像在运行 Prime 的 Python，而是让它拥有同一种工作感觉：模型用代码协调能力，把上下文当作可寻址状态，让 child 独立运行，并把稳定经验与过程数据分开。
 
-当前已交付 PTC/Code Mode + Persistent Realm + Subagent/Jobs + `prime_refine` 闭环。DSH PTC 提供 Prime 式的可编程工具与递归 Agent 编排；持久 Realm 让函数、对象、索引与工具编排代码跨 run 延续，对应 Prime 的持久计算 namespace。
+当前已交付 Code Mode + Persistent Realm + continuable Subagent/Jobs + 显式 `prime_refine`。DSH Code Mode 提供 Prime 式的可编程工具与递归 Agent 编排；持久 Realm 让函数、对象、索引与工具编排代码跨 run 延续，对应 Prime 的持久计算 namespace。
 
-我们学习这一不变量，而不绑定其实现语言。v0.3 保留 DSH 原生 Code Mode bridge，通过带 challenge proof 的 `prime_realm_identity` binding handshake 取得不透明 Session Realm 身份；hybrid Runtime 只让 Prime Session 进入 Persistent TypeScript Worker，其他请求继续委托官方 one-shot Worker。跨重启的可靠数据层是持久任务文件，IPython 只用于参考 cell 连续性、中断、snapshot 限制与恢复语义。Context Capsule 与 Agent family 顺延到 v0.4，自动学习顺延到 v0.5。具体边界见 [v0.3 路线](v0.3-roadmap.md)。
+我们学习这一不变量，而不绑定其实现语言。DSH 原生 Code Mode bridge 通过带 challenge proof 的 `prime_realm_identity` handshake 取得不透明 Realm identity；hybrid Runtime 只让 Prime Session 进入 Persistent TypeScript Worker，其他请求继续委托官方 one-shot Worker。跨重启的可靠数据层是工作区文件，跨 Agent 的材料通过只写一次的 handoff file 交接。完整当前边界见 [当前架构](architecture.md)。
 
-Agent family 的学习同样关注控制语义而不是 API 名称：child 的中间发现应尽可能进入 parent 当前计算的最近 step，而不是无条件积压成多个独立后续轮次。DSH 当前默认 report 路由与此仍有差距；插件先记录并推动宿主提供调度扩展点，不直接修改宿主实现。
+child 的中间发现应尽可能进入 parent 当前计算的最近 step，而不是无条件积压成多个独立后续轮次。随包 report adapter 已按父状态选择 quiet 或 wakeup；仍保留的窄差距是 parent 在“读取为 running 后立即转 idle”的窗口里，quiet report 要等 child settled notice 才会唤醒 parent。

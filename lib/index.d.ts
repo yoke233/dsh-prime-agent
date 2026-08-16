@@ -4,7 +4,7 @@ import z from '@deepseek-ai/schemastery';
 import type { HarnessLimits } from './continual/types.js';
 export declare const name = "prime-agent";
 export declare const inject: string[];
-/** Clean v0.2 configuration; no v0.1 state or option compatibility is retained. */
+/** Current configuration surface; removed legacy state and options are not accepted. */
 export interface Config {
     stateDirectory: string;
     refineToolName?: string;

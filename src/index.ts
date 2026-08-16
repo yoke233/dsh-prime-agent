@@ -13,7 +13,7 @@ import { registerRealmIdentity } from './realm/identity-tool.js'
 export const name = 'prime-agent'
 export const inject = ['tools', 'systemPrompt']
 
-/** Clean v0.2 configuration; no v0.1 state or option compatibility is retained. */
+/** Current configuration surface; removed legacy state and options are not accepted. */
 export interface Config {
   stateDirectory: string
   refineToolName?: string

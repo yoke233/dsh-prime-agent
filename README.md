@@ -3,8 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="docs/v2-architecture.md">架构</a> ·
-  <a href="docs/v0.3-roadmap.md">Realm 契约</a> ·
+  <a href="docs/architecture.md">当前架构</a> ·
   <a href="docs/prime-agent-learnings.md">Prime Agent 学习笔记</a> ·
   <a href="docs/upstream-sync.zh.md">上游同步手册</a>
 </p>
@@ -34,7 +33,7 @@ await review('a') // Map 和函数都还活着
 - Realm 内的工具经跨 run 稳定的 Proxy 与 per-run binding lease 调用:schema、审批、沙箱、日志、并发和取消仍由 DSH 执行,run 结束立即撤销授权。
 - Realm 是 live-only 的：abort、timeout、OOM 会 hard-kill Worker 并丢失 namespace，下一次真正执行时会明确提示之前的 bindings 已丢失。跨重启的检查点由程序显式写入持久任务文件。
 
-完整身份协议、namespace 生命周期与资源治理见 [Realm 契约](docs/v0.3-roadmap.md)。
+完整身份协议、namespace 生命周期、Agent 编排与学习层边界见 [当前架构](docs/architecture.md)。
 
 ## 三层数据
 
@@ -128,7 +127,9 @@ dsh --profile headless '完成当前工作区中的任务'
 
 控制面 policy 引导模型在一个程序里组合读取、工具与子 Agent：中间值留在 live namespace，大结果在程序内归约后只返回摘要；独立前台工作用 `Promise.all`，best-effort 探测逐项捕获，副作用型 mutation 顺序执行。
 
-需要 admission-first 时,调用可见的 Subagent 工具并设置 `run_in_background: true`,保留返回的 Job id,父 Agent 继续工作,稍后用 `job_output` 回收结果。具体 Subagent/Job 参数来自当前 profile 安装的 DSH 工具,本插件不复制它们的 schema。
+Prime preset 的 `subagent` 与 `subagent_fork` 默认创建 continuable child：调用在 child inbox 接受任务后返回持久 child id，父 Agent 随即继续。后续使用 `list_agents` 观察、`send_message` 投递新 turn、`interrupt_agent` 中断当前 turn；child 通过 `report` 主动回传选定结论。continuable child 不产生 Job result，详细过程保存在 child Session。
+
+Jobs 是独立的后台任务生命周期。后台 shell 或 one-shot background provider 返回 Job id，使用 `job_output`、`job_list`、`job_kill` 管理，不能与 continuable child id 混用。大材料和大结果通过共享工作区文件交接，prompt/report 只携带任务、摘要与路径。
 
 ## prime_refine
 

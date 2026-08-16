@@ -21,7 +21,7 @@ class BindingRuntime extends CodeRuntime {
 }
 
 function registerOrchestrationFixtures(ctx: Context): void {
-  for (const name of ['subagent', 'job_output']) {
+  for (const name of ['subagent', 'list_agents', 'send_message', 'interrupt_agent', 'job_output']) {
     ctx.tools.register(defineTool({
       name,
       description: `${name} fixture`,
@@ -85,6 +85,12 @@ describe('Prime Code Mode composition', () => {
     expect(policy).toContain('do not blindly repeat it')
     expect(policy).toMatch(/sandbox denial, ask once for the minimum permission/)
     expect(policy).toContain('rebuild from durable checkpoints')
+    expect(policy).toContain('retain its returned subagent id')
+    expect(policy).toContain('list_agents for the roster')
+    expect(policy).toContain('send_message for a later turn')
+    expect(policy).toContain('interrupt_agent to stop only the current child turn')
+    expect(policy).toContain('A continuable child is not a Job')
+    expect(policy).not.toContain('returned job handle')
     expect(policy).not.toMatch(/rollback|roll back|rolled back/i)
     expect(policy).not.toMatch(/automatic/i)
 

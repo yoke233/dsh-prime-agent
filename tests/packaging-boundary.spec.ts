@@ -18,7 +18,7 @@ function stateDirectoryExpr(row: Row | undefined): string | undefined {
   return isJsExpr(value) ? (value as { __jsExpr: string }).__jsExpr : undefined
 }
 
-describe('v0.3 packaging boundary', () => {
+describe('Prime packaging boundary', () => {
   it('carries exactly the two swaps and nothing else', async () => {
     const patches = await loadDialect('../cordis.patch.yml')
     // Two independent pairs: the code-runtime swap and the subagent-report swap.
