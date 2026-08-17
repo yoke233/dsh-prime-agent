@@ -19,6 +19,14 @@ function stateDirectoryExpr(row: Row | undefined): string | undefined {
 }
 
 describe('Prime packaging boundary', () => {
+  it('ships the software-engineer identity in the system preset', async () => {
+    const persona = (await loadDialect('../agent-presets/prime/agent.cordis.yml'))
+      .find(row => row.id === 'persona')
+
+    expect(persona?.name).toBe('@deepseek-ai/dsh-persona')
+    expect(persona?.config?.text).toMatch(/^You are a helpful software engineer assistant\./)
+  })
+
   it('carries exactly the two swaps and nothing else', async () => {
     const patches = await loadDialect('../cordis.patch.yml')
     // Two independent pairs: the code-runtime swap and the subagent-report swap.

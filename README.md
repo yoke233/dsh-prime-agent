@@ -121,6 +121,57 @@ $env:DSH_TELEMETRY_DISABLED = '1'
 dsh --profile headless '完成当前工作区中的任务'
 ```
 
+#### 为单次 headless 请求指定 Ark 模型
+
+当前 headless CLI 不提供 `--provider` 或 `--model` 参数，而是读取 `settings.yaml` 中的 `agent-default-model`。如果不希望修改日常 profile 的默认模型，可以让本次运行临时读取一份独立设置。下例明确请求 Ark 的 `deepseek-v4-flash-ga-260731`；`deepseek-v4-flash` 只是显示名称，不能代替请求中的模型 ID。
+
+现有 `$DSH_HOME/.credentials.yaml` 中需要已经配置 `ARK_API_KEY`。临时设置只改变本次模型选择，凭据仍由原来的 DSH credential provider 读取。
+
+```powershell
+$arkTestRoot = Join-Path $env:TEMP ('dsh-headless-ark-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+New-Item -ItemType Directory -Path $arkTestRoot | Out-Null
+
+$arkSettingsPath = Join-Path $arkTestRoot 'settings.yaml'
+$arkPatchPath = Join-Path $arkTestRoot 'cordis.patch.yml'
+$arkSettingsYamlPath = $arkSettingsPath -replace '\\', '/'
+
+@'
+agent-default-model:
+  provider: ark
+  model: deepseek-v4-flash-ga-260731
+llm-pi-ai:
+  providers:
+    ark:
+      displayName: 火山
+      apiKeyEnv: ARK_API_KEY
+      api: openai-completions
+      baseURL: https://ark.cn-beijing.volces.com/api/v3
+      models:
+        - id: deepseek-v4-flash-ga-260731
+          name: deepseek-v4-flash
+'@ | Set-Content -LiteralPath $arkSettingsPath -Encoding utf8
+
+@"
+- id: settings
+  config:
+    path: '$arkSettingsYamlPath'
+    watch: false
+"@ | Set-Content -LiteralPath $arkPatchPath -Encoding utf8
+
+try {
+  $env:NODE_USE_ENV_PROXY = '1'
+  $env:DSH_TELEMETRY_DISABLED = '1'
+  dsh --profile headless --patch $arkPatchPath '只输出：ARK_HEADLESS_OK_260731'
+  if ($LASTEXITCODE -ne 0) {
+    throw "headless 请求失败，退出码: $LASTEXITCODE"
+  }
+} finally {
+  Remove-Item -LiteralPath $arkTestRoot -Recurse -Force
+}
+```
+
+预期输出为 `ARK_HEADLESS_OK_260731`。如果希望所有后续 headless 请求都使用该模型，可直接把 `$DSH_HOME/settings.yaml` 中的 `agent-default-model` 改为同一组 `provider` 和 `model`；此时不再需要临时 patch。
+
 会话轨迹保存在 `$DSH_HOME/sessions`,Prime Realm 身份与学习状态保存在 `$DSH_HOME/prime-agent`。
 
 ## 编排工作流
