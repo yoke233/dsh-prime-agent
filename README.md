@@ -53,6 +53,22 @@ dsh plugin --profile web add ./dsh-prime-agent
 
 `dsh plugin add` 即提供全部内容:随包 bundle patch 把宿主 `code-runtime` provider 替换为 `dsh-prime-agent/runtime`;随包 Prime preset 在启动时落位到 `$DSH_HOME/.agent-presets`(仅缺失时)。启用 Prime 模式只是为某个会话选中 Prime preset;默认 preset 与其他 preset 保持官方 one-shot 语义。落位后的 preset 不会被覆盖,删除 `$DSH_HOME/.agent-presets/prime` 并重启即可重新落位当前快照。
 
+### TUI 运行
+
+TUI bundle 本身不挂载 Code Runtime 和 agent preset 服务，因此先安装仓库内的 TUI 支持 bundle，再安装 Prime 插件；两者的 bundle 顺序不能颠倒。
+
+```powershell
+$pluginRoot = (Resolve-Path '.').Path
+$tuiSupportRoot = Join-Path $pluginRoot 'scripts\tui-prime-support'
+
+$tuiSupportLink = 'link:' + ($tuiSupportRoot -replace '\\', '/')
+$pluginLink = 'link:' + ($pluginRoot -replace '\\', '/')
+dsh plugin --profile tui add $tuiSupportLink
+dsh plugin --profile tui add $pluginLink
+```
+
+如果 Prime 插件此前已经先于支持 bundle 安装，应先运行 `dsh plugin --profile tui remove dsh-prime-agent`，再按上述顺序重新添加。使用 `dsh --profile tui --dump-config` 核验组合结果中存在 `agent-presets`、`prime-code-runtime`、`prime-subagent-report` 和 `tui-runner`，然后运行 `dsh --profile tui`。
+
 ### Headless 运行
 
 当前 DSH headless bundle 不会挂载 agent preset,因此需要同时安装仓库内的 `prime-headless-shim`,并在 headless profile 中启用 Prime preset。推荐使用隔离的 `DSH_HOME`,避免影响日常 profile。
