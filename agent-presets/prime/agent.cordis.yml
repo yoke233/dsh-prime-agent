@@ -8,8 +8,8 @@
 # to ship the whole snapshot. That makes this file drift as the harness moves.
 #
 # Provenance of this snapshot:
-#   deepseek-harness    47f943859bef60e4160492346772ded9b24f765a (2026-08-13)
-#     source file last changed in a2d0f7f41121ee81911dd1badbf248edd3f2ab70
+#   deepseek-harness    99f6f02fecdb7dff40c3fbc9470f5907c29f74ca (dsh-v0.1.0-rc.7, 2026-08-17)
+#     source file last changed in 93c0032216fa51ce4f225f5bda3dd615317d565e
 #   reviewed Prime Agent baseline
 #                       7787f07415d843b9a800f6a4720e0c739bd608e5
 #     (docs/upstream-baseline.json)
@@ -219,16 +219,16 @@
         toolName: subagent_fork
         backgroundMode: continuable
 
-    # Product providers are host-plane singletons. Copy this preset, then
-    # remove `disabled` from either ordinary tool row to expose that product
-    # only to agents composed from the copy.
+    # Production dsh does not install these optional providers. An opting-in
+    # Profile mounts each provider once on the host plane; copy this preset,
+    # then remove `disabled` from the matching tool row.
     - id: tool-subagent-codex
       name: '@deepseek-ai/dsh-tool-subagent'
       disabled: true
       config:
         provider: codex
         toolName: subagent_codex
-        enableRunInBackground: false
+        backgroundMode: one-shot
         maxDepth: provider-managed
 
     - id: tool-subagent-claude-code
@@ -237,7 +237,7 @@
       config:
         provider: claude-code
         toolName: subagent_claude_code
-        enableRunInBackground: false
+        backgroundMode: one-shot
         maxDepth: provider-managed
 
     - id: workflow-worker-thread
