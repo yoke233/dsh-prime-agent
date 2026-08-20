@@ -1,11 +1,6 @@
-# The TUI bundle starts from dsh-base, which intentionally omits both rows.
-# dsh-prime-agent replaces the official code runtime and its preset is mounted
-# by the TUI runner, so these prerequisites must be composed before that bundle.
+# dsh-omp-tui already mounts the agent preset service, but dsh-base still omits
+# the Code Runtime that dsh-prime-agent replaces. Compose this prerequisite
+# before dsh-prime-agent; the persisted agent-presets setting selects Prime.
 - insert:
     - id: code-runtime
       name: '@deepseek-ai/dsh-code-runtime-worker-thread'
-
-    - id: agent-presets
-      name: '@deepseek-ai/dsh-agent-presets'
-      config:
-        default: prime
