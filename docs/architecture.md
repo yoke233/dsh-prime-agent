@@ -33,8 +33,7 @@ DSH profile
 │  ├─ dsh-prime-agent/runtime
 │  │  ├─ Prime request ──→ Realm identity ──→ Realm pool ──→ persistent Worker
 │  │  └─ ordinary request ──────────────────→ 官方 one-shot Worker
-│  ├─ 官方 tool-subagent-report（disabled）
-│  └─ dsh-prime-agent/subagent-report
+│  └─ 官方 tool-subagent-report（next-step）
 │
 └─ Prime Agent scope
    ├─ agent-presets/prime
@@ -45,22 +44,20 @@ DSH profile
    └─ Code Mode：模型只看见 run_code，其他工具成为 TypeScript SDK bindings
 ```
 
-包有三个运行入口：
+包有两个运行入口：
 
 - `dsh-prime-agent`：Agent scope 内的 policy、continual learning、Realm handshake binding 与 Code Mode assembly 检查。
 - `dsh-prime-agent/runtime`：host scope 内的 hybrid Code Runtime、Realm pool、官方 fallback、host lease 与 Prime preset 落位。
-- `dsh-prime-agent/subagent-report`：host scope 内向每个 continuable child 安装 Prime 形式的 `report`。
 
 ## 安装与 preset
 
-随包 `cordis.patch.yml` 执行两组独立替换：
+随包 `cordis.patch.yml` 只执行一组 runtime 替换：停用官方 `code-runtime` row，插入 hybrid runtime。普通请求由 hybrid runtime 内部挂载的官方 Worker Thread Runtime 原样处理。
 
-1. 停用官方 `code-runtime` row，插入 hybrid runtime。普通请求由 hybrid runtime 内部挂载的官方 Worker Thread Runtime 原样处理。
-2. 停用官方固定 wakeup 的 `tool-subagent-report`，插入按父状态选择投递方式的 Prime report。
+Subagent report 完全复用 DSH rc.8 base bundle 的官方 `tool-subagent-report`。其默认 `next-step` 调度通过 `parent.steer()` 让运行中的 parent 在最近 step 消费报告，并唤醒空闲 parent；continuation manager 同时负责唤醒记账以及 report 先于后续 settled notice 的 FIFO 顺序。本包不再替换或复制该能力。
 
 runtime 启动时把随包 Prime preset 复制到 `$DSH_HOME/.agent-presets/prime`，仅在目标目录不存在时写入。已有目录永不覆盖；要采用新快照必须由操作者删除旧目录后重启。
 
-默认 preset、默认 tools mode 与其他 preset 不会改变。report row 的替换属于 profile 级行为，因此该 profile 中所有 continuable child 使用 Prime report，而不只是在 Prime preset 下创建的 child。
+默认 preset、默认 tools mode 与其他 preset 不会改变。
 
 ## 唯一模型控制面
 
@@ -139,7 +136,7 @@ Prime preset 复用 DSH 的 continuable Subagent 架构：
 - `list_agents` 列出可继续的直接 child 或后代；`ready` 表示只存在于持久存储、可恢复，不表示有结果待收集。
 - `send_message` 给直接 child 排入一个后续 FIFO turn；child 不驻留时由 DSH 从 Session persistence 冷恢复。
 - `interrupt_agent` 只中断目标当前 turn，保留排队消息、child 身份和已发布后代。
-- child 的 `report` 只投递给直接 parent。parent 正在运行时使用 quiet/next-step，其他状态使用 wakeup/next-turn；report 不结束 child turn。
+- child 的 `report` 只投递给直接 parent。官方 `next-step` 调度让运行中的 parent 在最近 step 消费，并唤醒空闲 parent；report 不结束 child turn。
 - DSH 自有的 settled notice 独立于 child 是否主动 report，负责说明一次 Activation 如何结束。
 
 continuable child 没有 Job result promise：其详细过程保存在 child Session，选定结论通过 report 返回。当前没有 child delete，也没有把 child transcript 作为单个结果 collect 的工具。
@@ -216,6 +213,6 @@ runtime row 与 Prime preset 的 `stateDirectory` 必须相同，否则 handshak
 
 ## 验证面
 
-仓库测试覆盖：Realm identity 并发签发与认证、Session 隔离、跨 cell binding 连续性、调用顺序、binding lease、host-call 预算、超时/abort/Worker 换代、namespace-loss notice、输出上限与 Unicode、工具失败恢复、approval escalation、Subagent Job 编排、Prime report 调度、preset 落位和 bundle patch 结构。
+仓库测试覆盖：Realm identity 并发签发与认证、Session 隔离、跨 cell binding 连续性、调用顺序、binding lease、host-call 预算、超时/abort/Worker 换代、namespace-loss notice、输出上限与 Unicode、工具失败恢复、approval escalation、Subagent Job 编排、官方 report 组合边界、preset 落位和 bundle patch 结构。
 
 上游行为映射与同步流程见 [Prime Agent 学习笔记](prime-agent-learnings.md) 和 [上游同步与差异对照手册](upstream-sync.zh.md)。

@@ -103,7 +103,7 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 
 ## 每次都要复查的语义差距
 
-- Prime 的 child answer 可以进入 parent 仍在进行的计算。已实现：随包 patch 停用 host `tool-subagent-report`（固定 `wakeup`，每条上报排成单独后续轮次），改挂 `dsh-prime-agent/subagent-report`，在公共 `reportFrom` 之上按父状态逐次选择投递——运行中的 parent 走 `quiet`（inject → 当前轮次的 next-step，与 steer 落点一致），空闲 parent 走 `wakeup` 唤起一轮。未修改 DSH 源码，也没有插件私有 inbox。仍向上游争取：DSH 原生的带唤醒 steer 投递，可关闭"忙→闲瞬间 quiet 上报需等子代理 settled 通知唤醒父"的窄窗。
+- Prime 的 child answer 可以进入 parent 仍在进行的计算。DSH rc.8 已原生实现该不变量：官方 `tool-subagent-report` 默认使用 `next-step`，由 continuation manager 调用 `parent.steer()`，让运行中的 parent 在最近 step 消费并唤醒空闲 parent，同时维护唤醒记账以及 report-before-settlement FIFO。本插件直接组合该能力，不再替换 report row 或维护私有 adapter。
 - Prime 的 Python heap 能保存活对象和函数；当前适配由认证 binding handshake 选择 Persistent TypeScript Realm，在同一 Worker generation 中保留 TypeScript live objects。IPython 只用于参考行为与失败语义，不是产品 backend。
 - 当前跨 Agent 上下文使用共享工作区 handoff file。写后不改是 policy 约定，不存在独立 Capsule store、`share`/`mount` 或文件访问授权。
 - `prime_refine` 目前需要显式调用，不会自动观察效果或生成 proposal。

@@ -93,7 +93,7 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 | Python 变量/文件上下文 | Realm live namespace + 共享工作区 handoff/result files |
 | `rlm()` admission handle | continuable Subagent id；inbox acceptance 后立即返回 |
 | foreground independent work | Code Mode `Promise.all` 调用真实工具/Subagent |
-| child 显式 reply | child `report`；父忙时 quiet/next-step，父闲时 wakeup/next-turn |
+| child 显式 reply | child `report`；DSH rc.8 官方 next-step 调度在父忙时进入最近 step、父闲时唤醒 |
 | list/follow-up/cancel child | `list_agents` / `send_message` / `interrupt_agent` |
 | delete child | 当前无对应操作；持久 child Session 不由插件删除 |
 | `rlm.harness` | `prime_refine` |
@@ -111,4 +111,4 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 
 我们学习这一不变量，而不绑定其实现语言。DSH 原生 Code Mode bridge 通过带 challenge proof 的 `prime_realm_identity` handshake 取得不透明 Realm identity；hybrid Runtime 只让 Prime Session 进入 Persistent TypeScript Worker，其他请求继续委托官方 one-shot Worker。跨重启的可靠数据层是工作区文件，跨 Agent 的材料通过只写一次的 handoff file 交接。完整当前边界见 [当前架构](architecture.md)。
 
-child 的中间发现应尽可能进入 parent 当前计算的最近 step，而不是无条件积压成多个独立后续轮次。随包 report adapter 已按父状态选择 quiet 或 wakeup；仍保留的窄差距是 parent 在“读取为 running 后立即转 idle”的窗口里，quiet report 要等 child settled notice 才会唤醒 parent。
+child 的中间发现应尽可能进入 parent 当前计算的最近 step，而不是无条件积压成多个独立后续轮次。DSH rc.8 已把这一行为收归官方 `tool-subagent-report`：`next-step` 通过 `parent.steer()` 让忙碌 parent 在最近 step 消费，并唤醒空闲 parent；continuation manager 维护唤醒记账和 report-before-settlement FIFO。本插件因此删除了本地 report adapter，不再复制 DSH 已拥有的消息调度。

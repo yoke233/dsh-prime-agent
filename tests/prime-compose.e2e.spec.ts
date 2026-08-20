@@ -142,16 +142,6 @@ describe('Prime host patch composition', () => {
       disabled: false,
       mounted: true,
     })
-    // The patch's second insert lands from the same overlay. Its disable half
-    // targets a host row this minimal config never loads, so only the insert
-    // is observable here; `tests/packaging-boundary.spec.ts` pins the target.
-    expect(rows).toContainEqual({
-      id: 'prime-subagent-report',
-      name: 'dsh-prime-agent/subagent-report',
-      disabled: false,
-      mounted: true,
-    })
-
     const alpha = testAgent('compose-alpha', root)
     const beta = testAgent('compose-beta', root)
     const first = await runCode(alpha.agent, 'const answer = 424242; answer')

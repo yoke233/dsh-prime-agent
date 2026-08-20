@@ -67,7 +67,7 @@ dsh plugin --profile tui add $tuiSupportLink
 dsh plugin --profile tui add $pluginLink
 ```
 
-如果 Prime 插件此前已经先于支持 bundle 安装，应先运行 `dsh plugin --profile tui remove dsh-prime-agent`，再按上述顺序重新添加。使用 `dsh --profile tui --dump-config` 核验组合结果中存在 `agent-presets`、`prime-code-runtime`、`prime-subagent-report` 和 `tui-runner`，然后运行 `dsh --profile tui`。
+如果 Prime 插件此前已经先于支持 bundle 安装，应先运行 `dsh plugin --profile tui remove dsh-prime-agent`，再按上述顺序重新添加。使用 `dsh --profile tui --dump-config` 核验组合结果中存在 `agent-presets`、`prime-code-runtime`、官方 `tool-subagent-report` 和 `tui-runner`，然后运行 `dsh --profile tui`。
 
 ### Headless 运行
 
