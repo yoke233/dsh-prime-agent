@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { acquireHostLease } from './realm/host-lease.js'
+import { watchHostParent } from './realm/host-parent.js'
 import { installPrimePreset } from './realm/preset-install.js'
 import type { RealmBudgets } from './realm/realm.js'
 
@@ -25,6 +26,9 @@ export const name = 'prime-code-runtime'
  * reachable identically from `src/` and the built `lib/`.
  */
 const PACKAGED_PRESET_DIR = fileURLToPath(new URL('../agent-presets/prime', import.meta.url))
+
+/** Direct host owner captured before plugin startup can cross an asynchronous reparenting window. */
+const HOST_PARENT_PID = process.ppid
 
 /** The harness user preset root under `$DSH_HOME` (`dsh-agent-presets`' `USER_PRESET_DIR`). */
 const USER_PRESET_DIR = '.agent-presets'
@@ -203,6 +207,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     await release()
     throw error
   }
+
+  ctx.effect(
+    () => watchHostParent(
+      async () => { await ctx.root.fiber.dispose() },
+      { parentPid: HOST_PARENT_PID },
+    ),
+    'prime host parent liveness',
+  )
 
   const { WorkerThreadCodeRuntime, PrimeCodeRuntime } = await loadCodeMode()
 

@@ -47,7 +47,7 @@ DSH profile
 包有两个运行入口：
 
 - `dsh-prime-agent`：Agent scope 内的 policy、continual learning、Realm handshake binding 与 Code Mode assembly 检查。
-- `dsh-prime-agent/runtime`：host scope 内的 hybrid Code Runtime、Realm pool、官方 fallback、host lease 与 Prime preset 落位。
+- `dsh-prime-agent/runtime`：host scope 内的 hybrid Code Runtime、Realm pool、官方 fallback、host lease、父进程生命周期监控与 Prime preset 落位。
 
 ## 安装与 preset
 
@@ -183,6 +183,8 @@ Realm heap、child Session、Job 和工作区 handoff files 不存放在上述�
 
 identity 与 continual 文件使用跨进程锁和原子替换；损坏、超限和 revision 冲突明确失败。一个 `stateDirectory` 同时只允许一个 host runtime lease，避免同一 Realm identity 在两个进程中各自持有独立 heap。
 
+Host runtime 在模块加载时冻结启动宿主的直接父 pid，并在取得 lease 后开始监控。macOS/POSIX 上父进程退出后发生的 reparent，以及 Windows 上父 shell 被强制终止但子进程继续存活，都会触发同一条根级清理路径：停止监控，dispose 整个 Cordis tree，等待 Realm Worker 与 lease 释放，然后以 0 退出；根级 dispose 未在 5 秒内结算则以非零状态强制退出。父 pid 为 init 或当前进程时不安装监控；探测结果不能证明父进程消失时保持运行，避免误杀合法宿主。
+
 ## 配置界面
 
 Agent-scope `dsh-prime-agent`：
@@ -205,6 +207,7 @@ runtime row 与 Prime preset 的 `stateDirectory` 必须相同，否则 handshak
 - Worker 隔离不是安全 sandbox；真正的文件和命令权限由 DSH host 工具与 sandbox policy 决定。
 - live namespace 不跨 Worker generation 或 host restart 持久化，也不自动重放历史 cell。
 - 不支持未受 DSH 管理、跨 cell 持续调用工具的 detached async work。
+- Host runtime 属于启动它的直接父进程；不支持有意脱离该父进程作为 daemon 继续运行。
 - cell 内原生 dynamic `import()` 没有 import callback，会明确失败；外部能力通过 DSH tools 使用。
 - 不提供 IPython/Jupyter backend、在线 Realm reset、Context Capsule store、`share`/`mount` 或父子文件授权。
 - 不提供 continuable child delete 或 transcript collect。

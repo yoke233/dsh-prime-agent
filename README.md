@@ -53,6 +53,8 @@ dsh plugin --profile web add ./dsh-prime-agent
 
 `dsh plugin add` 即提供全部内容:随包 bundle patch 把宿主 `code-runtime` provider 替换为 `dsh-prime-agent/runtime`;随包 Prime preset 在启动时落位到 `$DSH_HOME/.agent-presets`(仅缺失时)。启用 Prime 模式只是为某个会话选中 Prime preset;默认 preset 与其他 preset 保持官方 one-shot 语义。落位后的 preset 不会被覆盖,删除 `$DSH_HOME/.agent-presets/prime` 并重启即可重新落位当前快照。
 
+Host runtime 会监控启动它的直接父进程。Windows 父 shell 被强制终止或 macOS/POSIX 子进程被重新托管时,插件会释放整个 Cordis tree、Realm Worker 与 host lease,随后退出;根级 dispose 未在 5 秒内结算时强制非零退出。它面向前台 `dsh` 生命周期,不支持把宿主有意脱离父进程作为 daemon 运行。
+
 ### TUI 运行
 
 TUI bundle 本身不挂载 Code Runtime 和 agent preset 服务，因此先安装仓库内的 TUI 支持 bundle，再安装 Prime 插件；两者的 bundle 顺序不能颠倒。
@@ -226,6 +228,7 @@ Jobs 是独立的后台任务生命周期。后台 shell 或 one-shot background
 
 - 插件状态位于 `<stateDirectory>/continual`(学习层)与 `<stateDirectory>/realm-identity`(握手密钥);文件名使用 Session id 的散列。
 - 状态提交使用跨进程写锁与原子替换;损坏、超限、丢失或 revision 冲突都会明确失败。
+- Host runtime 监控直接父进程;父进程消失后执行有界根级清理,避免孤儿进程继续持有 Realm lease。
 - Continual-learning 条目以 JSON 引用的不可信建议记录进入 prompt,不能覆盖当前 system、user、权限或工具约束。
 - 在宿主平台支持时请求 POSIX owner-only 权限。这些措施用于持久化与完整性加固,不代表安全沙箱。
 
