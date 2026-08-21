@@ -2,7 +2,7 @@
  * Host runtime row for Prime: the plugin body behind `dsh-prime-agent/runtime`.
  *
  * It is mounted in place of the official `code-runtime` row, and its whole job
- * is composition — claim the state directory, mount the SHIPPED one-shot runtime
+ * is composition — monitor its owning parent, mount the SHIPPED one-shot runtime
  * in a private service realm, and publish the hybrid runtime as the host's
  * `ctx.codeRuntime`. The official implementation is reused rather than copied,
  * so config validation, TypeScript stripping, budgets, abort, output limits and
@@ -39,13 +39,10 @@ export interface Config {
 }
 export declare const Config: z<Config>;
 /**
- * Claim the state directory, mount the official one-shot runtime privately, and
- * publish the hybrid runtime.
- *
- * Asynchronous by necessity: the lease is a locked filesystem claim and the
- * official runtime's service only becomes readable once its fiber reaches the
- * active state. Cordis awaits a plugin body's promise before the fiber goes
- * active, so a refused lease or a fallback that never appears fails the load.
+ * Monitor this host's owner, mount the official one-shot runtime privately, and
+ * publish the hybrid runtime. Realm ownership is claimed lazily after an
+ * authenticated Prime request identifies the specific Realm, so unrelated TUI
+ * processes can share durable state without sharing a live namespace.
  * @param ctx - the host context this row is mounted on.
  * @param config - validated plugin config.
  */

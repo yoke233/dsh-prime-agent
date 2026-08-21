@@ -5,7 +5,7 @@
  * launched them. Windows does not terminate a child when that parent is
  * force-killed, while POSIX may reparent the child without delivering a
  * signal. This watcher turns either condition into bounded Cordis teardown so
- * the host lease and Realm workers cannot survive as an orphan.
+ * Realm ownership claims and workers cannot survive as orphans.
  * @module dsh-prime-agent/realm/host-parent
  */
 /** Parent-liveness polling interval; short enough to make Windows PID reuse unlikely. */

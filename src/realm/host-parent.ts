@@ -5,7 +5,7 @@
  * launched them. Windows does not terminate a child when that parent is
  * force-killed, while POSIX may reparent the child without delivering a
  * signal. This watcher turns either condition into bounded Cordis teardown so
- * the host lease and Realm workers cannot survive as an orphan.
+ * Realm ownership claims and workers cannot survive as orphans.
  * @module dsh-prime-agent/realm/host-parent
  */
 
@@ -35,8 +35,8 @@ export interface HostParentWatchOptions {
  * Probe process existence without delivering a signal.
  *
  * Only ESRCH proves absence. EPERM and unfamiliar platform errors fail open:
- * terminating a legitimate foreground host is worse than retaining an orphan
- * that the single-owner lease still prevents from being joined by another host.
+ * terminating a legitimate foreground host is worse than retaining an orphan;
+ * its per-Realm claims still prevent a second live namespace from joining it.
  * @param pid - process id to probe.
  * @returns whether the process may still exist.
  */

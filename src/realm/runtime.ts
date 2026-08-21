@@ -20,8 +20,9 @@ import type { CodeBindingFunction, CodeRunFailure, CodeRunRequest, CodeRunResult
 import { RealmIdentityStore } from './identity.js'
 import type { RealmVerification } from './identity.js'
 import { HIDDEN_BINDING_MEMBER, MIN_OUTPUT_BYTES, OutputLedger } from './protocol.js'
+import { acquireRealmLease, RealmLeaseError } from './realm-lease.js'
 import { PersistentRealm } from './realm.js'
-import type { RealmBudgets } from './realm.js'
+import type { RealmBudgets, RealmRunNotice } from './realm.js'
 
 /** The only handshake protocol version this runtime speaks. */
 const HANDSHAKE_PROTOCOL = 1
@@ -68,6 +69,11 @@ interface PrimeAdmissionTurn {
   release: () => void
 }
 
+/** One run synchronously enqueued while its pool/lease admission was stable. */
+interface RealmAdmission {
+  result: Promise<CodeRunResult>
+}
+
 /** Render an unknown thrown value as a message, `Error` or not, without throwing again. */
 function messageOf(error: unknown): string {
   try {
@@ -97,6 +103,13 @@ function storageFailure(error: unknown): string {
   return message.startsWith('prime-realm-identity: ')
     ? message
     : 'prime-realm-identity: realm identity storage is unavailable'
+}
+
+/** Bound a lazy cross-process Realm-ownership failure for model-visible output. */
+function realmOwnershipFailure(error: unknown): string {
+  return error instanceof RealmLeaseError
+    ? error.message
+    : 'dsh-prime-agent: Prime session ownership is unavailable'
 }
 
 /**
@@ -198,8 +211,13 @@ export class PrimeCodeRuntime extends CodeRuntime {
   private readonly outputBytes: number
   private readonly maxActiveRealms: number
   private readonly maxIdleMs: number
+  private readonly leaseDirectory: string
   private readonly pool = new Map<string, PersistentRealm>()
-  private readonly disposals = new Set<Promise<void>>()
+  /** Cross-process claims for Realms whose worker is live or still terminating. */
+  private readonly realmLeases = new Map<string, () => Promise<void>>()
+  private readonly retirements = new Map<string, Promise<void>>()
+  /** Serializes the async claim + synchronous pool-admission decision. */
+  private poolMutationTail = Promise.resolve()
   // A request's realm id is authenticated asynchronously, so its place must be
   // reserved before the handshake can finish out of order. The turn ends as
   // soon as realm.run() has enqueued the cell; realm execution stays per-realm.
@@ -225,6 +243,7 @@ export class PrimeCodeRuntime extends CodeRuntime {
     this.budgets = { ...options.budgets, maxOutputBytes: this.outputBytes - NOTICE_RESERVE_BYTES }
     this.maxActiveRealms = options.maxActiveRealms
     this.maxIdleMs = options.maxIdleMs
+    this.leaseDirectory = join(options.stateDirectory, 'realm-identity', 'leases')
 
     // Armed INSIDE the effect so the timer cannot outlive a registration that
     // throws, and unref'd because reclamation is not a reason to keep the host
@@ -324,30 +343,88 @@ export class PrimeCodeRuntime extends CodeRuntime {
     if (this.disposed) {
       return this.failure({ kind: 'abort', message: 'runtime disposed' })
     }
-    const realm = this.acquire(realmId)
-    if (realm === undefined) {
-      return this.failure({ kind: 'exception', message: 'realm admission rejected: active realm limit reached' })
-    }
     // The realm reports at DISPATCH, so a run that never reaches a worker neither
     // emits nor consumes the pending loss report.
     let notice: string | undefined
-    const result = await realm.run(request, ({ fresh, namespaceLost }) => {
-      notice = namespaceNotice(fresh, namespaceLost)
-    })
+    let admission: RealmAdmission | undefined
+    try {
+      admission = await this.admit(realmId, request, ({ fresh, namespaceLost }) => {
+        notice = namespaceNotice(fresh, namespaceLost)
+      })
+    } catch (error: unknown) {
+      return this.failure({ kind: 'exception', message: realmOwnershipFailure(error) })
+    }
+    if (admission === undefined) {
+      return this.disposed
+        ? this.failure({ kind: 'abort', message: 'runtime disposed' })
+        : this.failure({ kind: 'exception', message: 'realm admission rejected: active realm limit reached' })
+    }
+    const result = await admission.result
     if (notice === undefined) return result
     // Appended host-side rather than through the worker's ledger, which is why
     // every realm runs against a budget reduced by `NOTICE_RESERVE_BYTES`.
     return { ...result, logs: [...result.logs, notice] }
   }
 
-  /** The realm for one id, creating or reclaiming as the pool ceiling allows. */
-  private acquire(realmId: string): PersistentRealm | undefined {
-    const existing = this.pool.get(realmId)
-    if (existing !== undefined) return existing
-    if (this.pool.size >= this.maxActiveRealms && !this.reclaimLeastRecentlyUsed()) return undefined
-    const realm = new PersistentRealm({ realmId, budgets: this.budgets })
-    this.pool.set(realmId, realm)
-    return realm
+  /**
+   * Enqueue one run while its Realm cannot be reclaimed. Existing Realms take a
+   * synchronous fast path; only first-use claim and pool-capacity changes enter
+   * the async mutation queue.
+   */
+  private async admit(
+    realmId: string,
+    request: CodeRunRequest,
+    onStart: (notice: RealmRunNotice) => void,
+  ): Promise<RealmAdmission | undefined> {
+    if (this.disposed) return undefined
+    const ready = this.pool.get(realmId)
+    if (ready !== undefined) return { result: ready.run(request, onStart) }
+
+    const previous = this.poolMutationTail
+    let releaseMutation!: () => void
+    this.poolMutationTail = new Promise<void>((resolve) => { releaseMutation = resolve })
+    await previous
+    try {
+      if (this.disposed) return undefined
+      const existing = this.pool.get(realmId)
+      if (existing !== undefined) return { result: existing.run(request, onStart) }
+
+      const retiring = this.retirements.get(realmId)
+      if (retiring !== undefined) await retiring
+      if (this.disposed) return undefined
+
+      let claimedNow: (() => Promise<void>) | undefined
+      if (!this.realmLeases.has(realmId)) {
+        claimedNow = await acquireRealmLease(this.leaseDirectory, realmId)
+        if (this.disposed) {
+          await claimedNow()
+          return undefined
+        }
+        this.realmLeases.set(realmId, claimedNow)
+      }
+
+      if (this.pool.size >= this.maxActiveRealms && !this.reclaimLeastRecentlyUsed()) {
+        if (claimedNow !== undefined) {
+          this.realmLeases.delete(realmId)
+          await claimedNow()
+        }
+        return undefined
+      }
+
+      try {
+        const realm = new PersistentRealm({ realmId, budgets: this.budgets })
+        this.pool.set(realmId, realm)
+        return { result: realm.run(request, onStart) }
+      } catch (error: unknown) {
+        if (claimedNow !== undefined) {
+          this.realmLeases.delete(realmId)
+          await claimedNow()
+        }
+        throw error
+      }
+    } finally {
+      releaseMutation()
+    }
   }
 
   /**
@@ -391,21 +468,41 @@ export class PrimeCodeRuntime extends CodeRuntime {
    */
   private reclaim(realmId: string, realm: PersistentRealm): void {
     this.pool.delete(realmId)
-    const disposal = realm.dispose()
-    this.disposals.add(disposal)
-    void disposal.finally(() => { this.disposals.delete(disposal) })
+    const retirement = (async () => {
+      try {
+        await realm.dispose()
+      } finally {
+        const release = this.realmLeases.get(realmId)
+        if (release !== undefined) {
+          this.realmLeases.delete(realmId)
+          await release()
+        }
+      }
+    })()
+    this.retirements.set(realmId, retirement)
+    void retirement.then(
+      () => { if (this.retirements.get(realmId) === retirement) this.retirements.delete(realmId) },
+      () => { if (this.retirements.get(realmId) === retirement) this.retirements.delete(realmId) },
+    )
   }
 
   /**
-   * Stop admission, then terminate every realm and await complete settlement, so
-   * no worker or in-flight binding call outlives the fiber.
+   * Stop admission, settle any ownership claim already in flight, then retire
+   * every Realm. Each claim releases only after its worker has fully stopped.
    */
   private async teardown(): Promise<void> {
     this.disposed = true
     this.releaseAdmissionStop()
-    const realms = [...this.pool.values()]
-    this.pool.clear()
-    await Promise.all([...realms.map(realm => realm.dispose()), ...this.disposals])
+    await this.poolMutationTail
+
+    for (const [realmId, realm] of [...this.pool]) this.reclaim(realmId, realm)
+    await Promise.all([...this.retirements.values()])
+
+    // Defensive cleanup for a claim that completed but never reached a pool
+    // entry; normal admission and retirement leave this map empty here.
+    const releases = [...this.realmLeases.values()]
+    this.realmLeases.clear()
+    await Promise.all(releases.map(release => release()))
   }
 
   /**

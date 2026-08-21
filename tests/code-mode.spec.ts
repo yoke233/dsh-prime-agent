@@ -77,6 +77,8 @@ describe('Prime Code Mode composition', () => {
     expect(policy).toMatch(/bare Promise\.all only for an atomic group/)
     expect(policy).toMatch(/best-effort probes with a per-call catch or Promise\.allSettled/)
     expect(policy).toMatch(/side-effecting mutations sequentially/)
+    expect(policy).toContain("Call grep with a TypeScript RegExp literal's .source")
+    expect(policy).toContain('tools.grep({ pattern: /constructor\\(/.source })')
     expect(policy).toContain('Each run_code call is the next cell in the same live session')
     expect(policy).toContain("A cell's result is its final expression; do not use a top-level return")
     expect(policy).toContain('Reduce first, finish with the summary')

@@ -73,6 +73,17 @@ describe('persistent REPL cells', () => {
     expect(realm.generation).toBe(1)
   })
 
+  it('passes RegExp.source to grep without quoted-string double escaping', async () => {
+    const realm = createRealm()
+    const result = await realm.run({
+      program: String.raw`await globalThis.tools.grep({ pattern: /constructor\(/.source })`,
+      bindings: [tools({ grep: async args => args.pattern })],
+    })
+
+    expect(result.error).toBeUndefined()
+    expect(result.value).toBe(String.raw`constructor\(`)
+  })
+
   it('keeps declarations and assignments completed before a program exception', async () => {
     const realm = createRealm()
     const failed = await realm.run({

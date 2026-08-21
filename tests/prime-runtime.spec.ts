@@ -1,5 +1,4 @@
-import { spawnSync } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -15,7 +14,7 @@ let root: string | undefined
 const contexts: Context[] = []
 
 afterEach(async () => {
-  // Reverse order: the second host of a lease test must release before the first.
+  // Reverse creation order so cross-host ownership tests unwind deterministically.
   for (const context of contexts.splice(0).reverse()) await context.fiber.dispose()
   if (root !== undefined) await rm(root, { recursive: true, force: true })
   root = undefined
@@ -26,7 +25,7 @@ function stateDirectory(): string {
   return join(root, 'state')
 }
 
-/** Boot a real host row: real lease, real official fallback, real workers. */
+/** Boot a real host row: lazy per-Realm ownership, official fallback, real workers. */
 async function startHost(config: Record<string, unknown> = {}): Promise<Context> {
   const context = new Context()
   contexts.push(context)
@@ -659,6 +658,28 @@ describe('realm pool governance', () => {
     expectFreshNamespaceNotice(alpha)
   })
 
+  it('does not evict an idle local Realm when another host owns the requested Session', async () => {
+    await makeRoot('dsh-prime-foreign-owner-')
+    const first = await startHost({ maxActiveRealms: 1 })
+    const second = await startHost({ maxActiveRealms: 1 })
+
+    await first.codeRuntime.run({
+      program: 'const retainedAfterConflict = "alpha"\nretainedAfterConflict',
+      bindings: primeFor('session-local-alpha'),
+    })
+    await second.codeRuntime.run({ program: '"foreign owner"', bindings: primeFor('session-foreign-beta') })
+
+    const conflict = await first.codeRuntime.run({ program: '"must not run"', bindings: primeFor('session-foreign-beta') })
+    expect(conflict.error?.message).toContain('already active in another host process')
+
+    const retained = await first.codeRuntime.run({
+      program: 'retainedAfterConflict',
+      bindings: primeFor('session-local-alpha'),
+    })
+    expect(retained.value).toBe('alpha')
+    expect(notices(retained)).toEqual([])
+  })
+
   it('refuses admission rather than reclaiming a realm with a run in flight', async () => {
     await makeRoot('dsh-prime-admission-')
     const ctx = await startHost({ maxActiveRealms: 1 })
@@ -682,14 +703,15 @@ describe('realm pool governance', () => {
     expect(result.value).toBe('released')
   })
 
-  it('reclaims a realm that has been idle past the ceiling', async () => {
+  it('releases an idle Realm for fresh takeover by another host', async () => {
     await makeRoot('dsh-prime-idle-')
-    const ctx = await startHost({ maxIdleMs: 150 })
+    const first = await startHost({ maxIdleMs: 150 })
+    const second = await startHost({ maxIdleMs: 150 })
 
-    await ctx.codeRuntime.run({ program: 'const owner = "idle"', bindings: primeFor('session-idle') })
+    await first.codeRuntime.run({ program: 'const owner = "idle"', bindings: primeFor('session-idle') })
     await sleep(700)
 
-    const after = await ctx.codeRuntime.run({ program: 'typeof owner === "undefined" ? null : owner', bindings: primeFor('session-idle') })
+    const after = await second.codeRuntime.run({ program: 'typeof owner === "undefined" ? null : owner', bindings: primeFor('session-idle') })
     expect(after.value).toBeNull()
     expectFreshNamespaceNotice(after)
   })
@@ -757,49 +779,56 @@ describe('realm pool governance', () => {
 
 })
 
-describe('host owner lease', () => {
-  it('refuses a second host over the same state directory and releases on disposal', async () => {
-    await makeRoot('dsh-prime-lease-')
+describe('cross-process Realm ownership', () => {
+  it('allows hosts to share durable state while running different Sessions', async () => {
+    await makeRoot('dsh-prime-multi-host-')
     const first = await startHost()
-    expect(first.codeRuntime).toBeDefined()
+    const second = await startHost()
 
-    const second = new Context()
-    contexts.push(second)
-    await expect(second.plugin(primeRuntime, { stateDirectory: stateDirectory() }))
-      .rejects.toThrow('another live host process already owns this Prime realm state directory')
+    const firstRun = await first.codeRuntime.run({
+      program: 'const firstHostValue = "first"\nfirstHostValue',
+      bindings: primeFor('session-first-host'),
+    })
+    const secondRun = await second.codeRuntime.run({
+      program: 'const secondHostValue = "second"\nsecondHostValue',
+      bindings: primeFor('session-second-host'),
+    })
 
-    const leasePath = join(stateDirectory(), 'realm-identity', 'host.lease')
-    const lease = JSON.parse(await readFile(leasePath, 'utf8')) as { pid: number }
-    expect(lease.pid).toBe(process.pid)
+    expect(firstRun.value).toBe('first')
+    expect(secondRun.value).toBe('second')
+    expectFreshNamespaceNotice(firstRun)
+    expectFreshNamespaceNotice(secondRun)
+  })
+
+  it('keeps one live owner per Session and permits a fresh takeover after disposal', async () => {
+    await makeRoot('dsh-prime-realm-owner-')
+    const first = await startHost()
+    const second = await startHost()
+
+    const owned = await first.codeRuntime.run({
+      program: 'const ownerSentinel = "first host"\nownerSentinel',
+      bindings: primeFor('session-shared-host'),
+    })
+    expect(owned.value).toBe('first host')
+
+    const conflict = await second.codeRuntime.run({
+      program: '"must not execute"',
+      bindings: primeFor('session-shared-host'),
+    })
+    expect(conflict.error).toMatchObject({
+      kind: 'exception',
+      message: 'dsh-prime-agent: this Prime session is already active in another host process',
+    })
 
     await first.fiber.dispose()
     contexts.splice(contexts.indexOf(first), 1)
-    await expect(readFile(leasePath, 'utf8')).rejects.toThrow()
-  })
 
-  it('reclaims a lease whose owner process is gone, and refuses an unreadable one', async () => {
-    await makeRoot('dsh-prime-lease-stale-')
-    const identityDirectory = join(stateDirectory(), 'realm-identity')
-    const leasePath = join(identityDirectory, 'host.lease')
-    await mkdir(identityDirectory, { recursive: true })
-
-    const exited = spawnSync(process.execPath, ['-e', ''])
-    expect(exited.pid).toBeGreaterThan(0)
-    await writeFile(leasePath, JSON.stringify({ pid: exited.pid, startedAt: Date.now(), nonce: 'A'.repeat(22) }))
-
-    const ctx = await startHost()
-    expect(ctx.codeRuntime).toBeDefined()
-    const reclaimed = JSON.parse(await readFile(leasePath, 'utf8')) as { pid: number }
-    expect(reclaimed.pid).toBe(process.pid)
-
-    await ctx.fiber.dispose()
-    contexts.splice(contexts.indexOf(ctx), 1)
-
-    await writeFile(leasePath, 'not a lease record')
-    const corrupted = new Context()
-    contexts.push(corrupted)
-    await expect(corrupted.plugin(primeRuntime, { stateDirectory: stateDirectory() }))
-      .rejects.toThrow('refusing to start without proving the previous owner is gone')
+    const takeover = await second.codeRuntime.run({
+      program: 'typeof ownerSentinel',
+      bindings: primeFor('session-shared-host'),
+    })
+    expect(takeover.value).toBe('undefined')
+    expectFreshNamespaceNotice(takeover)
   })
 })
 

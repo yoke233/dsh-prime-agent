@@ -16,6 +16,7 @@
 | live namespace | Worker generation 内跨 cell 保留的普通顶层变量、函数、对象、Map 和索引。它不是持久存储。 |
 | cell / run | 一次 `run_code` 调用。一个 Realm 同时只执行一个 cell。 |
 | binding lease | 当前 cell 对 DSH 工具 binding 的临时调用权；cell 结束即撤销，保留下来的旧 wrapper 不能越轮调用工具。 |
+| Realm ownership lease | 一个已认证 Realm 的跨进程 live-heap 所有权；不同 Realm 不互斥。 |
 | continuable child | 由 DSH 持久化、可接收后续消息并可冷恢复的子 Agent。其 id 不是 Job id。 |
 | Job | DSH 的通用后台任务。它有 `job_output`/`job_list`/`job_kill`；continuable child 不通过 Job 收集结果。 |
 | handoff file | 父子 Agent 在共享工作区传递大材料或结果的普通文件。只写一次是 policy 约定，不是文件系统授权。 |
@@ -47,7 +48,7 @@ DSH profile
 包有两个运行入口：
 
 - `dsh-prime-agent`：Agent scope 内的 policy、continual learning、Realm handshake binding 与 Code Mode assembly 检查。
-- `dsh-prime-agent/runtime`：host scope 内的 hybrid Code Runtime、Realm pool、官方 fallback、host lease、父进程生命周期监控与 Prime preset 落位。
+- `dsh-prime-agent/runtime`：host scope 内的 hybrid Code Runtime、Realm pool、官方 fallback、按 Realm 的进程 lease、父进程生命周期监控与 Prime preset 落位。
 
 ## 安装与 preset
 
@@ -70,6 +71,8 @@ Prime Agent scope 必须使用 Code Mode。存在 owning Agent 时，prompt asse
 - 普通顶层 binding 留在同一 live namespace，供后续 cell 直接使用。
 - 大结果应在程序内过滤、聚合或抽取，只把当前决策需要的摘要送回模型。
 - 必须跨 Worker 或 host 重启保存的进度写入工作区文件。
+
+Prime 不增加搜索适配层。源码发现直接调用 DSH 原生 `grep`；Code Mode 以 TypeScript 正则字面量的 `.source` 生成 `pattern`，Realm bridge 仍只传无损 JSON。
 
 ## Realm 身份与 hybrid 路由
 
@@ -172,8 +175,8 @@ local state 以 Session id 的 SHA-256 摘要命名。`allowGlobalRefinement` �
 <stateDirectory>/
 ├─ realm-identity/
 │  ├─ hmac.key
-│  ├─ host.lease
-│  └─ sessions/<keyed-session-path>.json
+│  ├─ sessions/<keyed-session-path>.json
+│  └─ leases/<realm-id>.lease
 └─ continual/
    ├─ global.json
    └─ sessions/<sha256-session-id>.json
@@ -181,9 +184,9 @@ local state 以 Session id 的 SHA-256 摘要命名。`allowGlobalRefinement` �
 
 Realm heap、child Session、Job 和工作区 handoff files 不存放在上述插件私有目录：前者是 Worker 内存，child/Job 由 DSH 持有，handoff files 属于任务工作区。
 
-identity 与 continual 文件使用跨进程锁和原子替换；损坏、超限和 revision 冲突明确失败。一个 `stateDirectory` 同时只允许一个 host runtime lease，避免同一 Realm identity 在两个进程中各自持有独立 heap。
+identity 与 continual 文件使用跨进程锁和原子替换；损坏、超限和 revision 冲突明确失败。多个 host runtime 可以共享一个 `stateDirectory`。认证成功后，runtime 在创建 live heap 前惰性取得该 Realm 的进程 lease：不同 Session/Realm 可由不同 TUI 同时运行；同一 Realm 已被其他存活进程持有时明确拒绝，不降级为 one-shot。idle/LRU 回收会先完整终止 Worker，再释放该 Realm 的 lease；旧 Worker 完全终止前，其他进程不能创建同一 Realm 的第二份 heap。记录的 owner pid 被明确证明不存在时，stale lease 可由下一 host 回收；PID 已复用或 liveness 不可判定时保守拒绝，避免生成第二份 heap。崩溃若遗留 `*.lease.lock`，操作者须确认对应 Session 无存活 host 后再清理。
 
-Host runtime 在模块加载时冻结启动宿主的直接父 pid，并在取得 lease 后开始监控。macOS/POSIX 上父进程退出后发生的 reparent，以及 Windows 上父 shell 被强制终止但子进程继续存活，都会触发同一条根级清理路径：停止监控，dispose 整个 Cordis tree，等待 Realm Worker 与 lease 释放，然后以 0 退出；根级 dispose 未在 5 秒内结算则以非零状态强制退出。父 pid 为 init 或当前进程时不安装监控；探测结果不能证明父进程消失时保持运行，避免误杀合法宿主。
+Host runtime 在模块加载时冻结启动宿主的直接父 pid，并立即开始监控。macOS/POSIX 上父进程退出后发生的 reparent，以及 Windows 上父 shell 被强制终止但子进程继续存活，都会触发同一条根级清理路径：停止监控，dispose 整个 Cordis tree，等待 Realm Worker 终止，再释放该 host 持有的 Realm leases，随后以 0 退出；根级 dispose 未在 5 秒内结算则以非零状态强制退出。父 pid 为 init 或当前进程时不安装监控；探测结果不能证明父进程消失时保持运行，避免误杀合法宿主。
 
 ## 配置界面
 
@@ -216,6 +219,6 @@ runtime row 与 Prime preset 的 `stateDirectory` 必须相同，否则 handshak
 
 ## 验证面
 
-仓库测试覆盖：Realm identity 并发签发与认证、Session 隔离、跨 cell binding 连续性、调用顺序、binding lease、host-call 预算、超时/abort/Worker 换代、namespace-loss notice、输出上限与 Unicode、工具失败恢复、approval escalation、Subagent Job 编排、官方 report 组合边界、preset 落位和 bundle patch 结构。
+仓库测试覆盖：Realm identity 并发签发与认证、多个 host 共享状态、同 Realm 跨进程互斥与接管、Session 隔离、跨 cell binding 连续性、调用顺序、binding lease、host-call 预算、超时/abort/Worker 换代、namespace-loss notice、输出上限与 Unicode、工具失败恢复、approval escalation、Subagent Job 编排、官方 report 组合边界、preset 落位和 bundle patch 结构。
 
 上游行为映射与同步流程见 [Prime Agent 学习笔记](prime-agent-learnings.md) 和 [上游同步与差异对照手册](upstream-sync.zh.md)。

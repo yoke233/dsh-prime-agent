@@ -48,8 +48,13 @@ export declare class PrimeCodeRuntime extends CodeRuntime {
     private readonly outputBytes;
     private readonly maxActiveRealms;
     private readonly maxIdleMs;
+    private readonly leaseDirectory;
     private readonly pool;
-    private readonly disposals;
+    /** Cross-process claims for Realms whose worker is live or still terminating. */
+    private readonly realmLeases;
+    private readonly retirements;
+    /** Serializes the async claim + synchronous pool-admission decision. */
+    private poolMutationTail;
     private admissionTail;
     private releaseAdmissionStop;
     private readonly admissionStopped;
@@ -72,8 +77,12 @@ export declare class PrimeCodeRuntime extends CodeRuntime {
     private finishAdmission;
     /** Admit the run into its realm and append a fresh-namespace notice when needed. */
     private execute;
-    /** The realm for one id, creating or reclaiming as the pool ceiling allows. */
-    private acquire;
+    /**
+     * Enqueue one run while its Realm cannot be reclaimed. Existing Realms take a
+     * synchronous fast path; only first-use claim and pool-capacity changes enter
+     * the async mutation queue.
+     */
+    private admit;
     /**
      * Free one admission slot by reclaiming the least recently used IDLE realm.
      * A realm with a run active or queued is never a candidate: reclaiming it
@@ -90,8 +99,8 @@ export declare class PrimeCodeRuntime extends CodeRuntime {
      */
     private reclaim;
     /**
-     * Stop admission, then terminate every realm and await complete settlement, so
-     * no worker or in-flight binding call outlives the fiber.
+     * Stop admission, settle any ownership claim already in flight, then retire
+     * every Realm. Each claim releases only after its worker has fully stopped.
      */
     private teardown;
     /**

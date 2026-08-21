@@ -23,6 +23,7 @@ function orchestrationPolicy(ctx: Context, agent: Agent | undefined, requireTool
   return `Prime control-plane policy:
 - Use Code Mode as the control plane. Compose independent reads and tool/subagent calls in one program.
 - Parallelism has three shapes: bare Promise.all only for an atomic group where every result is required; best-effort probes with a per-call catch or Promise.allSettled; side-effecting mutations sequentially, one at a time.
+- Call grep with a TypeScript RegExp literal's .source, for example tools.grep({ pattern: /constructor\\(/.source }).
 - Each run_code call is the next cell in the same live session; ordinary top-level bindings remain available until the Realm restarts.
 - A cell's result is its final expression; do not use a top-level return.
 - Reduce first, finish with the summary: filter, aggregate, count, hash, or extract large tool results inside the program, keep reusable intermediates in ordinary top-level bindings, and make only the summary the cell's final expression. When a result carries a spill locator, read the span you need from it instead of pulling the whole text back.
