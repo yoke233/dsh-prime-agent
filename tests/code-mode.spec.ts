@@ -82,7 +82,6 @@ describe('Prime Code Mode composition', () => {
     expect(policy).toContain('Each run_code call is the next cell in the same live session')
     expect(policy).toContain("A cell's result is its final expression; do not use a top-level return")
     expect(policy).toContain('Reduce first, finish with the summary')
-    expect(policy).toContain('keep reusable intermediates in ordinary top-level bindings')
     expect(policy).toContain('spill locator')
     expect(policy).toContain('do not blindly repeat it')
     expect(policy).toMatch(/sandbox denial, ask once for the minimum permission/)

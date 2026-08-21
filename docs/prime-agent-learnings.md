@@ -1,6 +1,6 @@
 # Prime Agent 学习笔记
 
-本文记录从 Prime Agent 基线 `7787f07415d843b9a800f6a4720e0c739bd608e5` 提炼出的设计经验。目标是持续学习其行为模型，而不是复制 Python、Jupyter、Daemon 或 TypeScript 文件结构。后续基线更新流程见 [上游同步与差异对照手册](upstream-sync.zh.md)。
+本文记录从 Prime Agent 基线 `aacf04b4678fd02cf46b69ab0bdcbc5d29baab45` 提炼出的设计经验。目标是持续学习其行为模型，而不是复制 Python、Jupyter、Daemon 或 TypeScript 文件结构。后续基线更新流程见 [上游同步与差异对照手册](upstream-sync.zh.md)。
 
 ## 核心判断
 
@@ -12,6 +12,8 @@ Prime Agent 把 Agent 视为长期运行的计算过程，而不是一次性聊�
 - `rlm()` 在子任务被接收后立即返回 child handle，不等待最终答案。
 - child 通过显式 `agent_message` 或文件稍后汇报，父 Agent 可以先结束当前 turn 或继续其他工作。
 - TypeScript Host 拥有 child registry、消息、目标、取消、Session 与状态转换；Python 只提交 typed host request。
+- 慢任务采用非阻塞控制循环：保存 handle 或输出位置后继续独立工作或结束当前 turn，不用 sleep 轮询或长阻塞 await 占住交互。
+- 持久 namespace 是紧凑工作集，不是大对象仓库；上游对 Python 快照设单变量限额，DSH 则把大材料留在文件/spill artifact，并明确 live Realm 不由 compaction 清理。
 - Continual Harness 与 RLM runtime 明确分层，refinement 是小而有证据的状态改变。
 
 ## 可移植的不变量
@@ -50,6 +52,14 @@ DSH 插件遵循同一边界：
 ### 长任务需要独立生命周期
 
 Heartbeat、Schedule、Goal、compaction 与 daemon worker 都服务于“任务不能依赖一次终端连接”的目标。DSH 已有对应能力时，适配层的职责是提供正确路由和 RLM 工作区，不是再造主循环。
+
+慢任务或独立任务应先进入 managed Job 或 continuable child，保存 id、输出位置和恢复检查点，再继续不依赖其结果的工作；如果没有独立工作可做，就结束当前 turn，等待 report、settlement notice 或后续调度。用 `sleep`/`setTimeout` 轮询，或改成一个长阻塞 `await`，都只是把轮询换了写法。直接面向用户的 root 在多回合或多 child 工作中应按有意义的里程碑简洁汇报结果、阻塞和下一步；child 仍通过 `report` 面向 parent，不制造重复的用户进度噪声。
+
+### 持久工作集必须有边界
+
+上游现在把 Python snapshot 限制为有界总量和单变量大小，并在 compaction 时清理无法纳入快照的超大变量。这证明可移植目标是“后续 turn 不应反复搬运大状态”，而不是照搬 16 MiB 阈值或 pickle 清理。
+
+DSH Realm 不做 heap snapshot，compaction 也不会遍历或删除 live bindings。对应策略是：工具的完整 canonical value 可在当前程序内归约；模型 projection 与 durable dispatch log 使用 12KB best-effort spill 阈值，backend 不可用时保留 inline 成功结果；大源数据和结果写入任务文件或使用现有 spill locator；Realm 长期只保留路径、紧凑索引、函数和摘要。任何未来的 binding 级清理都必须显式、可观察、失败原子，不能静默破坏用户状态。spill artifact 的配额、保留期和清理由 DSH store/部署层拥有，不属于本插件。
 
 ### 自我改进必须受限
 
@@ -98,6 +108,9 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 | delete child | 当前无对应操作；持久 child Session 不由插件删除 |
 | `rlm.harness` | `prime_refine` |
 | `/refine` / auto-refine | 显式 inspect/apply/rollback；自动 proposal 尚未实现 |
+| per-child `thinking` | 当前无 per-spawn 参数；等待 DSH Subagent 原生支持并按 resolved model 校验 |
+| kernel-owned MCP programs | DSH Host MCP client 注册统一 tools；Code Mode 从 catalog 生成 bindings |
+| IPython snapshot pruning | Realm 不 snapshot/GC；任务文件 + spill artifact + 紧凑 live 工作集 |
 | Persistent Goal | DSH Goal 与 round driver |
 | Heartbeat / Schedule | DSH Jobs 与 Schedule |
 | compaction | DSH Compaction |
@@ -107,7 +120,7 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 
 好的适配不是让 DSH 看起来像在运行 Prime 的 Python，而是让它拥有同一种工作感觉：模型用代码协调能力，把上下文当作可寻址状态，让 child 独立运行，并把稳定经验与过程数据分开。
 
-当前已交付 Code Mode + Persistent Realm + continuable Subagent/Jobs + 显式 `prime_refine`。DSH Code Mode 提供 Prime 式的可编程工具与递归 Agent 编排；持久 Realm 让函数、对象、索引与工具编排代码跨 run 延续，对应 Prime 的持久计算 namespace。
+当前已交付 Code Mode + Persistent Realm + continuable Subagent/Jobs + 显式 `prime_refine`。DSH Code Mode 提供 Prime 式的可编程工具与递归 Agent 编排；持久 Realm 让函数、对象、索引与工具编排代码跨 run 延续，对应 Prime 的持久计算 namespace。新基线补充了非阻塞长任务、root 进度、受限大状态和 Host-owned MCP 的边界；它们通过 DSH 原生生命周期、policy、文件/spill 预算与统一工具注册表适配。
 
 我们学习这一不变量，而不绑定其实现语言。DSH 原生 Code Mode bridge 通过带 challenge proof 的 `prime_realm_identity` handshake 取得不透明 Realm identity；hybrid Runtime 只让 Prime Session 进入 Persistent TypeScript Worker，其他请求继续委托官方 one-shot Worker。跨重启的可靠数据层是工作区文件，跨 Agent 的材料通过只写一次的 handoff file 交接。完整当前边界见 [当前架构](architecture.md)。
 

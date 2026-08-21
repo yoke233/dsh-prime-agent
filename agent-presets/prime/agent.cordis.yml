@@ -1,9 +1,9 @@
 # The `prime` agent preset: the shipped `code` preset with Prime identity and realm changes.
 #
 # Everything from the next line down copies the harness's own
-# `apps/cli/config/agent-presets/code/agent.cordis.yml`, with exactly two Prime
-# changes: the software-engineer persona and the `prime-agent` row under
-# "prime realm" near the end. DSH has no preset inheritance and no preset-level
+# `apps/cli/config/agent-presets/code/agent.cordis.yml`, with these Prime changes:
+# the software-engineer persona, the `prime-agent` row under "prime realm", and
+# bounded Prime projections near the end. DSH has no preset inheritance and no preset-level
 # patch layer — a preset is one whole composition file — so the only way to ship
 # these changes is to maintain the whole snapshot as the harness moves.
 #
@@ -11,7 +11,7 @@
 #   deepseek-harness    141eb6fef83422698aef7a981029e843e8161534 (dsh-v0.1.0-rc.8, 2026-08-19)
 #     source file last changed in b2178ade8028597e7565db77dfe3ef4ecd68b99d
 #   reviewed Prime Agent baseline
-#                       7787f07415d843b9a800f6a4720e0c739bd608e5
+#                       aacf04b4678fd02cf46b69ab0bdcbc5d29baab45
 #     (docs/upstream-baseline.json)
 #
 # EVERY upstream sync must diff this file line by line against the shipped
@@ -295,6 +295,15 @@
     stateDirectory: !!js dshHomePath('prime-agent')
 
 # ── presentation ────────────────────────────────────────────────────────────
+
+# Complete canonical values remain inside the Node Realm. Apply a best-effort
+# bound to the model-facing projection and durable code-dispatch log; successful
+# spills are recoverable through the locator, while storage failures remain inline.
+# Agent scope leaves other presets alone.
+- id: prime-spill-policy
+  name: '@deepseek-ai/dsh-spill-policy'
+  config:
+    maxInlineBytes: 12000
 
 # Code Mode for this agent alone. The row waits for the host's `codeRuntime`
 # rather than assuming it: a deployment that composes no TypeScript runtime

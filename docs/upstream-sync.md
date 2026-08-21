@@ -9,9 +9,9 @@ This manual keeps `dsh-prime-agent` aligned with Prime Agent's design without tu
 The current reviewed Prime Agent baseline is:
 
 ```text
-7787f07415d843b9a800f6a4720e0c739bd608e5
-2026-08-12T21:01:27-07:00
-fix(coding-agent): retain root kill cleanup ownership (#1240)
+aacf04b4678fd02cf46b69ab0bdcbc5d29baab45
+2026-08-21T21:55:49+08:00
+Merge remote-tracking branch 'origin/main' into pr-1053
 ```
 
 Advance this marker only after reviewing the complete old-to-new range, recording design decisions, passing adapter verification, and completing review. Advance it even when the decision is “no adapter change”; otherwise the same upstream commits will be reviewed again.
@@ -30,6 +30,7 @@ Synchronize behavioral contracts and architecture, not implementation language o
 | Continual Harness | `prime_refine` | Adapt evidence, scope, concurrency, and rollback rules |
 | Auto-refine and refine review | Not currently adapted | Re-review the upstream contract before implementation; do not infer it from a local roadmap label |
 | Goals, compaction, heartbeat, daemon lifecycle | Existing DSH Goal, Compaction, Jobs, Schedule, and Session capabilities | Compose; do not duplicate |
+| Python/kernel-owned MCP programs | DSH Host MCP tool registry + Code Mode bindings | Reuse Host connection, authentication, tool-generation, and cleanup ownership; do not create a second MCP runtime inside the Realm |
 | TUI, ACP, providers, billing, installer | Outside this plugin | Ignore unless they change an RLM-visible contract |
 
 The compatibility target is the user's experience and safety invariant, not API name parity.
@@ -100,6 +101,13 @@ After a synchronization pass:
 | `7787f074` | Local/global Continual Harness with refine/rollback | Adapt | `prime_refine` is secondary, evidence-gated, optimistic, bounded, and conflict-safe |
 | `7787f074` | Host owns agent lifecycle, messages, goals, and cancellation | Adopt | The plugin composes DSH services and creates no worker registry or second Agent Loop |
 | `7787f074` | Automatic refinement enabled by default | Defer | Requires explicit proposal/review/outcome design before model-authored automation |
+| `aacf04b4` | Nonblocking long-work loops, parallel independent workers, and proactive root progress | Adapt | Policy uses continuable children or Jobs, retains ids/output locations, forbids sleep polling and long blocking awaits, and gives milestone-progress guidance only to user-facing roots |
+| `aacf04b4` | Explicit per-child reasoning-level selection and validation | Defer | DSH rc.8 exposes no per-spawn reasoning parameter; wait for DSH-native inheritance, model validation, persistence, and cold-resume semantics instead of wrapping a second tool |
+| `aacf04b4` | Per-variable IPython snapshot limits and compaction-time oversized-state pruning | Adapt | The TypeScript Realm has no heap snapshots or compaction GC; large material uses task files, projections use a 12KB best-effort spill threshold, compact indices/summaries remain live, and user bindings are never deleted implicitly |
+| `aacf04b4` | Resume unfinished work and Goal continuation after automatic compaction | Adopt | DSH Compaction and the Agent Loop already own continuation and overflow retry; the plugin composes them and injects no second continuation |
+| `aacf04b4` | Daemon-owned family ledger and child deletion/tombstones | Adopt | DSH Agent/Subagent/Session remain family authority; the plugin creates no ledger and never presents interrupt as delete |
+| `aacf04b4` | Generic kernel-owned MCP and ACP MCP programs | Adapt | A profile may register MCP tools through the DSH Host client and Code Mode generates bindings from the unified catalog; Python/kernel and ACP-specific implementations are rejected |
+| `aacf04b4` | Kernel cold-boot, owner-death, and Windows cleanup hardening | Adapt | The Realm reuses Worker generation fencing, parent-process monitoring, quiescent disposal, and cross-process leases; Jupyter, ZMQ, forkserver, and named-pipe details are not ported |
 
 ## Semantic gaps to re-check each time
 
@@ -107,5 +115,8 @@ After a synchronization pass:
 - Prime's Python heap preserves live objects and functions; the current adapter selects a Persistent TypeScript Realm through an authenticated binding handshake and retains TypeScript live objects inside one Worker generation. IPython remains reference material for behavior and failure semantics, not a product backend.
 - Cross-agent context currently uses workspace handoff files. Write-once behavior is a policy convention; there is no separate Capsule store, `share`/`mount`, or file-access grant.
 - `prime_refine` is explicit; it does not yet observe outcomes or propose refinements automatically.
+- Prime can select a reasoning level for one child; DSH rc.8 currently has no corresponding per-spawn Subagent parameter.
+- Prime compaction removes oversized Python variables that cannot enter a bounded snapshot; DSH compaction does not traverse, snapshot, or prune Realm heap. Spilling bounds model projections and logs only on the best-effort path, preserves inline results on failure, and leaves artifact lifecycle to the DSH store/deployment layer.
+- Prime MCP programs run in Kernel/ACP runtimes; the DSH counterpart belongs to the Host tool registry, so only MCP clients/tools explicitly installed by the profile enter the Code Mode SDK.
 
 These gaps are deliberate until a product requirement and a DSH-native ownership path justify closing them.

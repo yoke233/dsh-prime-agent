@@ -27,6 +27,16 @@ describe('Prime packaging boundary', () => {
     expect(persona?.config?.text).toMatch(/^You are a helpful software engineer assistant\./)
   })
 
+  it('configures a 12KB Prime spill policy', async () => {
+    const preset = await loadDialect('../agent-presets/prime/agent.cordis.yml')
+    const spill = preset.find(row => row.id === 'prime-spill-policy')
+    expect(spill).toEqual({
+      id: 'prime-spill-policy',
+      name: '@deepseek-ai/dsh-spill-policy',
+      config: { maxInlineBytes: 12000 },
+    })
+  })
+
   it('replaces only the code runtime', async () => {
     const patches = await loadDialect('../cordis.patch.yml')
     expect(patches).toHaveLength(2)

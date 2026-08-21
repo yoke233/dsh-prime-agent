@@ -20,13 +20,18 @@ function orchestrationPolicy(ctx: Context, agent: Agent | undefined, requireTool
   const subagents = subagentNames.join(', ') || '(not composed)'
   const childControls = childControlNames.join(', ') || '(not composed)'
   const jobs = jobNames.join(', ') || '(not composed)'
+  const rootProgressPolicy = agent !== undefined && ctx.get('agents')?.roots().includes(agent) === true
+    ? '\n- For planned, multi-turn, or multi-child work, give concise user-facing progress at meaningful milestones and before ending a turn while work remains. Lead with outcomes, blockers, and next actions; do not repeat unchanged status or interrupt short work.'
+    : ''
   return `Prime control-plane policy:
 - Use Code Mode as the control plane. Compose independent reads and tool/subagent calls in one program.
 - Parallelism has three shapes: bare Promise.all only for an atomic group where every result is required; best-effort probes with a per-call catch or Promise.allSettled; side-effecting mutations sequentially, one at a time.
+- For slow or independently completing work, use a managed continuable child or Job: start it, record its id or output location, then continue only independent useful work or end the turn. Do not keep a cell or turn open with setTimeout or shell sleep polling, and do not replace polling with a long blocking await; inspect after a report, completion notice, or later turn.${rootProgressPolicy}
+- Use clear technical prose in the user's language. Prefer short concrete statements and lists, preserve exact names, code, paths, and uncertainty, and follow the user's requested format and tone.
 - Call grep with a TypeScript RegExp literal's .source, for example tools.grep({ pattern: /constructor\\(/.source }).
 - Each run_code call is the next cell in the same live session; ordinary top-level bindings remain available until the Realm restarts.
 - A cell's result is its final expression; do not use a top-level return.
-- Reduce first, finish with the summary: filter, aggregate, count, hash, or extract large tool results inside the program, keep reusable intermediates in ordinary top-level bindings, and make only the summary the cell's final expression. When a result carries a spill locator, read the span you need from it instead of pulling the whole text back.
+- Reduce first, finish with the summary: filter, aggregate, count, hash, or extract large tool results inside the program, keep only compact reusable intermediates in ordinary top-level bindings, and make only the summary the cell's final expression. Keep large source and result data in durable task files or existing spill artifacts; retain paths, compact indices, and summaries in the Realm, and read only the needed span from a spill locator.
 - The live namespace is not durable. Checkpoint anything that must survive a restart — progress ledgers, collected results — to durable task files at phase boundaries.
 - A failed tool call is a fact, not a transient condition: capture it, report which operation failed and whether a side effect already happened, and do not blindly repeat it. Side effects stand until you undo them explicitly.
 - On a sandbox denial, ask once for the minimum permission covering the same operation, unchanged. If that is refused, stop and report; never switch commands or tools to route around a denial, guard, or approval rejection.

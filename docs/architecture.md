@@ -74,6 +74,8 @@ Prime Agent scope 必须使用 Code Mode。存在 owning Agent 时，prompt asse
 
 Prime 不增加搜索适配层。源码发现直接调用 DSH 原生 `grep`；Code Mode 以 TypeScript 正则字面量的 `.source` 生成 `pattern`，Realm bridge 仍只传无损 JSON。
 
+MCP 同样不进入 Realm runtime。profile 显式安装 DSH Host MCP client 后，server tools 注册到统一 `ctx.tools` catalog，Code Mode 自动把它们生成当前 Agent 的 TypeScript bindings；连接、认证、重连、工具代际、子进程与清理由 Host 插件拥有。本插件不复制上游的 Python kernel-owned MCP 或 ACP MCP program。
+
 ## Realm 身份与 hybrid 路由
 
 Prime preset 在 Agent scope 注册固定名称 `prime_realm_identity`。hybrid runtime 对每次 Code Runtime 请求执行以下路由：
@@ -98,6 +100,8 @@ cell 以严格模式和 V8 REPL 语义执行，支持顶层 `const`、`let`、`v
 
 同一 Realm 的 cell 严格串行。不同 Realm 在 pool 配额内并行。排队 cell 的取消只移除自身，不影响正在执行的 cell。
 
+DSH compaction 不遍历、序列化或清理 Realm heap，spill 也不会驱逐用户保留的 binding。live namespace 因此只应作为紧凑工作集：大源数据和结果放在任务文件或现有 spill artifact，Realm 长期保留路径、索引、函数和摘要。当前没有隐式的 binding 级 GC。
+
 ### binding lease
 
 每个 cell 开始时，Worker 安装本轮声明的 namespace members；结束前先撤销全部 lease，再结算结果。调用时再次校验 lease，因此：
@@ -114,7 +118,7 @@ cell 以严格模式和 V8 REPL 语义执行，支持顶层 `const`、`let`、`v
 
 Worker 通过 Inspector 取得 cell 的末尾表达式，并把可序列化完成值交给 host。日志与完成值共同受 `maxOutputBytes` 硬上限约束；越界明确失败，不静默截断程序结果。
 
-工具调用的 canonical value、持久日志 preview 与 spill locator 仍由 DSH 工具层管理。程序可以在 Realm 内使用完整 canonical value 做归约，而模型历史只保留有界 preview/locator。Realm 不复制 DSH 的 spill 或工具日志存储。
+工具调用的 canonical value、持久日志 preview 与 spill locator 仍由 DSH 工具层管理。程序可以在 Realm 内使用完整 canonical value 做归约，而 Prime preset 为模型 projection 与 `tool/code-dispatch` 日志配置 12KB best-effort spill 阈值。backend 可用且 locator notice 能容纳时，超出部分由 DSH spill artifact 保存并按需读取；store 缺失、保存失败或 notice 无法放进预算时，策略保留完整 inline 成功结果并告警，不伪造 locator。这个预算不限制 Realm heap，也不等于上游 IPython 的 snapshot pruning；Realm 不复制 DSH 的 spill 或工具日志存储。
 
 ### 失败与换代
 
@@ -145,6 +149,8 @@ Prime preset 复用 DSH 的 continuable Subagent 架构：
 continuable child 没有 Job result promise：其详细过程保存在 child Session，选定结论通过 report 返回。当前没有 child delete，也没有把 child transcript 作为单个结果 collect 的工具。
 
 Jobs 是另一条生命周期：后台 shell 和使用 one-shot background provider 的工作返回 Job id，并由 `job_output`、`job_list`、`job_kill` 管理。Job 与 continuable child id 不可互换。
+
+慢任务和独立任务采用非阻塞控制循环：先由 managed Job 或 continuable child 接受工作，保存 id 或输出位置，再继续不依赖结果的父任务；没有独立工作时结束当前 turn，等待 report、settlement notice 或后续调度。policy 禁止用 `sleep`/`setTimeout` 轮询或长阻塞 `await` 占住 cell/turn。直接面向用户的 root 在多回合、计划型或多 child 工作中按有意义里程碑汇报结果、阻塞和下一步；subagent child 不注入这条用户进度规则，仍通过 `report` 面向 parent。
 
 未显式覆写时，child 继承 parent Session 的工作目录，并基于 parent preset 组合自己的 Agent scope；child 级 allow/deny 仍可进一步收窄工具。跨 Agent 的大材料按 policy 走 handoff file：
 
@@ -214,6 +220,8 @@ runtime row 与 Prime preset 的 `stateDirectory` 必须相同，否则 handshak
 - cell 内原生 dynamic `import()` 没有 import callback，会明确失败；外部能力通过 DSH tools 使用。
 - 不提供 IPython/Jupyter backend、在线 Realm reset、Context Capsule store、`share`/`mount` 或父子文件授权。
 - 不提供 continuable child delete 或 transcript collect。
+- 不提供 per-spawn child reasoning-level 参数；该能力需要 DSH Subagent 原生拥有继承、resolved-model 校验、持久化与冷恢复。
+- 本插件不拥有 spill artifact 的配额、保留期或清理；当前 local backend 可随超限结果持续增长，生命周期治理必须由 DSH spill store/部署层提供。
 - Continual Harness 不自动生成 proposal，不包含 review/apply 分离流程，也不自动建议或执行 rollback。
 - 插件不创建 Agent registry、消息总线、Session store、Job registry、Goal driver、Workflow engine 或 Compaction 实现。
 

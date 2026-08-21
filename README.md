@@ -33,6 +33,8 @@ await review('a') // Map 和函数都还活着
 - Realm 内的工具经跨 run 稳定的 Proxy 与 per-run binding lease 调用:schema、审批、沙箱、日志、并发和取消仍由 DSH 执行,run 结束立即撤销授权。
 - 多个 TUI 进程可共享 Prime 持久状态并同时运行不同 Session；同一 Session 的 live Realm 同时只允许一个进程持有，owner 退出后另一进程以空 namespace 接管。
 - Prime 不封装搜索接口：直接调用 DSH 的 `grep`，并在 Code Mode 中把 TypeScript 正则字面量的 `.source` 作为 `pattern`，避免字符串二次转义。
+- Profile 显式安装的 DSH Host MCP client 把 server tools 注册进统一 catalog，Code Mode 自动生成 bindings；Prime 不复制 Python kernel-owned MCP runtime。
+- Prime preset 为纯文本工具 projection 与 `tool/code-dispatch` 日志配置 12KB best-effort spill 阈值；backend 可用且 locator notice 能容纳时，完整 canonical value 留在 Node Realm，超出部分写入 artifact 并按需读取。保存失败时保留完整 inline 结果并告警，避免把成功结果静默隐藏。
 - Realm 是 live-only 的：abort、timeout、OOM 会 hard-kill Worker 并丢失 namespace，下一次真正执行时会明确提示之前的 bindings 已丢失。跨重启的检查点由程序显式写入持久任务文件。
 
 完整身份协议、namespace 生命周期、Agent 编排与学习层边界见 [当前架构](docs/architecture.md)。
@@ -197,6 +199,8 @@ try {
 ## 编排工作流
 
 控制面 policy 引导模型在一个程序里组合读取、工具与子 Agent：中间值留在 live namespace，大结果在程序内归约后只返回摘要；独立前台工作用 `Promise.all`，best-effort 探测逐项捕获，副作用型 mutation 顺序执行。
+
+慢任务使用非阻塞控制循环：交给 managed Job 或 continuable child，保存 id/输出位置后继续独立工作，或结束当前 turn 等待通知；不使用 sleep 轮询或长阻塞 `await` 占住交互。多回合或多 child 工作由直接面向用户的 root 在有意义里程碑简洁汇报结果、阻塞和下一步。
 
 Prime preset 的 `subagent` 与 `subagent_fork` 默认创建 continuable child：调用在 child inbox 接受任务后返回持久 child id，父 Agent 随即继续。后续使用 `list_agents` 观察、`send_message` 投递新 turn、`interrupt_agent` 中断当前 turn；child 通过 `report` 主动回传选定结论。continuable child 不产生 Job result，详细过程保存在 child Session。
 

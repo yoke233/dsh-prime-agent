@@ -9,9 +9,9 @@
 当前已审阅的 Prime Agent 基线是：
 
 ```text
-7787f07415d843b9a800f6a4720e0c739bd608e5
-2026-08-12T21:01:27-07:00
-fix(coding-agent): retain root kill cleanup ownership (#1240)
+aacf04b4678fd02cf46b69ab0bdcbc5d29baab45
+2026-08-21T21:55:49+08:00
+Merge remote-tracking branch 'origin/main' into pr-1053
 ```
 
 只有完整审阅旧基线到新基线的全部变化、记录设计判断、通过适配层验证并完成 review 后，才能推进这个标记。即使结论是“不改适配层”，也要推进基线，否则下次会重复审阅同一批提交。
@@ -30,6 +30,7 @@ fix(coding-agent): retain root kill cleanup ownership (#1240)
 | Continual Harness | `prime_refine` | 适配证据、scope、并发和回滚规则 |
 | Auto-refine 与 refine review | 当前未适配 | 必须先重新审阅上游真实契约，不能从本地路线名称反推实现 |
 | Goal、compaction、heartbeat、daemon 生命周期 | DSH Goal、Compaction、Jobs、Schedule、Session | 组合，不重复实现 |
+| Python/kernel-owned MCP programs | DSH Host MCP 工具注册表 + Code Mode bindings | 复用 Host 的连接、认证、工具代际和清理；不在 Realm 内创建第二套 MCP runtime |
 | TUI、ACP、provider、计费、安装器 | 不属于本插件 | 除非改变模型可见 RLM 契约，否则忽略 |
 
 兼容目标是用户体验与安全不变量，而不是 API 名称一致。
@@ -100,6 +101,13 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 | `7787f074` | local/global Continual Harness 与 refine/rollback | 适配 | `prime_refine` 降为次级，基于证据、乐观并发、有界且冲突安全 |
 | `7787f074` | Host 拥有 Agent 生命周期、消息、Goal 和取消 | 采用 | 插件组合 DSH 服务，不创建 Worker registry 或第二套 Agent Loop |
 | `7787f074` | 默认开启自动 refinement | 暂缓 | 在自动模型写入前先设计明确 proposal/review/outcome 机制 |
+| `aacf04b4` | 长任务使用非阻塞控制循环、独立 worker 并行、root 主动汇报进度 | 适配 | policy 要求用 continuable child 或 Job 保存 id/结果位置，禁止 sleep 轮询和长阻塞 await；仅直接面向用户的 root 获得里程碑进度规则 |
+| `aacf04b4` | child 可显式选择并校验 reasoning level | 暂缓 | DSH rc.8 的 Subagent 调用未公开 per-spawn reasoning 参数；等待 DSH 原生继承、模型校验、持久化与冷恢复契约，不包装第二套工具 |
+| `aacf04b4` | IPython 快照按变量限额，并在 compaction 时清理超大 live state | 适配 | TypeScript Realm 不做 heap snapshot 或 compaction GC；大材料走任务文件，projection 使用 12KB best-effort spill 阈值，Realm 只保留紧凑索引/摘要且不隐式删除用户 binding |
+| `aacf04b4` | 自动 compaction 后恢复未完成工作与 Goal continuation | 采用 | DSH Compaction/Agent Loop 已拥有继续与 overflow 重试；插件只组合，不注入第二条 continuation |
+| `aacf04b4` | daemon-owned family ledger 与 child delete/tombstone | 采用 | DSH Agent/Subagent/Session 继续拥有 family 权威状态；插件不创建 ledger，也不把 interrupt 冒充 delete |
+| `aacf04b4` | generic kernel-owned MCP 与 ACP MCP programs | 适配 | profile 可用 DSH Host MCP client 把工具注册进统一 catalog，Code Mode 自动生成 bindings；拒绝 Python/kernel 与 ACP 专用实现 |
+| `aacf04b4` | Kernel cold boot、owner-death 与 Windows 清理加固 | 适配 | Realm 复用 Worker generation fencing、父进程监控、quiescent dispose 与跨进程 lease；Jupyter、ZMQ、forkserver 和 named-pipe 细节不移植 |
 
 ## 每次都要复查的语义差距
 
@@ -107,5 +115,8 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 - Prime 的 Python heap 能保存活对象和函数；当前适配由认证 binding handshake 选择 Persistent TypeScript Realm，在同一 Worker generation 中保留 TypeScript live objects。IPython 只用于参考行为与失败语义，不是产品 backend。
 - 当前跨 Agent 上下文使用共享工作区 handoff file。写后不改是 policy 约定，不存在独立 Capsule store、`share`/`mount` 或文件访问授权。
 - `prime_refine` 目前需要显式调用，不会自动观察效果或生成 proposal。
+- Prime 可以为单个 child 选择 reasoning level；DSH rc.8 的 Subagent 调用当前没有对应的 per-spawn 参数。
+- Prime compaction 会清理无法纳入有界快照的超大 Python 变量；DSH compaction 不遍历、快照或清理 Realm heap。spill 只在 backend 可用时 best-effort 约束模型 projection 与日志，失败时保留 inline 结果，其 artifact 生命周期由 DSH store/部署层负责。
+- Prime 的 MCP program 运行在 Kernel/ACP runtime；DSH 的对应能力属于 Host 工具注册表，只有 profile 显式安装的 MCP client/tools 才会进入 Code Mode SDK。
 
 这些差距是有意保留的；只有明确产品需求且存在 DSH 原生所有权路径时才应关闭。
