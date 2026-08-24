@@ -1,5 +1,5 @@
-import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 import { load } from 'js-yaml'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
@@ -60,10 +60,10 @@ describe('Prime packaging boundary', () => {
 
   })
 
-  // Prime delegates report scheduling to the rc.8 base bundle. Pin the
+  // Prime delegates report scheduling to the 0.1.1-rc.2 base bundle. Pin the
   // composition boundary without duplicating the upstream tool implementation.
-  const BASE_PATCH = resolve(import.meta.dirname, '../../deepseek-harness/packages/bundle/base/cordis.patch.yml')
-  it.skipIf(!existsSync(BASE_PATCH))('uses exactly one official tool-subagent-report row', async () => {
+  const BASE_PATCH = createRequire(import.meta.url).resolve('@deepseek-ai/dsh-base/cordis.patch.yml')
+  it('uses exactly one official tool-subagent-report row', async () => {
     const patches = load(await readFile(BASE_PATCH, 'utf8'), { schema: entryListSchema }) as Row[]
     const reports = patches.flatMap(patch => patch.insert ?? [])
       .filter(row => row.id === 'tool-subagent-report')

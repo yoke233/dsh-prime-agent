@@ -8,7 +8,7 @@
 # these changes is to maintain the whole snapshot as the harness moves.
 #
 # Provenance of this snapshot:
-#   deepseek-harness    141eb6fef83422698aef7a981029e843e8161534 (dsh-v0.1.0-rc.8, 2026-08-19)
+#   deepseek-harness    b150a551b8d465e31e418e1b2eaf5e79bbb7d28e (dsh-v0.1.1-rc.2, 2026-08-21)
 #     source file last changed in b2178ade8028597e7565db77dfe3ef4ecd68b99d
 #   reviewed Prime Agent baseline
 #                       aacf04b4678fd02cf46b69ab0bdcbc5d29baab45

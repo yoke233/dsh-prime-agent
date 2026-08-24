@@ -240,7 +240,7 @@ Jobs 是独立的后台任务生命周期。后台 shell 或 one-shot background
 
 ## 开发
 
-开发测试把公开 DSH 包名解析到同级 `../deepseek-harness` 源码;发布包只导入公开包名。DSH peer range 限制在兼容的 `0.1.x` 系列并标记为 optional,避免在已提供这些包的宿主中安装第二套 package graph。
+开发、类型检查和测试统一解析 `package-lock.json` 锁定的 npm 发布包；同级 `../deepseek-harness` checkout 仅用于审阅上游 diff 与 preset 快照，不参与模块解析。DSH peer range 限制在兼容的 `0.1.x` 系列并标记为 optional,避免在已提供这些包的宿主中安装第二套 package graph。
 
 ```sh
 npm run typecheck

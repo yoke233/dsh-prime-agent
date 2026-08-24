@@ -16,6 +16,7 @@ import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as primeRuntime from '../src/runtime.js'
 
 const PROJECT_ROOT = resolve(import.meta.dirname, '..')
+const PRIME_AGENT_URL = pathToFileURL(resolve(PROJECT_ROOT, 'lib/index.js')).href
 const PACKAGED_COMPOSITION = join(PROJECT_ROOT, 'agent-presets/prime/agent.cordis.yml')
 const testSignal = new AbortController().signal
 
@@ -87,8 +88,9 @@ describe('Prime packaged preset realm rows', () => {
     // Keep the exact shipped realm and presentation rows while excluding the
     // unrelated filesystem, terminal, delegation, and UI tool rows. Their
     // composition is covered statically; this E2E targets the preset mount seam.
-    const shipped = await readFile(PACKAGED_COMPOSITION, 'utf8')
+    const shipped = (await readFile(PACKAGED_COMPOSITION, 'utf8')).replace(/\r\n/g, '\n')
     const realmRows = shipped.slice(shipped.indexOf('- id: prime-agent\n'))
+      .replace('name: dsh-prime-agent', `name: ${PRIME_AGENT_URL}`)
     if (!realmRows.includes('- id: tool-presentation\n')) {
       throw new Error('packaged Prime realm rows are missing')
     }

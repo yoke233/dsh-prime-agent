@@ -102,7 +102,7 @@ After a synchronization pass:
 | `7787f074` | Host owns agent lifecycle, messages, goals, and cancellation | Adopt | The plugin composes DSH services and creates no worker registry or second Agent Loop |
 | `7787f074` | Automatic refinement enabled by default | Defer | Requires explicit proposal/review/outcome design before model-authored automation |
 | `aacf04b4` | Nonblocking long-work loops, parallel independent workers, and proactive root progress | Adapt | Policy uses continuable children or Jobs, retains ids/output locations, forbids sleep polling and long blocking awaits, and gives milestone-progress guidance only to user-facing roots |
-| `aacf04b4` | Explicit per-child reasoning-level selection and validation | Defer | DSH rc.8 exposes no per-spawn reasoning parameter; wait for DSH-native inheritance, model validation, persistence, and cold-resume semantics instead of wrapping a second tool |
+| `aacf04b4` | Explicit per-child reasoning-level selection and validation | Defer | DSH 0.1.1-rc.2 exposes no per-spawn reasoning parameter; wait for DSH-native inheritance, model validation, persistence, and cold-resume semantics instead of wrapping a second tool |
 | `aacf04b4` | Per-variable IPython snapshot limits and compaction-time oversized-state pruning | Adapt | The TypeScript Realm has no heap snapshots or compaction GC; large material uses task files, projections use a 12KB best-effort spill threshold, compact indices/summaries remain live, and user bindings are never deleted implicitly |
 | `aacf04b4` | Resume unfinished work and Goal continuation after automatic compaction | Adopt | DSH Compaction and the Agent Loop already own continuation and overflow retry; the plugin composes them and injects no second continuation |
 | `aacf04b4` | Daemon-owned family ledger and child deletion/tombstones | Adopt | DSH Agent/Subagent/Session remain family authority; the plugin creates no ledger and never presents interrupt as delete |
@@ -111,11 +111,11 @@ After a synchronization pass:
 
 ## Semantic gaps to re-check each time
 
-- Prime child answers can inform the parent's active computation. DSH rc.8 now owns this invariant: the official `tool-subagent-report` defaults to `next-step`, and the continuation manager calls `parent.steer()` so a running parent consumes the report at its nearest step while an idle parent wakes. The manager also owns waking accounting and report-before-settlement FIFO. This plugin composes that capability directly and no longer replaces the report row or maintains a private adapter.
+- Prime child answers can inform the parent's active computation. DSH 0.1.1-rc.2 now owns this invariant: the official `tool-subagent-report` defaults to `next-step`, and the continuation manager calls `parent.steer()` so a running parent consumes the report at its nearest step while an idle parent wakes. The manager also owns waking accounting and report-before-settlement FIFO. This plugin composes that capability directly and no longer replaces the report row or maintains a private adapter.
 - Prime's Python heap preserves live objects and functions; the current adapter selects a Persistent TypeScript Realm through an authenticated binding handshake and retains TypeScript live objects inside one Worker generation. IPython remains reference material for behavior and failure semantics, not a product backend.
 - Cross-agent context currently uses workspace handoff files. Write-once behavior is a policy convention; there is no separate Capsule store, `share`/`mount`, or file-access grant.
 - `prime_refine` is explicit; it does not yet observe outcomes or propose refinements automatically.
-- Prime can select a reasoning level for one child; DSH rc.8 currently has no corresponding per-spawn Subagent parameter.
+- Prime can select a reasoning level for one child; DSH 0.1.1-rc.2 currently has no corresponding per-spawn Subagent parameter.
 - Prime compaction removes oversized Python variables that cannot enter a bounded snapshot; DSH compaction does not traverse, snapshot, or prune Realm heap. Spilling bounds model projections and logs only on the best-effort path, preserves inline results on failure, and leaves artifact lifecycle to the DSH store/deployment layer.
 - Prime MCP programs run in Kernel/ACP runtimes; the DSH counterpart belongs to the Host tool registry, so only MCP clients/tools explicitly installed by the profile enter the Code Mode SDK.
 

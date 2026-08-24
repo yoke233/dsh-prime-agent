@@ -102,7 +102,7 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 | `7787f074` | Host 拥有 Agent 生命周期、消息、Goal 和取消 | 采用 | 插件组合 DSH 服务，不创建 Worker registry 或第二套 Agent Loop |
 | `7787f074` | 默认开启自动 refinement | 暂缓 | 在自动模型写入前先设计明确 proposal/review/outcome 机制 |
 | `aacf04b4` | 长任务使用非阻塞控制循环、独立 worker 并行、root 主动汇报进度 | 适配 | policy 要求用 continuable child 或 Job 保存 id/结果位置，禁止 sleep 轮询和长阻塞 await；仅直接面向用户的 root 获得里程碑进度规则 |
-| `aacf04b4` | child 可显式选择并校验 reasoning level | 暂缓 | DSH rc.8 的 Subagent 调用未公开 per-spawn reasoning 参数；等待 DSH 原生继承、模型校验、持久化与冷恢复契约，不包装第二套工具 |
+| `aacf04b4` | child 可显式选择并校验 reasoning level | 暂缓 | DSH 0.1.1-rc.2 的 Subagent 调用未公开 per-spawn reasoning 参数；等待 DSH 原生继承、模型校验、持久化与冷恢复契约，不包装第二套工具 |
 | `aacf04b4` | IPython 快照按变量限额，并在 compaction 时清理超大 live state | 适配 | TypeScript Realm 不做 heap snapshot 或 compaction GC；大材料走任务文件，projection 使用 12KB best-effort spill 阈值，Realm 只保留紧凑索引/摘要且不隐式删除用户 binding |
 | `aacf04b4` | 自动 compaction 后恢复未完成工作与 Goal continuation | 采用 | DSH Compaction/Agent Loop 已拥有继续与 overflow 重试；插件只组合，不注入第二条 continuation |
 | `aacf04b4` | daemon-owned family ledger 与 child delete/tombstone | 采用 | DSH Agent/Subagent/Session 继续拥有 family 权威状态；插件不创建 ledger，也不把 interrupt 冒充 delete |
@@ -111,11 +111,11 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 
 ## 每次都要复查的语义差距
 
-- Prime 的 child answer 可以进入 parent 仍在进行的计算。DSH rc.8 已原生实现该不变量：官方 `tool-subagent-report` 默认使用 `next-step`，由 continuation manager 调用 `parent.steer()`，让运行中的 parent 在最近 step 消费并唤醒空闲 parent，同时维护唤醒记账以及 report-before-settlement FIFO。本插件直接组合该能力，不再替换 report row 或维护私有 adapter。
+- Prime 的 child answer 可以进入 parent 仍在进行的计算。DSH 0.1.1-rc.2 已原生实现该不变量：官方 `tool-subagent-report` 默认使用 `next-step`，由 continuation manager 调用 `parent.steer()`，让运行中的 parent 在最近 step 消费并唤醒空闲 parent，同时维护唤醒记账以及 report-before-settlement FIFO。本插件直接组合该能力，不再替换 report row 或维护私有 adapter。
 - Prime 的 Python heap 能保存活对象和函数；当前适配由认证 binding handshake 选择 Persistent TypeScript Realm，在同一 Worker generation 中保留 TypeScript live objects。IPython 只用于参考行为与失败语义，不是产品 backend。
 - 当前跨 Agent 上下文使用共享工作区 handoff file。写后不改是 policy 约定，不存在独立 Capsule store、`share`/`mount` 或文件访问授权。
 - `prime_refine` 目前需要显式调用，不会自动观察效果或生成 proposal。
-- Prime 可以为单个 child 选择 reasoning level；DSH rc.8 的 Subagent 调用当前没有对应的 per-spawn 参数。
+- Prime 可以为单个 child 选择 reasoning level；DSH 0.1.1-rc.2 的 Subagent 调用当前没有对应的 per-spawn 参数。
 - Prime compaction 会清理无法纳入有界快照的超大 Python 变量；DSH compaction 不遍历、快照或清理 Realm heap。spill 只在 backend 可用时 best-effort 约束模型 projection 与日志，失败时保留 inline 结果，其 artifact 生命周期由 DSH store/部署层负责。
 - Prime 的 MCP program 运行在 Kernel/ACP runtime；DSH 的对应能力属于 Host 工具注册表，只有 profile 显式安装的 MCP client/tools 才会进入 Code Mode SDK。
 

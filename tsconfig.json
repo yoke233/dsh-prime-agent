@@ -18,16 +18,7 @@
     "noUnusedParameters": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "types": ["node"],
-    "baseUrl": ".",
-    "paths": {
-      "@deepseek-ai/cordis": ["node_modules/@deepseek-ai/cordis/lib/types/index.d.ts"],
-      "@deepseek-ai/dsh-agent": ["../deepseek-harness/packages/core/agent/lib/types/index.d.ts"],
-      "@deepseek-ai/dsh-atomic-write": ["../deepseek-harness/packages/util/atomic-write/lib/types/index.d.ts"],
-      "@deepseek-ai/dsh-session": ["../deepseek-harness/packages/core/session/lib/types/index.d.ts"],
-      "@deepseek-ai/dsh-system-prompt": ["../deepseek-harness/packages/core/system-prompt/lib/types/index.d.ts"],
-      "@deepseek-ai/dsh-tools": ["../deepseek-harness/packages/core/tools/lib/types/index.d.ts"]
-    }
+    "types": ["node"]
   },
   "include": ["src"]
 }

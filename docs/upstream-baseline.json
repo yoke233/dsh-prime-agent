@@ -8,8 +8,8 @@
   "adapterVersion": "0.2.0",
   "harness": {
     "localCheckout": "../deepseek-harness",
-    "baselineCommit": "141eb6fef83422698aef7a981029e843e8161534",
-    "baselineCommittedAt": "2026-08-19T23:11:50+08:00",
+    "baselineCommit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e",
+    "baselineCommittedAt": "2026-08-21T20:03:37+08:00",
     "presetSnapshot": "agent-presets/prime/agent.cordis.yml copies apps/cli/config/agent-presets/code/agent.cordis.yml at this commit, except for its documented Prime persona, plugin row, and bounded projection row; diff on every sync pass"
   }
 }

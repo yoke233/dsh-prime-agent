@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { boot, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
@@ -13,6 +14,8 @@ import LocalSpillStore from '@deepseek-ai/dsh-spill-local'
 import * as SpillPolicy from '@deepseek-ai/dsh-spill-policy'
 
 const PATCH_PATH = resolve(import.meta.dirname, '../cordis.patch.yml')
+const PRIME_AGENT_URL = pathToFileURL(resolve(import.meta.dirname, '../lib/index.js')).href
+const PRIME_RUNTIME_URL = pathToFileURL(resolve(import.meta.dirname, '../lib/runtime.js')).href
 const PACKAGED_PRESET = resolve(import.meta.dirname, '../agent-presets/prime')
 const testSignal = new AbortController().signal
 
@@ -76,6 +79,9 @@ describe('Prime host patch composition', () => {
     const spillRoot = join(root, 'spill')
     vi.stubEnv('DSH_HOME', home)
     const configPath = join(root, 'cordis.yml')
+    const patchPath = join(root, 'cordis.patch.yml')
+    await writeFile(patchPath, (await readFile(PATCH_PATH, 'utf8'))
+      .replace('name: dsh-prime-agent/runtime', `name: ${PRIME_RUNTIME_URL}`))
     await writeFile(configPath, `
 - id: system-prompt
   name: '@deepseek-ai/dsh-system-prompt'
@@ -90,7 +96,7 @@ describe('Prime host patch composition', () => {
 - id: subagents
   name: '@deepseek-ai/dsh-subagent'
 - id: prime-agent
-  name: dsh-prime-agent
+  name: ${PRIME_AGENT_URL}
   config:
     stateDirectory: !!js dshHomePath('prime-agent')
     requireOrchestrationTools: false
@@ -99,19 +105,15 @@ describe('Prime host patch composition', () => {
     ctx = await boot(
       'prime-compose-e2e',
       configPath,
-      loadOverlayPatches('prime-compose-e2e', PATCH_PATH),
+      loadOverlayPatches('prime-compose-e2e', patchPath),
       undefined,
       import.meta.url,
     )
 
-    // The spill chain mounts post-boot from the pinned harness SOURCE tree
-    // rather than as loader rows: loader entries resolve through node_modules,
-    // and the registry's @deepseek-ai/dsh-spill-policy (0.0.1-rc.1 at the time
-    // of writing) lags the pinned checkout every other test in this suite
-    // verifies against, so a loader row would compose a different policy than
-    // the one the plan's focused E2E pins. The composition property under test
-    // — owner, backend, and projection wired against the loader-booted profile
-    // — is unchanged.
+    // Mount the npm-installed spill chain post-boot so this focused fixture can
+    // supply its temporary backend root directly. All DSH modules in this test
+    // resolve from package-lock.json; only this package's just-built entrypoints
+    // use file URLs because it is the package under test, not an installed peer.
     await ctx.plugin(LocalSpillStore, { root: spillRoot })
     await ctx.plugin(SpillPolicy, { maxInlineBytes: 1024 })
 
@@ -138,7 +140,7 @@ describe('Prime host patch composition', () => {
     })
     expect(rows).toContainEqual({
       id: 'prime-code-runtime',
-      name: 'dsh-prime-agent/runtime',
+      name: PRIME_RUNTIME_URL,
       disabled: false,
       mounted: true,
     })
