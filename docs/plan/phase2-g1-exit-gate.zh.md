@@ -97,6 +97,10 @@ node bench/g1-exit-gate.mjs --sweep --sizes 128,256 `
 
 原始数据：`bench/results/g1-verify-postfix-heap512.json`（修复后主表）、`bench/results/g1-postfix-nocontrol-heap512.json`（隔离对照）、`bench/results/g1-exit-gate-heap512.json` 与 `g1-exit-gate-heap2048.json`（修复前）。
 
+另有 `bench/results/g1-exit-gate.json`：我的中间产物，**不是当前主表**，但 `realm-worker.ts` 里解释「为什么把数组检查挪到走查之后」的注释引用它作为 5.3 s / 1.2 GiB 的出处——一条解释修复动机的注释本就该引用**修复前**数据，对该用途不算过时。**请勿删除。**
+
+**读 JSON 时注意 `ok` 字段的口径**：`ok: true` 只表示 bench 子进程正常退出，**不表示 realm run 成功**。realm 层面的失败体现在 `resultKind`（如 `error:worker-exit`）。`wide-object@128MiB` 就是 `ok: true` 配 `resultKind: "error:worker-exit"` 的组合。判读时以 `resultKind` 为准。
+
 ## 3. 修复前：曾经存在的缺陷及其量级
 
 保留此节，因为它是缺陷曾存在及其代价的证据，也是修复方案的推导依据。
@@ -145,7 +149,9 @@ if (!stats.aborted && capturedReflectOwnKeys(items).length !== items.length + 1)
 - **撞天花板早退的值跳过检查**——与走查对其他所有校验早已采取的做法一致。`snapshotValue` 开头 `if (stats.aborted) return undefined` 意味着天花板外的内容根本不被读取，实现注释亦已明确承认（`realm-worker.ts:1449-1455`：「validity is now judged over the part that was WALKED…a bigint hiding there is never found and the run succeeds with a projection rather than failing」）。既然越界的 bigint 已不触发 `invalid-output`，越界数组的额外属性同样不必触发。
 - 空洞检测未受影响：循环内 `capturedObjectHasOwn(items, index)`（`realm-worker.ts:909`）仍逐元素进行，并随早退一起停止。
 
-代价是一个**超出天花板且带额外属性的稀疏数组**会从 `invalid-output` 变成 `retained: false` 的投影。这与既有 bigint 行为一致，但应在契约测试中显式钉住（建议转 phase0-contracts）。
+代价是一个**超出天花板且带额外属性的稀疏数组**会从 `invalid-output` 变成 `retained: false` 的投影。这与既有 bigint 行为一致。
+
+该行为变更**已有用例钉住**（phase1-impl 确认，无需另行派发）：`tests/completion-projection.spec.ts:705` `'stops checking array shape past the ceiling, like every other kind of validity'` 钉早退侧；同文件 ~697 的 refused 列表保留了走查**跑完**时仍须 `invalid-output` 的数组用例（密度与额外属性两条）钉另一侧；与 `:727` 尾部藏 bigint 的用例同属 §8 已承认的同一笔交易。
 
 ### 4.2 修复后主表（出厂 512 MiB 老生代）
 
@@ -270,6 +276,8 @@ G1 豁免的是这笔枚举的 **CPU**，Phase 0 也证明字典模式大对象�
 
 即：一个模型完全可能自然产生的大字典对象（例如按 id 聚合的映射），会让 Prime Realm 的 worker 直接死掉并丢失整个 namespace，而不是得到一个 `retained: false` 的投影。这在模型可见行为上比慢更严重。
 
+**归属：既有底线，不是 Phase 2 回归。** phase1-impl 回读修复前数据确认，`wide-object@128MiB` 在修复前就已经是 `error:worker-exit`。256 MiB 的 OOM 只是把同一条底线的严重性再推高一档。
+
 建议：在进入根对象枚举**之前**先用一个不需要枚举的信号做预检（如对象是否处于字典模式、或先前 cell 已知的规模），或在 host 侧对 worker-exit 场景补一条明确的「completion 过大导致 namespace 重启」诊断，而不是让它表现为通用 hard-kill。这属于 §8 失败语义的补充，建议单独立项。
 
 ### 5.2 R2：大字符串完成值不应内联穿过 Inspector
@@ -280,11 +288,21 @@ G1 豁免的是这笔枚举的 **CPU**，Phase 0 也证明字典模式大对象�
 
 捕获遍历对字符串本身是 O(1) 的（`chargeCapture(stats, 2 + length)` 后立即 abort，`projectString` 只切 256 字符）——`wrapped-string` 的 0.6 ms 就是它的真实成本。
 
-可选方向（按侵入性排序）：
+**本表数字已是「修好一半」之后的。** phase1-impl 在 004b28d 中给 `prepareRemoteBoundary` 加了原始值短路：
 
-1. 在边界求值时把完成值包一层，拿到 `objectId` 后在 main world 内解包——有实测支撑（`wrapped-string` 全程 0.6 ms / 0 MiB），但改动落在边界传值机制上；
+```ts
+if (value.objectId === undefined && capturedObjectHasOwn(value, 'value')) {
+  return prepareBoundary(kind, value.value, remaining, maxOutputBytes)
+}
+```
+
+在此之前，同一串要被编解码**两遍**——CDP 内联回来一次，边界再当远端对象送一次 `callFunctionOn`，`long-string@128MiB` 因此是 4585 ms / 2525 MiB。短路砍掉了第二遍。本节表中的 768 ms / 845 MiB 是**协议层第一趟**的成本，发生在 worker 模块拿到值之前，projector 侧任何早退都够不着。
+
+因此剩余可选方向（按侵入性排序）：
+
+1. 在边界求值时把完成值包一层，拿到 `objectId` 后在 main world 内解包——有实测支撑（`wrapped-string` 全程 0.6 ms / 0 MiB）。这是针对**剩下那第一趟**的方向，也是当前唯一还有收益的一条；
 2. 取回前先看 `RemoteObject` 元信息，对超长字符串只取前缀（需确认 CDP 是否有不拉全量的取法）；
-3. 兜底：host 侧对字符串完成值做长度预检并直接走最小引用 envelope。
+3. ~~host 侧对字符串完成值做长度预检并直接走最小引用 envelope~~——**已否决**（phase1-impl，采纳）：那会让「4 KiB 以内的中等字符串原样返回」这条模型可见契约受一个纯性能旋钮影响，正是 §4.4 把早退线改成 `max(entryBytes, fullBytes)` 时刚拒绝过的耦合。
 
 同样属于既有机制，建议单独立项，不阻塞 Phase 2 收尾。
 
