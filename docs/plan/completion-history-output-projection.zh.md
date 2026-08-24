@@ -97,14 +97,22 @@ last 手柄选 `$_` 而不是 `_`：JS 语料中 `_` 的最强先验是 lodash�
   "type": "object",
   "serializedBytesAtCapture": 75231,
   "projection": {
-    "keys": ["matches"],
-    "sample": {"matches": {"type": "array", "length": 384}}
+    "type": "object",
+    "keyCount": 2,
+    "keys": [
+      {"key": "matches", "value": {"type": "array", "length": 384}},
+      {"key": "kkk…", "keyLength": 20000}
+    ]
   },
   "truncated": true
 }
 ```
 
+`keys` 用条目数组而不是按 key 名索引的对象：两个截断后前缀相同的超长 key 会撞成同一个 JSON key 并被 `JSON.stringify` 静默丢弃（用户可构造的确定性丢数据）；`keyLength` 就地标注原长，未访问的兄弟条目只有 `key` 没有 `value`（A5 的诚实形态）。
+
 这不是让模型遵循的输出格式，而是 runtime 的工具结果协议。`use` 字段是可直接照抄的取值表达式：契约在需要它的那一刻随结果就地出现，不依赖 schema 预先教学——模型对"复制输出中的表达式"有强训练先验。
+
+`retained: false` 时省略 `$out`/`use`（死 handle 比没有更糟——模型照抄 `use` 会立刻吃 `CompletionExpiredError`）。`serializedBytesAtCapture` 的口径是**测到就报、没测到就省**，不是按 retained 判断：经总预算（estimatedBytes）拒绝保留的值走查已完成、字节数是真实测量值，照报并配 `reason: "too large to retain"`；撞早退线的值未测量，省略该字段并配 `reason: "too large to capture"`——不报没测过的数，也不报会误导的下界。「已测量但拒绝保留」只能经总预算路径到达（单槽天花板与早退线的取值关系使其余组合自相矛盾）。minimal envelope 因此有带 handle（约 50 B）与不带 handle（约 32 B）两种形态，128 B 常量覆盖两者，与 notice reserve 同处测试钉住。`maxCompletionProjectionBytes` 只约束 rich envelope；minimal 档由 wire 预算兜底（否则最后一档不可达）。已知行为（Phase 2 评审 B 项）：降级是整档的——rich 超预算直接落 minimal，中等复杂形状（如 16³ 叶子的嵌套对象）会拿到零结构信息的 45 字节引用；潜在改进（rich 超预算先降 depth=1 重试再落 minimal）留 Phase 3+ 以 `completionsMinimal` 实测使用率决定，不预做。
 
 ### 4.4 有界确定性 projector
 
@@ -118,7 +126,9 @@ projector 不调用 LLM，不做语义总结。建议规则：
 - 最大深度、最大节点数、单字符串字符数、数组样本数、对象 key 数和最终 UTF-8 字节数全部硬限制；
 - key 顺序保持 canonical value 原顺序；
 - Phase 0 定案的初始限制：最大深度 4、数组样本 8、对象 key 样本 16、单字符串 256 字符、projection 节点 512、单次投影 4096 字节；
-- projector 与大 completion 的准入必须是带早退的有界遍历，成本 O(预算) 而非 O(值)，不得构造完整 snapshot——这是 Phase 2 的 G1 出口门槛（实测有界遍历 0.001–0.003 ms，全量路径 64 MiB 需 2.1–4.7 s）；
+- projector 与大 completion 的准入必须是带早退的有界遍历，不得构造完整 snapshot；早退线取 **`max(maxCompletionHistoryEntryBytes, maxCompletionFullBytes)`** 与 `maxCompletionHistoryNodes`（Phase 2 实现修正：A3 原论证只在准入天花板 ≥ 投影触发线时成立——若部署把保留预算调小，天花板早退会把本应原样返回的中等结果静默变成引用，即被无关旋钮改掉模型可见契约；越过 `max` 线的值才是「既不能保留也不能整发」）：天花板内走完 ⇒ 拿到精确 bytes/nodes 入槽记账，投影从已有快照生成、零额外成本；撞到天花板 ⇒ 该值本就永远不可能入槽（`retained: false`），立即早退，投影用已采集的有界材料生成——「精确记账」只对会被保留的值保留，走查成本上界为与值大小无关的准入天花板常数（8 MiB 快照实测 72–155 ms）；
+- G1 出口判据据此改述为：除「根对象 own keys 恰好枚举一次、绝不二次枚举」外，捕获与投影成本 O(准入天花板)；wide-object 的单次枚举地板（233 万 key 实测 857–1952 ms，V8 枚举缓存整体物化、break 不省钱）是已测量的已知底线，不是未达标项；
+- 深度优先内联采集撞到天花板时，根对象未访问兄弟的 key 只给名字、不给样本（不为补样本触发额外 getter 副作用），envelope 标 `truncated: true`；中止检查必须位于 key 名记账之后、属性读取之前——否则恰好在 key 名那一笔越线时会多读一个属性（触发本已决定不碰的 getter，且该 getter 抛出会把本该成功的投影变成 invalid-output）；修正时 `visited` 取当前 index 而非 index+1，防止「只命名不读取」补全循环漏掉该 key（Phase 2 评审 A 项）；
 - 准入判定必须在遍历过程中进行，不能遍历完再算：`snapshotValue` 的 `seen` 是路径集合（退出时 delete，realm-worker.ts:674），只拒环不识共享，共享子图在边界指数展开（实测 1644 节点的 DAG 展开成 6718 万节点 / 67 MiB JSON）——遍历后判定意味着放大已全部发生；
 - key 枚举只做一次：字典模式大对象上不存在廉价的「取前 N 个 key」（64 MiB wide-object 上 `Object.keys().slice` 857 ms、`Reflect.ownKeys` 1952 ms），key 总数与样本必须在捕获遍历中一次取得，projector 不得重新枚举；
 - projector 必须能在剩余输出预算内降级为最小引用 envelope；
@@ -139,6 +149,7 @@ History 保存原 completion 的 Realm 内引用，语义接近 IPython `Out`。
 - `maxCompletionHistoryNodes` = 1,000,000（node 预算才是真正的 heap 约束项：16 MiB 合法 JSON 最坏对应 341 MiB 活对象图，21.3×；identity 最坏 64 B/node）；
 - `maxCompletionHistoryEntryBytes` = 8 MiB（总预算 1/4 的单槽上限，防单个大结果清空全部历史；上游 IPython 比例为 1/16，此处已更宽松）；
 - `maxCompletionProjectionBytes` = 4096（实测 rich envelope 265–985 B、minimal reference envelope 86–119 B；最小 envelope 字节常量定为 128 B）；
+- `maxCompletionFullBytes` = 65,536（64 KiB）：全量返回的触发线——完整序列化不超过它且装得进剩余预算时原样返回，超过则投影。取值对齐上游 IPython 单流 65,536 字符截断的训练先验；不与 4096 合并成一个旋钮，是为了不把 4–64 KiB 的中等结果也推去投影——那会抬高重复工具调用率，违反验收 #16；
 - 可选 `maxLogProjectionBytes`：Phase 3 再定。
 
 首版采用 FIFO/旧 completion 优先淘汰，而不是 access-based LRU：顺序确定、测试简单，也更接近 notebook output cache 的历史语义。访问旧结果不应无限延长其生命周期。重复引用同一对象（含 `$out(id)` 直接作为末尾表达式的回流形态）定案为 **identity-reuse**：命中身份则不开新槽、不分配新 id、不重复计费，直接返回已有 id 并保持其原 FIFO 位置。Phase 0 基准显示按槽独立计费在三种回流 trace 中的两种刷穿 history，且失效形态最坏——对象仍在 store 里只是换了 id，模型手上的句柄却 expired；identity-dedup（去重计费但仍开新槽）也救不了 entries 预算被回流吃掉的场景。store 仅 16 槽，身份命中用线性扫描即可，不为此引入 WeakMap 反查。filter-chain trace 证明该语义不影响正常派生用法。身份扫描仅对 object 值进行：`Object.is` 对原始量是值比较，对同前缀长字符串是 memcmp（16 个 8 MiB 同前缀字符串最坏每次捕获扫 128 MiB，破坏有界成本）；原始量因此每次开新槽，由 entries/bytes 预算自然约束。
@@ -168,7 +179,7 @@ History 保存原 completion 的 Realm 内引用，语义接近 IPython `Out`。
 2. **completion history 预算**：限制 runtime-owned 强引用；
 3. **模型投影预算**：限制每次进入对话的 logs + completion projection。
 
-`maxOutputBytes` 继续作为 host 边界最终硬上限，保证协议消息始终有界；但合法的大 completion 不再因为完整值无法穿过该边界而失败。现有 host `OutputLedger` 已按实际 wire JSON 字节计账，因此 Phase 2 不改变 ledger 的基本语义：Worker 发出 envelope 后，host 自然按投影字节结算。必须定义最小引用 envelope 的字节上界和 `full → rich projection → minimal reference → output-limit` 降级链；只有 minimal reference 也无法装入剩余预算时才返回 `output-limit`。最小 envelope 常量必须以最坏合法配置为准：realm 可被配置到 `MIN_OUTPUT_BYTES = 256`，扣除 ledger 基础开销后 completion 仅约 254 字节可用，§4.3 示例 envelope（约 200 字节）接近吃满——minimal reference envelope 必须显著更小（目标数十字节量级，如 `{"$out":17,"use":"$out(17)","truncated":true}`）。另外当前 completion 越界走 `ledger.failure`（保留全部已接纳日志），只有 `limit()` 才做日志前缀截断；Phase 2 把大 completion 改为成功 projection 后必须重对这条路径的日志账，否则验收 #12 会在边界失守。
+`maxOutputBytes` 继续作为 host 边界最终硬上限，保证协议消息始终有界；但合法的大 completion 不再因为完整值无法穿过该边界而失败。现有 host `OutputLedger` 已按实际 wire JSON 字节计账，因此 Phase 2 不改变 ledger 的基本语义：Worker 发出 envelope 后，host 自然按投影字节结算。必须定义最小引用 envelope 的字节上界和 `full → rich projection → minimal reference → output-limit` 降级链；只有 minimal reference 也无法装入剩余预算时才返回 `output-limit`。最小 envelope 常量必须以最坏合法配置为准：realm 可被配置到 `MIN_OUTPUT_BYTES = 256`，扣除 ledger 基础开销后 completion 仅约 254 字节可用，§4.3 示例 envelope（约 200 字节）接近吃满——minimal reference envelope 必须显著更小（目标数十字节量级，如 `{"$out":17,"use":"$out(17)","truncated":true}`）。另外当前 completion 越界走 `ledger.failure`（保留全部已接纳日志），只有 `limit()` 才做日志前缀截断；Phase 2 把大 completion 改为成功 projection 后必须重对这条路径的日志账，否则验收 #12 会在边界失守。定案：投影触发线为 `maxCompletionFullBytes`（完整序列化超过它即投影，即使剩余预算装得下全量）；日志吃掉预算、连 minimal envelope 都装不下时走 `ledger.limit()`——唯一保证 wire 字节不超 cap 的路径，日志按其既定语义截为整条前缀。
 
 ### 6.2 日志处理分阶段
 
@@ -185,7 +196,7 @@ History 保存原 completion 的 Realm 内引用，语义接近 IPython `Out`。
 ### 7.1 `src/realm/realm-worker.ts`
 
 - 在 Worker module scope 建立 generation-local completion store；不把 history 放在 host、`stateDirectory` 或 DSH Session，也不缓存 cell code；
-- host 按 run 下发候选 id（全局单调、绝不复用；identity-reuse 不消费该 id）；generation nonce 推迟到 Phase 2 随投影引入；Worker 在首个模型 cell 前以不可枚举、configurable 的 accessor 形式安装 `$out` 与 `$_`（函数对象冻结，property 保持 configurable 以免顶层 `const` 声明触发 SyntaxError；setter 语义为降级成普通 data property，不抛）；它们不通过每轮 namespace lease，但所有 getter/method **与 setter** 必须检查 `leasedRunId()`（detached continuation 中赋值同样拒绝——setter 无门控会让遗留 continuation 跨 run 篡改 intrinsic 造成静默拒绝服务）；delete 无法在 configurable 属性上拦截，处置为每个 run 开始时若全局槽位缺席则重装 intrinsic（已被用户 run 内赋值降级的 data property 不复活，尊重停用语义）；
+- host 按 run 下发候选 id（全局单调、绝不复用；identity-reuse 不消费该 id）；generation nonce 推迟到 Phase 2 随投影引入——由 host 生成、随每个 run 消息下发（与候选 completion id 同路，不新增 boot 握手），worker 在 envelope 回填、host 校验相等，用户伪造 envelope 因拿不到当次 nonce 而可判别；Worker 在首个模型 cell 前以不可枚举、configurable 的 accessor 形式安装 `$out` 与 `$_`（函数对象冻结，property 保持 configurable 以免顶层 `const` 声明触发 SyntaxError；setter 语义为降级成普通 data property，不抛）；它们不通过每轮 namespace lease，但所有 getter/method **与 setter** 必须检查 `leasedRunId()`（detached continuation 中赋值同样拒绝——setter 无门控会让遗留 continuation 跨 run 篡改 intrinsic 造成静默拒绝服务）；delete 无法在 configurable 属性上拦截，处置为每个 run 开始时若全局槽位缺席则重装 intrinsic（已被用户 run 内赋值降级的 data property 不复活，尊重停用语义）；
 - `Runtime.evaluate` 后、`Runtime.releaseObjectGroup` 前，在现有 completion boundary 的 main-world 路径中：
   1. 执行现有 boundary validation；
   2. 对合法 completion 取得精确 JSON 字节数并统计对象图 node 数——必须复用 `snapshotValue` 的同一次遍历：二次遍历会重复触发用户 getter 副作用，且第二次抛出会把已成功的 run 变成失败；
@@ -205,6 +216,8 @@ History 保存原 completion 的 Realm 内引用，语义接近 IPython `Out`。
 - 区分：完整 completion、projected completion、invalid output、真正 output-limit；
 - 保持 `OutputLedger` 按实际 wire JSON 字节计账的现有语义，并增加 projected 指标识别；
 - 预算校验存在两处：worker `prepareCompletion` 比较 `remaining`，host `OutputLedger.completion` 用 `Buffer.byteLength` 重算；Phase 2 必须同步改两处，否则 host 会拒掉 worker 认为合法的 projected envelope；
+- `projected` 标志与 nonce 合并为 done fragment 上的单一字段 `projected?: string`：存在性 = 是投影，值 = 本次 run 的控制通道 nonce（host 校验相等，不合法按协议违规 hard-kill）——run 消息本就携带 nonce，独立字段是同一值出现两次；
+- 走查的字节估算对数字只 charge 1 字节（最坏低估约 20 倍），刻意保留：G1 关心的「上界为常数」两种写法都成立，且 node 天花板兜底（1M node × 最长合法 JSON 数字 ≈ 20 MB JSON 上界）；收紧要为每个数字付一次长度计算；
 - 无值 run 的 `CodeRunResult` 不含 `value` 键（与 `value: undefined` 不同）；任何重建 result 的代码不得用展开加覆盖的方式意外引入该键；
 - 固化 full/rich/minimal 降级链和最小 envelope 字节常量；最小引用 envelope 无法放入剩余预算时，仍返回明确 `output-limit`，不得发送不完整 JSON。
 
@@ -228,7 +241,7 @@ History 保存原 completion 的 Realm 内引用，语义接近 IPython `Out`。
 | 小合法 completion | 原样返回，并进入 `$out`。 |
 | 大合法 completion | cell 成功；返回有界 projection；原值按 history 预算保留。 |
 | completion 超过单槽准入预算 | 返回有界 projection，`retained: false`；不误称可恢复。 |
-| 非 lossless JSON completion | 保持当前 `invalid-output`，明确含成员值为 `undefined` 的对象/数组，以及 `Date` 等一切非 plain prototype（`toJSON` 从不被咨询）；用户显式 binding 若已建立仍遵循 partial commit。是否在后续阶段放宽 `undefined` 成员值须单独决策，不得在实现时顺手改。 |
+| 非 lossless JSON completion | 保持当前 `invalid-output`，明确含成员值为 `undefined` 的对象/数组，以及 `Date` 等一切非 plain prototype（`toJSON` 从不被咨询）；用户显式 binding 若已建立仍遵循 partial commit。是否在后续阶段放宽 `undefined` 成员值须单独决策，不得在实现时顺手改。Phase 2 起校验范围以有界走查为界：准入天花板内检出的非 lossless 仍是 `invalid-output`；超出走查边界的部分不做校验——这是 G1 的必然代价（大值尾部的 bigint 不再被发现，该值成功投影）；保留物是原对象而非快照，未校验不影响 `$out(id)` 可用性，Phase 1 本就允许保留事后被改成非 JSON 的对象。 |
 | projector 内部失败 | 当前 run 显式 `invalid-output` 或 internal failure，不回退为完整大输出。注意当前 `prepareCompletion` 的无差别 try/catch 把抛异常的 getter 也压成同一条 invalid-output 文案，实现时需先拆分错误分类。 |
 | history 淘汰 | 只释放 runtime-owned 引用；`$out(id)` 明确报 expired。 |
 | 旧 generation handle | id 全局单调不复用，旧 handle 在新 store 中缺席并抛 `CompletionExpiredError`；内部 nonce 纵深防御，绝不匹配新 generation 槽。 |
@@ -266,6 +279,8 @@ History 保存原 completion 的 Realm 内引用，语义接近 IPython `Out`。
 
 ### Phase 2：大 completion 自动投影
 
+**状态：已完成。** 契约评审有条件通过后修复 A 项与 G1 三处 O(值大小) 根因（数组 `ownKeys` 在早退前物化 key、长字符串跨 Inspector 边界二次序列化、wide-object 为真枚举地板）；修后 128 MiB flat-array 0.78 ms / 0 MiB，long-string 残留 ~800 ms 为 CDP 内联第一趟（worker 拿到值之前，早退不可达，改传输策略属独立议题）；G1 复测数据见 `bench/results/g1-*.json` 与 `docs/plan/phase2-g1-exit-gate.zh.md`。
+
 - 实现 bounded generic projector 和 full/rich/minimal/output-limit 降级链；
 - 大 completion 从 `output-limit` 改为成功的 generation-fenced reference projection；
 - 不为 DSH 侧 `CodeRunResult` 新增顶层字段；内部 done fragment 增加模型不可见的 `projected` 判别标志；保持 `maxOutputBytes` 最终硬上限；
@@ -275,17 +290,22 @@ History 保存原 completion 的 Realm 内引用，语义接近 IPython `Out`。
 
 ### Phase 3：日志投影分账
 
+**状态：已砍掉（2026-08-24 决策）。** 日志越界 hard-kill 的现有行为存在已久、对核心目标（大结果不再失败、删除摘要提示词）无贡献，且契约评审已确认这是风险等级最高的 heap 契约变更。当前行为即终态契约（`tests/completion-contracts.spec.ts` 已钉住）；只有实际数据证明日志 storm 是真问题时才重开本阶段。以下原文保留供届时参考。
+
 - 参考上游 stdout/stderr 截断，设计 `console.log` 有界收集；
 - 通过有界 marker 日志条目明确 dropped bytes/entries，不增加 `CodeRunResult` 顶层字段；
 - 保持统一合并 cap，并验证日志 storm 不掩盖 completion 状态、不劈 Unicode 代理对，也不突破 host 边界。
 
 ### Phase 4：简化模型 policy 与文档
 
+**状态：已完成（最小形态）。** policy 的 reduce-first 规则删除，`run_code` schema 增加两句能力声明，`keyCount` 进 `$out.list()`，README 与 architecture 文档按新语义更新，`tests/code-mode.spec.ts` 5 处断言显式改写。Adopt/Adapt/Defer 记录从简（本文档即记录）。
+
 注意（Phase 1 实现发现）：`$out.list()` 的返回值作为 cell 末尾表达式时自身也是 completion，会占槽并移动 `$_`——规则自洽，维持现状；但文案不得把 `list()` 描述成「随便看一眼」的免费操作（entries=16 下连看几次会挤掉工作集一格），无扰动读取的惯用式是 `console.log(JSON.stringify($out.list()))`。
 
 - 删除要求模型主动归约输出的格式规则；
 - 更新 `README.md`、`docs/architecture.md`、`src/policy.ts`；
 - 记录与上游 IPython `Out`、snapshot/pruning 的 Adopt/Adapt/Defer 判断；
+- 处置 `CompletionSlot.keyCount`（Phase 2 后仍是只写字段）：进 `$out.list()`（小整数、有界、对模型有用）或删除，二选一；
 - 不在本阶段引入 TypeScript heap snapshot。
 
 ## 10. 测试矩阵
@@ -356,7 +376,7 @@ History 保存原 completion 的 Realm 内引用，语义接近 IPython `Out`。
 - Phase 2 后仍发生的 output-limit count；
 - Phase 3 的 dropped log entries/bytes。
 
-指标不得包含 completion 内容、凭据、原始路径或 session identity。Session 持久日志只记录 bounded metadata。
+指标不得包含 completion 内容、凭据、原始路径或 session identity。Session 持久日志只记录 bounded metadata。承载体（Phase 2 定案）：`PersistentRealm` 上的只读计数器，经 `PrimeCodeRuntime` 的 `metrics` getter 汇总暴露，测试直接断言；不接 logger、不进 Session 日志、不上 wire，模型不可见。
 
 ## 12. 明确不做
 

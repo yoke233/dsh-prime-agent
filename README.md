@@ -44,6 +44,7 @@ await review('a') // Map 和函数都还活着
 | 状态层 | 责任 | 保证 |
 | --- | --- | --- |
 | Realm live namespace | 普通顶层变量、函数、对象、Map 和索引 | 同一 Worker 内的 cell 间保留；hard kill 后丢失 |
+| Completion history | runtime 自动保留的 cell 结果，经 `$_` 与 `$out(N)` 访问 | 同上；超预算按 FIFO 淘汰，失效 handle 抛 `CompletionExpiredError` |
 | 持久任务文件 | 大型输入、重要结果与跨重启检查点 | 由文件系统承载,进程重启后仍可恢复 |
 | `prime_refine` | 稳定路由与行为经验 | 证据化、乐观并发、事务历史和安全回滚 |
 
@@ -198,7 +199,7 @@ try {
 
 ## 编排工作流
 
-控制面 policy 引导模型在一个程序里组合读取、工具与子 Agent：中间值留在 live namespace，大结果在程序内归约后只返回摘要；独立前台工作用 `Promise.all`，best-effort 探测逐项捕获，副作用型 mutation 顺序执行。
+控制面 policy 引导模型在一个程序里组合读取、工具与子 Agent：中间值留在 live namespace；独立前台工作用 `Promise.all`，best-effort 探测逐项捕获，副作用型 mutation 顺序执行。大结果不需要模型自己归约——runtime 会把超过 64 KiB 的完成值换成有界引用 envelope，cell 仍然成功，原值留在 Realm 内可用 envelope 里给出的 `$out(N)` 继续计算。
 
 慢任务使用非阻塞控制循环：交给 managed Job 或 continuable child，保存 id/输出位置后继续独立工作，或结束当前 turn 等待通知；不使用 sleep 轮询或长阻塞 `await` 占住交互。多回合或多 child 工作由直接面向用户的 root 在有意义里程碑简洁汇报结果、阻塞和下一步。
 
@@ -228,7 +229,7 @@ Jobs 是独立的后台任务生命周期。后台 shell 或 one-shot background
 | `requireOrchestrationTools` | `true` | 要求具备 Subagent admission 与 `job_output` |
 | `continual` | 有界默认值 | 学习条目、事务、状态与 prompt 限制 |
 
-`dsh-prime-agent/runtime` 条目另接受官方预算字段（`computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，同名逐字透传）与 realm pool 治理项（`maxActiveRealms`、`maxIdleMs`、`maxHostCallsPerRun`、`maxParallelHostCallsPerRun`）。
+`dsh-prime-agent/runtime` 条目另接受官方预算字段（`computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，同名逐字透传）、realm pool 治理项（`maxActiveRealms`、`maxIdleMs`、`maxHostCallsPerRun`、`maxParallelHostCallsPerRun`），以及 completion history 与投影上限（`maxCompletionHistoryEntries`、`maxCompletionHistoryEstimatedBytes`、`maxCompletionHistoryNodes`、`maxCompletionHistoryEntryBytes`、`maxCompletionFullBytes`、`maxCompletionProjectionBytes`）。
 
 ## 存储与安全
 

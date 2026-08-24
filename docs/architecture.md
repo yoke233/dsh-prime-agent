@@ -116,7 +116,9 @@ DSH compaction 不遍历、序列化或清理 Realm heap，spill 也不会驱逐
 
 ### 完成值、日志与大输出
 
-Worker 通过 Inspector 取得 cell 的末尾表达式，并把可序列化完成值交给 host。日志与完成值共同受 `maxOutputBytes` 硬上限约束；越界明确失败，不静默截断程序结果。
+Worker 通过 Inspector 取得 cell 的末尾表达式，并把可序列化完成值交给 host。日志与完成值共同受 `maxOutputBytes` 硬上限约束。
+
+完成值本身由 runtime 自动保留在 generation-local 的 completion history 中，模型通过 `$_`（最近一个结果）与 `$out(N)`（按 handle 取回原值）访问；`$out.list()/drop(id)/clear()` 是管理面，不写进模型 schema。`maxCompletionFullBytes`（默认 64 KiB）以内的完成值原样返回，超过则改为固定 schema 的有界引用 envelope——cell 仍然成功，原值留在 Realm 内可继续计算，模型只收到 `maxCompletionProjectionBytes`（默认 4096）以内的投影。降级链是 full → rich projection → minimal reference → output-limit，只有连最小引用都放不进剩余预算时才真正失败。捕获遍历带早退：越过 `max(maxCompletionHistoryEntryBytes, maxCompletionFullBytes)` 的值不再被完整走查，因此其超出边界的部分不做 lossless 校验，而 history 保留的是原对象引用、不是快照。handle 由 host 全局单调分配、绝不复用，hard-kill 后旧 handle 明确抛 `CompletionExpiredError`。
 
 工具调用的 canonical value、持久日志 preview 与 spill locator 仍由 DSH 工具层管理。程序可以在 Realm 内使用完整 canonical value 做归约，而 Prime preset 为模型 projection 与 `tool/code-dispatch` 日志配置 12KB best-effort spill 阈值。backend 可用且 locator notice 能容纳时，超出部分由 DSH spill artifact 保存并按需读取；store 缺失、保存失败或 notice 无法放进预算时，策略保留完整 inline 成功结果并告警，不伪造 locator。这个预算不限制 Realm heap，也不等于上游 IPython 的 snapshot pruning；Realm 不复制 DSH 的 spill 或工具日志存储。
 
@@ -126,7 +128,8 @@ Worker 通过 Inspector 取得 cell 的末尾表达式，并把可序列化完�
 | --- | --- |
 | 语法错误 | cell 不执行，namespace 不变。 |
 | 普通程序异常或被程序捕获的工具失败 | 当前 cell 失败或由程序处理；Worker generation 保留。异常前已经完成的声明、赋值和外部副作用可能保留，遵循 REPL partial-commit 语义。 |
-| completion 序列化失败 | cell 已执行且 namespace 保留，当前结果以 invalid output 失败。 |
+| completion 序列化失败 | cell 已执行且 namespace 保留，当前结果以 invalid output 失败；判定范围以有界走查为界，超出捕获天花板的部分不校验。 |
+| completion 过大 | cell 成功，模型收到有界引用 envelope；原值按 history 预算保留，超过准入预算时 envelope 标 `retained: false` 且不给 handle。 |
 | 排队 cell 在 dispatch 前取消 | 只取消该 cell。 |
 | active abort、compute/wall timeout、输出失控、Worker exit、OOM 或控制协议违规 | hard-kill 当前 Worker；后续 cell 创建新 generation。 |
 | hard kill 后第一次真正 dispatch | 返回 namespace restart notice，明确上一 generation 的 bindings 已丢失。 |
@@ -207,7 +210,7 @@ Agent-scope `dsh-prime-agent`：
 | `requireOrchestrationTools` | `true` | 是否在 prompt assembly 时检查可见 Subagent admission 与 `job_output`。 |
 | `continual` | 有界默认值 | entry、evidence、transaction、状态文件和 prompt 预算。 |
 
-Host-scope `dsh-prime-agent/runtime` 透传官方 `computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，并增加 `maxActiveRealms`、`maxIdleMs`、`maxHostCallsPerRun`、`maxParallelHostCallsPerRun`。
+Host-scope `dsh-prime-agent/runtime` 透传官方 `computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，并增加 `maxActiveRealms`、`maxIdleMs`、`maxHostCallsPerRun`、`maxParallelHostCallsPerRun`，以及 completion history 与投影的六个上限：`maxCompletionHistoryEntries`、`maxCompletionHistoryEstimatedBytes`、`maxCompletionHistoryNodes`、`maxCompletionHistoryEntryBytes`、`maxCompletionFullBytes`、`maxCompletionProjectionBytes`。
 
 runtime row 与 Prime preset 的 `stateDirectory` 必须相同，否则 handshake 两侧读取不同 HMAC key，所有 Prime 请求都会 fail closed。
 

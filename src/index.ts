@@ -65,7 +65,12 @@ const SDK_ASYNC_BODY = 'the body of an async TypeScript function'
 const SDK_REPL_CELL = 'a persistent TypeScript REPL cell'
 const SDK_RETURN_RULE = '- Emit results with `return` and/or `console.log(...)`. Only what you print or return is program output. A successful tool result containing an image is attached after the run so you can inspect it on the next step; every other intermediate result stays out of the conversation, so extract just what you need.'
 const SDK_COMPLETION_RULE = '- The final expression is the result; top-level `return` is invalid. `console.log(...)` still emits logs. Only logs and the final-expression result are program output. A successful tool result containing an image is attached after the run so you can inspect it on the next step; every other intermediate result stays out of the conversation, so extract just what you need.'
-const RUN_CODE_DESCRIPTION = 'Execute one persistent TypeScript REPL cell against the available tools. Top-level `await` works and ordinary top-level bindings remain available to later cells. The final expression is the result; top-level `return` is invalid. Call tools as `await tools.name(args)` per the system-prompt declarations. Image-bearing subtool results are attached after the run.'
+// The two sentences about results are the ONLY resident documentation the
+// completion mechanism gets (plan §7.4). They state capability facts and nothing
+// else: no output format to follow, no `list`/`drop`/`clear` management surface,
+// and no instruction to reduce anything. What a large result actually looks like
+// arrives with the result itself, in the envelope's copyable `use` expression.
+const RUN_CODE_DESCRIPTION = 'Execute one persistent TypeScript REPL cell against the available tools. Top-level `await` works and ordinary top-level bindings remain available to later cells. The final expression is the result; top-level `return` is invalid. Results persist across cells; `$_` holds the last result. Large results are shown truncated with a `$out(N)` handle to the full value. Call tools as `await tools.name(args)` per the system-prompt declarations. Image-bearing subtool results are attached after the run.'
 const RUN_CODE_CODE_DESCRIPTION = 'One persistent TypeScript REPL cell; use its final expression as the result, without a top-level return.'
 
 function isRecord(value: unknown): value is Record<string, unknown> {

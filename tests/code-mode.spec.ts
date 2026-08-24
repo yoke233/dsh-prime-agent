@@ -69,6 +69,13 @@ describe('Prime Code Mode composition', () => {
     const runCode = initialAssembly.tools[0]
     expect(runCode?.description).toContain('persistent TypeScript REPL cell')
     expect(runCode?.description).toContain('top-level `return` is invalid')
+    // ADDED BY PHASE 4 (plan §7.4): the resident capability statement, two
+    // sentences and no more. It says what is TRUE of results, never what shape
+    // to emit, and it deliberately omits the `list`/`drop`/`clear` management
+    // surface — that is not something the model should be spending tokens on.
+    expect(runCode?.description).toContain('Results persist across cells; `$_` holds the last result.')
+    expect(runCode?.description).toContain('Large results are shown truncated with a `$out(N)` handle to the full value.')
+    expect(runCode?.description).not.toMatch(/\$out\.(list|drop|clear)/)
     const codeSchema = (runCode?.parameters.properties as Record<string, Record<string, unknown>> | undefined)?.code
     expect(codeSchema?.description).toContain('final expression as the result')
     const policy = initialAssembly.sections.find(section => section.name === 'prime-agent:rlm-policy')?.text ?? ''
@@ -81,7 +88,15 @@ describe('Prime Code Mode composition', () => {
     expect(policy).toContain('tools.grep({ pattern: /constructor\\(/.source })')
     expect(policy).toContain('Each run_code call is the next cell in the same live session')
     expect(policy).toContain("A cell's result is its final expression; do not use a top-level return")
-    expect(policy).toContain('Reduce first, finish with the summary')
+    // REWRITTEN BY PHASE 4 (plan §7.4, §10 "affected existing assertions"). The
+    // "reduce first, finish with the summary" rule is gone: the runtime bounds
+    // what a completion puts in front of the model, so asking the model to do it
+    // by hand is both redundant and a claim about output shape that is no longer
+    // true. What survives is the DURABILITY half, which the mechanism does not
+    // replace — a retained result lives only as long as its realm generation.
+    expect(policy).not.toContain('Reduce first, finish with the summary')
+    expect(policy).not.toMatch(/filter, aggregate, count, hash/)
+    expect(policy).toContain('Keep large source and result data in durable task files')
     expect(policy).toContain('spill locator')
     expect(policy).toContain('do not blindly repeat it')
     expect(policy).toMatch(/sandbox denial, ask once for the minimum permission/)
@@ -101,7 +116,12 @@ describe('Prime Code Mode composition', () => {
     expect(policy).toContain('A handoff file is not edited after it is written')
     expect(policy).toContain('never bury task instructions in a data file')
     expect(policy).toContain('snapshot of the moment it was written')
-    expect(policy).toContain('the same reduce-first rule, one level down')
+    // REWRITTEN BY PHASE 4 (plan §7.4): the handoff section used to end this
+    // sentence by pointing back at the reduce-first rule. The pointer went with
+    // the rule; what a child reads from a handoff file is still its own choice,
+    // and that half stands on its own.
+    expect(policy).toContain('reads from the file only the keys its current decision needs')
+    expect(policy).not.toContain('reduce-first rule')
     expect(policy).toContain('truncated past 8192 characters')
   })
 
@@ -137,6 +157,8 @@ describe('Prime Code Mode composition', () => {
     expect(policy).toContain('live namespace and durable task files')
 
     const rlmPolicy = assembly.sections.find(section => section.name === 'prime-agent:rlm-policy')?.text ?? ''
-    expect(rlmPolicy).toContain('Reduce first, finish with the summary')
+    // REWRITTEN BY PHASE 4 (plan §7.4): same rule, asserted here through the
+    // RLM policy section.
+    expect(rlmPolicy).toContain('Keep large source and result data in durable task files')
   })
 })
