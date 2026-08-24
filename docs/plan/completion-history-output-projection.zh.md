@@ -378,6 +378,16 @@ History 保存原 completion 的 Realm 内引用，语义接近 IPython `Out`。
 
 指标不得包含 completion 内容、凭据、原始路径或 session identity。Session 持久日志只记录 bounded metadata。承载体（Phase 2 定案）：`PersistentRealm` 上的只读计数器，经 `PrimeCodeRuntime` 的 `metrics` getter 汇总暴露，测试直接断言；不接 logger、不进 Session 日志、不上 wire，模型不可见。
 
+## 11.5 收尾时登记的遗留议题（不阻塞，独立立项）
+
+G1 复测（`docs/plan/phase2-g1-exit-gate.zh.md`）通过后留下的已知边界，均为既有机制、在投影器职责之外：
+
+1. **R1**：被 G1 豁免的根 key 单次枚举，其**内存**随 key 数无界——wide-object 128 MiB / 559 万 key worker-exit、256 MiB OOM。模型自然产生的大字典会打死 worker 丢 namespace，而不是拿到 `retained: false` 投影，行为上比慢严重。
+2. **R2**：字符串完成值经 CDP RemoteObject 按值内联，在捕获遍历开始前就被完整编解码一遍（64 MiB → 390 ms / 422 MiB，256 MiB worker-exit）；捕获遍历本身对字符串 O(1)（wrapped-string 0.6 ms 为证）。有实测支撑的修法：边界求值时把完成值包一层拿 objectId、main world 内解包。
+3. **行为缺口**：超出天花板且带额外属性的稀疏数组，从 `invalid-output` 变为 `retained: false` 投影（数组完整性检查推迟到 `!aborted` 的代价，与 bigint 既有行为一致）——尚无用例钉住。
+4. G1 文档 §5.3 的 6 条防回归门槛中 4 条已绿可固化，「wide-object 128 MiB 不死」与「long-string 峰值 ≤2×」需 R1/R2 修复后才绿。
+5. identity-reuse 不省捕获 CPU（身份命中在走查之后）；将来若要回流变便宜，把身份查找挪到走查之前。
+
 ## 12. 明确不做
 
 本计划不包括：
