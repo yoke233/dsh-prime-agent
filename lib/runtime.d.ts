@@ -44,6 +44,10 @@ export interface Config {
     maxCompletionHistoryNodes?: number;
     /** Capture-time serialized bytes one single retained completion may occupy. */
     maxCompletionHistoryEntryBytes?: number;
+    /** Serialized bytes a completion may occupy and still reach the model verbatim. */
+    maxCompletionFullBytes?: number;
+    /** Serialized bytes one bounded completion reference may occupy. */
+    maxCompletionProjectionBytes?: number;
 }
 export declare const Config: z<Config>;
 /**

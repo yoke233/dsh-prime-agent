@@ -21,8 +21,10 @@ import type { MessagePort } from 'node:worker_threads'
 import type {
   HostToRealm,
   RealmCompletionHistoryLimits,
+  RealmCompletionProjectionLimits,
   RealmNamespaceSpec,
   RealmProgramFailure,
+  RealmRunMetrics,
   RealmToHost,
 } from './protocol.js'
 
@@ -63,6 +65,7 @@ const capturedSetClear = Set.prototype.clear
 const capturedSetDelete = Set.prototype.delete
 const capturedSetForEach = Set.prototype.forEach
 const capturedSetHas = Set.prototype.has
+const capturedStringCharCodeAt = String.prototype.charCodeAt
 const capturedStringSlice = String.prototype.slice
 const capturedStringStartsWith = String.prototype.startsWith
 const capturedSymbolIterator = Symbol.iterator
@@ -659,69 +662,165 @@ interface CaptureStats {
    * Set the moment the walk crosses `nodeLimit`, which permanently disqualifies
    * the value from the history.
    *
-   * What is true TODAY: the flag is written during the walk, read only after it
-   * finishes, and the walk always runs to completion. Phase 1 therefore does NOT
-   * avoid the expansion — it only avoids being fooled by it. Writing the flag
-   * inline rather than deriving it from a finished snapshot is groundwork for
-   * Phase 2, and it is also the only way the answer can be right: `seen` is a
-   * path set (deleted on exit below) that refuses cycles without recognizing
-   * sharing, so a few KiB of live DAG expands into tens of millions of nodes at
-   * the boundary (§3.8) and a post-hoc count would be a count of the
-   * amplification rather than of the value.
+   * It is written INLINE rather than derived from a finished snapshot, and that
+   * is the only way the answer can be right: `seen` is a path set (deleted on
+   * exit below) that refuses cycles without recognizing sharing, so a few KiB of
+   * live DAG expands into tens of millions of nodes at the boundary (§3.8) and a
+   * post-hoc count would be a count of the amplification rather than of the
+   * value.
    *
-   * Do NOT turn this into an early exit while Phase 1's wire contract stands.
-   * The full JSON is still what crosses, and a value can blow the node budget
-   * while its serialization fits `maxOutputBytes` with room to spare; abandoning
-   * the walk would abandon that serialization too, so a cell that succeeds today
-   * would start failing with `invalid-output` — a model-visible regression, not
-   * an internal one. Guarded by "refuses a shared subgraph whose expansion the
-   * walk counted, without abandoning the walk" in
-   * `tests/completion-history.spec.ts`. Phase 2, which projects a large
-   * completion instead of serializing it, is where the early return becomes
-   * correct.
-   *
-   * Nothing in the walk READS this flag, and nothing may start to: the sampling
-   * below has to survive it intact. Phase 1 gets away with that for free, since
-   * a value tripping the flag is refused outright and its stats are discarded
-   * with it — but Phase 2 must still PROJECT a value it refuses to retain, and
-   * that projection needs this walk's key sample. A "stop collecting once the
-   * budget is blown" shortcut would leave exactly the oversized values that need
-   * a projection without the material to build one, and re-enumerating keys is
-   * the one thing the benchmark rules out (§3.7). Guarded from Phase 2 onwards
-   * by the first Phase 2 acceptance item in the plan: the projector must produce
-   * an envelope carrying a key sample for a value that tripped this flag.
+   * Tripping it does NOT by itself end the walk; `overCaptureCeiling` does, and
+   * only once the value has also grown past what could have crossed whole. The
+   * distinction is model-visible. A value can blow the node budget while its
+   * serialization stays small — the expanding DAG above is exactly that shape —
+   * and for those the full JSON still crosses, unretained, as it did in Phase 1.
+   * Abandoning the walk there would abandon the serialization with it and turn a
+   * successful cell into `invalid-output`, which the plan forbids outright (§9
+   * Phase 2). Guarded by "refuses a shared subgraph whose expansion the walk
+   * counted, without abandoning the walk" in `tests/completion-history.spec.ts`.
    */
   overNodeLimit: boolean
+  /**
+   * Serialized bytes the walk has accounted for, as a LOWER BOUND: escapes and
+   * multi-byte code points only add, and every leaf is charged at least what its
+   * shortest legal serialization would cost. Under-counting is the safe
+   * direction — the walk abandons a value only once the bound alone proves it
+   * cannot be used, so nothing that would have fitted is ever cut short.
+   */
+  bytes: number
+  /**
+   * The point past which the walk gives up: the higher of the per-slot admission
+   * ceiling and the full-value threshold, so crossing it proves the value can
+   * neither be retained nor sent whole.
+   *
+   * Placing the early exit at the ADMISSION ceiling rather than at the
+   * projection threshold is what keeps exact accounting exact. A walk that
+   * finishes inside this bound yields a real byte count and a real node count,
+   * which the history needs to charge a slot; a walk that crosses it belongs to
+   * a value that could never have been retained anyway, so there is nothing left
+   * to measure precisely and the projection is built from what the walk already
+   * gathered. The cost of a capture is therefore bounded by a constant that does
+   * not grow with the value (§4.4).
+   */
+  byteLimit: number
+  /** The size past which a completion is projected rather than sent whole. */
+  fullLimit: number
+  /** Set when `overCaptureCeiling` ended the walk; the snapshot is then partial. */
+  aborted: boolean
   /** Container nesting, so root metadata can be taken without a second look. */
   depth: number
-  /**
-   * Own key total of a root OBJECT, and the first `ROOT_KEY_SAMPLE` of its keys.
-   *
-   * Only the count reaches a slot; the sample lives and dies with one capture.
-   * It is collected anyway because this walk is the only place it can be had
-   * cheaply, and because the invariant above — sampling is never cut short by a
-   * blown budget — has to be true of the MECHANISM before Phase 2 can build a
-   * projection on it.
-   */
+  /** Own key total of a root OBJECT, recorded for the slot that retains it. */
   rootKeyCount: number
-  rootKeys: string[]
+  /** Projection nodes materialized so far, against `PROJECTION_NODES`. */
+  projectionNodes: number
 }
 
-/** How many root keys one capture samples; the sample is never stored past it. */
-const ROOT_KEY_SAMPLE = 16
+/** A walk with no ceiling at all, for values that are not completions. */
+const UNLIMITED = Number.POSITIVE_INFINITY
 
-/** A walk whose node budget can never bind, for values that are not completions. */
-const UNLIMITED_NODES = Number.POSITIVE_INFINITY
-
-function newCaptureStats(nodeLimit: number): CaptureStats {
+function newCaptureStats(nodeLimit: number, byteLimit: number, fullLimit: number): CaptureStats {
   const stats = capturedObjectCreate(null) as CaptureStats
   stats.nodes = 0
   stats.nodeLimit = nodeLimit
   stats.overNodeLimit = false
+  stats.bytes = 0
+  stats.byteLimit = byteLimit
+  stats.fullLimit = fullLimit
+  stats.aborted = false
   stats.depth = 0
   stats.rootKeyCount = 0
-  stats.rootKeys = []
+  stats.projectionNodes = 0
   return stats
+}
+
+/**
+ * Charge one value's shortest legal serialization, ending the walk if the total
+ * proves the value is beyond use.
+ *
+ * Two ways out, and both have to hold something. Past `byteLimit` the value can
+ * neither be retained nor sent whole, so nothing is lost by stopping. Past
+ * `fullLimit` it can no longer be sent whole either, but stopping is only
+ * justified once the node budget has ALSO been blown — otherwise the walk would
+ * abandon a value the history was still willing to take.
+ */
+function chargeCapture(stats: CaptureStats, bytes: number): void {
+  stats.bytes += bytes
+  if (stats.bytes > stats.byteLimit || (stats.overNodeLimit && stats.bytes > stats.fullLimit)) stats.aborted = true
+}
+
+/**
+ * The projector's hard limits, decided by the Phase 0 benchmark (plan §5.2).
+ * They bound the projection independently of the value: whatever the walk is
+ * looking at, at most this many nodes of it are ever rendered.
+ */
+const PROJECTION_DEPTH = 4
+const PROJECTION_ARRAY_SAMPLE = 8
+const PROJECTION_KEY_SAMPLE = 16
+const PROJECTION_STRING_CHARS = 256
+const PROJECTION_NODES = 512
+
+/**
+ * One position in the projection tree, filled in by the walk as it passes.
+ *
+ * A slot rather than a return value because the walk may not come back: it is
+ * assigned the moment a container is entered, BEFORE its children are visited,
+ * so a capture the ceiling cuts short still leaves the parent holding whatever
+ * had been rendered by then.
+ */
+interface ProjectionSlot {
+  node: unknown
+}
+
+function newProjectionSlot(stats: CaptureStats): ProjectionSlot | undefined {
+  if (stats.projectionNodes >= PROJECTION_NODES) return undefined
+  stats.projectionNodes += 1
+  const slot = capturedObjectCreate(null) as ProjectionSlot
+  slot.node = undefined
+  return slot
+}
+
+/**
+ * Cut one string to the projector's character budget without splitting a
+ * surrogate pair — an obligation the boundary already carries for the whole
+ * completion (§6.2), and one a naive `slice` breaks by leaving a lone high
+ * surrogate that no longer names the character it came from.
+ */
+function truncateForProjection(text: string): string {
+  let end = PROJECTION_STRING_CHARS
+  const code = capturedReflectApply(capturedStringCharCodeAt, text, [end - 1]) as number
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1
+  return capturedReflectApply(capturedStringSlice, text, [0, end]) as string
+}
+
+/** A string as the projection renders it: itself when short, its head when not. */
+function projectString(text: string): unknown {
+  if (text.length <= PROJECTION_STRING_CHARS) return text
+  const node = capturedObjectCreate(null) as Record<string, unknown>
+  node.type = 'string'
+  node.length = text.length
+  node.prefix = truncateForProjection(text)
+  return node
+}
+
+/**
+ * One sampled object key, as its own projection entry.
+ *
+ * Entries are a LIST rather than an object keyed by name, which the plan's
+ * illustrative envelope showed, because §4.4 also requires an over-long key to
+ * be truncated like any other string — and two 20,000-character keys sharing
+ * their first 256 characters would then collide, at which point
+ * `JSON.stringify` silently drops one of the two entries. A list keeps the
+ * truncation honest and keeps every sampled key visible.
+ */
+function projectKeyEntry(key: string): Record<string, unknown> {
+  const entry = capturedObjectCreate(null) as Record<string, unknown>
+  if (key.length <= PROJECTION_STRING_CHARS) {
+    entry.key = key
+    return entry
+  }
+  entry.key = truncateForProjection(key)
+  entry.keyLength = key.length
+  return entry
 }
 
 /**
@@ -731,19 +830,54 @@ function newCaptureStats(nodeLimit: number): CaptureStats {
  * extra-propertied arrays, symbol/non-enumerable properties, and cycles.
  */
 function snapshotJson(value: unknown): unknown {
-  return snapshotValue(value, new CapturedSet<object>(), newCaptureStats(UNLIMITED_NODES))
+  return snapshotValue(value, new CapturedSet<object>(), newCaptureStats(UNLIMITED, UNLIMITED, UNLIMITED), undefined)
 }
 
-function snapshotValue(value: unknown, seen: Set<object>, stats: CaptureStats): unknown {
+/**
+ * Walk one boundary value once, producing three things at the same time: the
+ * detached snapshot, the admission bookkeeping, and — when a slot is supplied —
+ * the bounded projection.
+ *
+ * All three come from a SINGLE traversal, and none of them may be recovered by a
+ * second one. The walk reads program getters, so re-walking would fire their
+ * side effects twice and a getter that threw the second time would turn an
+ * already-successful run into a failure. The same rule covers key enumeration: a
+ * dictionary-mode object has no cheap "first N keys" path (`Object.keys().slice`
+ * costs 857 ms on a 64 MiB wide object, `docs/plan/phase0-bench-results.zh.md`
+ * §3.7), so the projector samples from the enumeration this walk performs anyway
+ * and never runs one of its own.
+ */
+function snapshotValue(value: unknown, seen: Set<object>, stats: CaptureStats, slot: ProjectionSlot | undefined): unknown {
+  if (stats.aborted) return undefined
   stats.nodes += 1
-  // Written here, read only after the walk returns; see `CaptureStats.overNodeLimit`
-  // for why this must not become an early exit.
   if (stats.nodes > stats.nodeLimit) stats.overNodeLimit = true
-  if (value === null) return null
+  if (value === null) {
+    chargeCapture(stats, 4)
+    if (slot) slot.node = null
+    return null
+  }
   const kind = typeof value
-  if (kind === 'boolean' || kind === 'string') return value
+  if (kind === 'boolean') {
+    chargeCapture(stats, value === true ? 4 : 5)
+    if (slot) slot.node = value
+    return value
+  }
+  if (kind === 'string') {
+    // One byte per UTF-16 unit is a floor: a surrogate pair costs two units and
+    // four UTF-8 bytes, and every escape only adds.
+    chargeCapture(stats, 2 + (value as string).length)
+    if (slot) slot.node = projectString(value as string)
+    return value
+  }
   if (kind === 'number') {
     if (!capturedNumberIsFinite(value) || capturedObjectIs(value, -0)) throw new CapturedError('value is not lossless JSON')
+    // One digit, which every number has and some have twenty-odd of. This is the
+    // loosest charge the walk makes, and it is left loose deliberately: a tighter
+    // one costs a length computation per number, while the property that matters
+    // — a ceiling that does not grow with the value — holds either way, since the
+    // longest legal JSON number is a constant.
+    chargeCapture(stats, 1)
+    if (slot) slot.node = value
     return value
   }
   if (kind !== 'object') throw new CapturedError('value is not lossless JSON')
@@ -752,14 +886,44 @@ function snapshotValue(value: unknown, seen: Set<object>, stats: CaptureStats): 
   capturedReflectApply(capturedSetAdd, seen, [source])
   const root = stats.depth === 0
   stats.depth += 1
+  // Children are sampled only while the container itself sits inside the depth
+  // budget; deeper containers still report their size, just not their contents.
+  const sampling = slot !== undefined && stats.depth <= PROJECTION_DEPTH
   let snapshot: unknown
   if (capturedArrayIsArray(source)) {
     const items = source as unknown[]
-    if (capturedReflectOwnKeys(items).length !== items.length + 1) throw new CapturedError('value is not lossless JSON')
+    chargeCapture(stats, items.length > 0 ? items.length + 1 : 2)
+    const sample: unknown[] | undefined = sampling ? [] : undefined
+    if (slot) {
+      const node = capturedObjectCreate(null) as Record<string, unknown>
+      node.type = 'array'
+      node.length = items.length
+      if (sample) node.items = sample
+      slot.node = node
+    }
     const target: unknown[] = []
     for (let index = 0; index < items.length; index++) {
+      // Before the element is READ, so a capture the ceiling already stopped
+      // does not reach an index accessor it had decided not to need.
+      if (stats.aborted) break
       if (!capturedObjectHasOwn(items, index)) throw new CapturedError('value is not lossless JSON')
-      capturedReflectApply(capturedArrayPush, target, [snapshotValue(items[index], seen, stats)])
+      const child = sample !== undefined && index < PROJECTION_ARRAY_SAMPLE ? newProjectionSlot(stats) : undefined
+      capturedReflectApply(capturedArrayPush, target, [snapshotValue(items[index], seen, stats, child)])
+      // An unvisited child left its slot empty. Rendering it would put a `null`
+      // in the sample, and a projected `null` means the walk SAW a null.
+      if (child && child.node !== undefined) capturedReflectApply(capturedArrayPush, sample, [child.node])
+    }
+    // Deferred past the walk on purpose. This is the one array check that costs
+    // a materialized key per ELEMENT — `Reflect.ownKeys` on a 13.4M-element
+    // array measured 5.3 s and 1.2 GiB (`bench/results/g1-exit-gate.json`) — so
+    // running it up front would make every aborted capture pay O(value) for an
+    // answer it then throws away, which is exactly what the early exit exists to
+    // prevent. A walk that FINISHED is bounded by the ceiling, so the check is
+    // bounded with it. The cost of deferring is that a sparse or
+    // extra-propertied array past the ceiling is no longer rejected — the same
+    // trade §8 already makes for every other kind of validity beyond the walk.
+    if (!stats.aborted && capturedReflectOwnKeys(items).length !== items.length + 1) {
+      throw new CapturedError('value is not lossless JSON')
     }
     snapshot = target
   } else {
@@ -768,17 +932,58 @@ function snapshotValue(value: unknown, seen: Set<object>, stats: CaptureStats): 
     const target = capturedObjectCreate(null) as Record<string, unknown>
     const keys = capturedReflectOwnKeys(source)
     if (root) stats.rootKeyCount = keys.length
+    chargeCapture(stats, keys.length > 0 ? keys.length + 1 : 2)
+    const entries: Record<string, unknown>[] | undefined = sampling ? [] : undefined
+    if (slot) {
+      const node = capturedObjectCreate(null) as Record<string, unknown>
+      node.type = 'object'
+      node.keyCount = keys.length
+      if (entries) node.keys = entries
+      slot.node = node
+    }
+    let visited = keys.length
     for (let index = 0; index < keys.length; index++) {
       const key = keys[index] as string | symbol
       if (typeof key !== 'string' || !capturedReflectApply(capturedPropertyIsEnumerable, source, [key])) {
         throw new CapturedError('value is not lossless JSON')
       }
-      // Sampled from the enumeration above rather than from a second one; see
-      // the note on `CaptureStats`.
-      if (root && stats.rootKeys.length < ROOT_KEY_SAMPLE) {
-        capturedReflectApply(capturedArrayPush, stats.rootKeys, [key])
+      chargeCapture(stats, key.length + 3)
+      // The name has been charged and the value has NOT been read. Stopping in
+      // this gap is what keeps an aborted capture from invoking a getter it had
+      // already decided it did not need — and a getter that THREW there would
+      // turn a run the projector was about to answer successfully into a
+      // failure. This key counts as unvisited, so the fill below names it.
+      if (stats.aborted) {
+        visited = index
+        break
       }
-      target[key] = snapshotValue((source as Record<string, unknown>)[key], seen, stats)
+      const child = entries !== undefined && index < PROJECTION_KEY_SAMPLE ? newProjectionSlot(stats) : undefined
+      let entry: Record<string, unknown> | undefined
+      if (child && entries) {
+        // Recorded from the enumeration above rather than from a second one, and
+        // recorded BEFORE the child is visited so an abort inside it still
+        // leaves the key named.
+        entry = projectKeyEntry(key)
+        capturedReflectApply(capturedArrayPush, entries, [entry])
+      }
+      target[key] = snapshotValue((source as Record<string, unknown>)[key], seen, stats, child)
+      if (child && entry && child.node !== undefined) entry.value = child.node
+      if (stats.aborted) {
+        visited = index + 1
+        break
+      }
+    }
+    // The walk stopped inside one child, so the siblings after it were never
+    // read. Their names are already in hand from the single enumeration, and
+    // naming them costs nothing; SAMPLING them would mean reading properties
+    // this capture had decided not to touch, firing getters an aborted walk had
+    // no reason to fire (§4.4).
+    if (stats.aborted && entries !== undefined) {
+      for (let index = visited; index < keys.length && index < PROJECTION_KEY_SAMPLE; index++) {
+        const key = keys[index] as string | symbol
+        if (typeof key !== 'string') break
+        capturedReflectApply(capturedArrayPush, entries, [projectKeyEntry(key)])
+      }
     }
     snapshot = target
   }
@@ -803,10 +1008,12 @@ interface CompletionSlot {
   nodes: number
   type: string
   /**
-   * Own key total of a root object. The first keys are sampled by the walk but
-   * deliberately NOT stored: Phase 2 generates its projection inline during the
-   * capture traversal rather than from slot metadata, so a stored sample would
-   * be retained by every slot and read by nobody.
+   * Own key total of a root object. The keys THEMSELVES are never stored: the
+   * projection is generated inline during the capture traversal and travels with
+   * that run's envelope, so a stored sample would be held by every slot and read
+   * by nobody. It is also deliberately absent from `$out.list()` — the boundary
+   * admits a 20,000-character key, and sixteen of them across sixteen rows would
+   * be a quarter-megabyte answer to a metadata query (§9 Phase 2).
    */
   keyCount: number
 }
@@ -831,6 +1038,25 @@ let completionLimits: RealmCompletionHistoryLimits = {
   maxCompletionHistoryNodes: 1_000_000,
   maxCompletionHistoryEntryBytes: 8_388_608,
 }
+
+/** Restates `DEFAULT_COMPLETION_PROJECTION_LIMITS`, on the same terms. */
+let projectionLimits: RealmCompletionProjectionLimits = {
+  maxCompletionFullBytes: 65_536,
+  maxCompletionProjectionBytes: 4_096,
+}
+
+/**
+ * This run's contribution to the realm's bounded metrics (plan §11).
+ *
+ * Module state read by `startRun` after the boundary call rather than carried
+ * back through it: the Inspector bridge revalidates every field of the fragment
+ * it detaches, and there is nothing to gain from teaching it to revalidate
+ * counters that never left this isolate.
+ */
+let runMetrics: RealmRunMetrics = {}
+
+/** History accesses refused since the last settlement, whoever attempted them. */
+let refusedAccesses = 0
 
 /** Retained completions in FIFO order, oldest first. Generation-local by construction. */
 const completionSlots: CompletionSlot[] = []
@@ -865,6 +1091,7 @@ function evictOldestCompletion(): void {
   if (slot === undefined) return
   retainedBytes -= slot.bytes
   retainedNodes -= slot.nodes
+  runMetrics.evicted = (runMetrics.evicted ?? 0) + 1
 }
 
 /** Whether one more entry of this size fits inside all three history budgets. */
@@ -906,24 +1133,25 @@ function completionFitsAlone(bytes: number, nodes: number): boolean {
  * O(length) per slot, which a run returning long strings would pay on every
  * capture.
  */
-function retainCompletion(value: unknown, bytes: number, stats: CaptureStats): void {
+function retainCompletion(value: unknown, bytes: number, stats: CaptureStats): number | undefined {
   if (typeof value === 'object' && value !== null) {
     for (let index = 0; index < completionSlots.length; index++) {
       const slot = completionSlots[index] as CompletionSlot
       if (capturedObjectIs(slot.value, value)) {
         lastRetainedId = slot.id
-        return
+        return slot.id
       }
     }
   }
   const run = active
-  if (run === undefined) return
+  /* c8 ignore next -- capture runs inside its own run, so the slot is always held here. */
+  if (run === undefined) return undefined
   // Refused outright rather than evicted for: one oversized result must not cost
   // the model every earlier handle it still holds.
-  if (stats.overNodeLimit || !completionFitsAlone(bytes, stats.nodes)) return
+  if (stats.overNodeLimit || !completionFitsAlone(bytes, stats.nodes)) return undefined
   while (completionSlots.length > 0 && !completionHistoryFits(bytes, stats.nodes)) evictOldestCompletion()
   /* c8 ignore next 2 -- unreachable: the value fits an empty store and the entry budget is a positive integer, so an emptied store always has room. */
-  if (!completionHistoryFits(bytes, stats.nodes)) return
+  if (!completionHistoryFits(bytes, stats.nodes)) return undefined
   const slot = capturedObjectCreate(null) as CompletionSlot
   slot.id = run.completionId
   slot.value = value
@@ -935,6 +1163,7 @@ function retainCompletion(value: unknown, bytes: number, stats: CaptureStats): v
   retainedBytes += bytes
   retainedNodes += stats.nodes
   lastRetainedId = slot.id
+  return slot.id
 }
 
 /**
@@ -962,6 +1191,10 @@ installReadonlyGlobal(COMPLETION_EXPIRED_ERROR, CompletionExpiredError)
  */
 function requireCompletionRun(intrinsic: string): void {
   if (leasedRunId() === undefined) {
+    // Counted OUTSIDE any run's report and drained by the next settlement: the
+    // refusals worth counting are exactly the ones that happen when no run owns
+    // the caller, including those that land between two runs.
+    refusedAccesses += 1
     throw new CapturedError(`${intrinsic} is only reachable while its own cell is running`)
   }
 }
@@ -986,7 +1219,10 @@ const completionHandle = (id: unknown): unknown => {
   const slot = findCompletionSlot(handle)
   // A handle from a previous generation lands here too: ids are never reused, so
   // an old one is simply absent and can never name a value it did not create.
-  if (slot === undefined) throw new CompletionExpiredError(`result ${handle} was evicted; recompute it`)
+  if (slot === undefined) {
+    runMetrics.expired = (runMetrics.expired ?? 0) + 1
+    throw new CompletionExpiredError(`result ${handle} was evicted; recompute it`)
+  }
   return slot.value
 }
 
@@ -1001,6 +1237,11 @@ const completionList = (): unknown[] => {
       type: slot.type,
       serializedBytesAtCapture: slot.bytes,
       nodes: slot.nodes,
+      // The COUNT, never the keys themselves. It is one small integer whatever
+      // the value's shape, which is what separates it from the names: sixteen
+      // 20,000-character keys across sixteen rows would be a quarter-megabyte
+      // answer to a metadata query (§9 Phase 2).
+      keyCount: slot.keyCount,
     }])
   }
   return rows
@@ -1142,26 +1383,130 @@ function boundedFailure(kind: 'exception' | 'invalid-output', message: string, r
 }
 
 /**
- * Prepare the program's completion value; only lossless JSON within budget
- * crosses. A value that does cross is also the only thing the history retains:
- * this is the one place that holds the live value, its exact serialized size and
- * its node count at once, and it runs before the run's Inspector object group is
- * released. Reached only from the SUCCESS arm of the boundary, so an exception,
- * abort, timeout, cancellation or output overflow never opens a slot.
+ * Set while the fragment `prepareCompletion` produced is a projection envelope,
+ * so `startRun` can mark the terminal message. Read once, immediately after the
+ * boundary call; see `runMetrics` for why it travels in module state.
+ */
+let projectedCompletion = false
+
+/**
+ * Render one bounded reference to a completion the model is not being shown.
+ *
+ * The chain is `rich -> minimal -> output-limit`, and both rungs are tested
+ * against the SAME two ceilings: the projection budget, which bounds what a
+ * completion may cost the conversation, and the wire budget left after the logs,
+ * which bounds what the protocol can carry at all. A handle appears only when
+ * the value was actually retained — a dead one is worse than none, because the
+ * `use` expression is written to be copied and would fail the moment it was
+ * (§4.3).
+ */
+function projectCompletion(
+  value: unknown,
+  id: number | undefined,
+  bytes: number | undefined,
+  projection: unknown,
+  remaining: number,
+  maxOutputBytes: number,
+): DoneFragment {
+  const budget = projectionLimits.maxCompletionProjectionBytes < remaining
+    ? projectionLimits.maxCompletionProjectionBytes
+    : remaining
+  const type = completionType(value)
+  const rich = capturedObjectCreate(null) as Record<string, unknown>
+  if (id !== undefined) {
+    rich[COMPLETION_HISTORY_GLOBAL] = id
+    rich.use = `${COMPLETION_HISTORY_GLOBAL}(${id})`
+  }
+  rich.retained = id !== undefined
+  rich.type = type
+  // Reported whenever the walk MEASURED it. A capture the ceiling cut short
+  // never learned the real size, and a lower bound reported as an exact number
+  // would be a measurement nobody took.
+  if (bytes !== undefined) rich.serializedBytesAtCapture = bytes
+  if (projection !== undefined) rich.projection = projection
+  if (id === undefined) rich.reason = bytes === undefined ? 'too large to capture' : 'too large to retain'
+  rich.truncated = true
+  const richJson = capturedJsonStringify(rich)
+  if (capturedBufferByteLength(richJson, 'utf8') <= budget) return { json: richJson }
+
+  const minimal = capturedObjectCreate(null) as Record<string, unknown>
+  if (id !== undefined) {
+    minimal[COMPLETION_HISTORY_GLOBAL] = id
+    minimal.use = `${COMPLETION_HISTORY_GLOBAL}(${id})`
+  } else {
+    minimal.type = type
+  }
+  minimal.truncated = true
+  const minimalJson = capturedJsonStringify(minimal)
+  if (capturedBufferByteLength(minimalJson, 'utf8') <= remaining) return { json: minimalJson }
+  return outputLimit(maxOutputBytes)
+}
+
+/**
+ * Prepare the program's completion value; only lossless JSON crosses, whole when
+ * it is small enough and as a bounded reference when it is not. This is also the
+ * one place the history can retain from: it holds the live value, its exact
+ * serialized size and its node count at once, and it runs before the run's
+ * Inspector object group is released. Reached only from the SUCCESS arm of the
+ * boundary, so an exception, abort, timeout, cancellation or output overflow
+ * never opens a slot.
+ *
+ * The walk is bounded, which moves one boundary the plan calls out explicitly
+ * (§8): validity is now judged over the part that was WALKED. A value whose tail
+ * lies past the capture ceiling is never read, so a bigint hiding there is never
+ * found and the run succeeds with a projection rather than failing. That is the
+ * price of not serializing 64 MiB to discover it was unusable, and it costs the
+ * model nothing real — the history retains the original object, not the
+ * snapshot, so a value that was never fully validated is still exactly what
+ * `$out(id)` hands back.
  */
 function prepareCompletion(value: unknown, remaining: number, maxOutputBytes: number): DoneFragment {
   if (value === undefined) return {}
-  const stats = newCaptureStats(completionLimits.maxCompletionHistoryNodes)
-  let json: string
+  // The walk may stop only once the value is beyond BOTH uses it could still be
+  // put to. Taking the retention ceiling alone would let a deployment that
+  // retains little turn ordinary mid-sized results into references, which is a
+  // model-visible contract decided by an unrelated knob.
+  const full = projectionLimits.maxCompletionFullBytes
+  const entry = completionLimits.maxCompletionHistoryEntryBytes
+  const stats = newCaptureStats(completionLimits.maxCompletionHistoryNodes, entry > full ? entry : full, full)
+  const slot = capturedObjectCreate(null) as ProjectionSlot
+  slot.node = undefined
+  let snapshot: unknown
   try {
-    json = capturedJsonStringify(snapshotValue(value, new CapturedSet<object>(), stats))
+    snapshot = snapshotValue(value, new CapturedSet<object>(), stats, slot)
   } catch {
     return boundedFailure('invalid-output', 'program completion must be lossless JSON', remaining, maxOutputBytes)
   }
+  projectedCompletion = true
+  if (stats.aborted) {
+    // Past the admission ceiling: unmeasurable without finishing a walk that was
+    // abandoned for good reason, and unretainable whatever the measurement would
+    // have said.
+    runMetrics.rejected = true
+    runMetrics.historyEntries = completionSlots.length
+    runMetrics.historyBytes = retainedBytes
+    return projectCompletion(value, undefined, undefined, slot.node, remaining, maxOutputBytes)
+  }
+  let json: string
+  try {
+    json = capturedJsonStringify(snapshot)
+  } catch {
+    /* c8 ignore next 2 -- unreachable: the walk already refused everything JSON cannot render, so the detached snapshot always serializes. */
+    return boundedFailure('invalid-output', 'program completion must be lossless JSON', remaining, maxOutputBytes)
+  }
   const bytes = capturedBufferByteLength(json, 'utf8')
-  if (bytes > remaining) return outputLimit(maxOutputBytes)
-  retainCompletion(value, bytes, stats)
-  return { json }
+  const id = retainCompletion(value, bytes, stats)
+  runMetrics.captureBytes = bytes
+  runMetrics.captureNodes = stats.nodes
+  runMetrics.retained = id !== undefined
+  runMetrics.rejected = id === undefined
+  runMetrics.historyEntries = completionSlots.length
+  runMetrics.historyBytes = retainedBytes
+  if (bytes <= projectionLimits.maxCompletionFullBytes && bytes <= remaining) {
+    projectedCompletion = false
+    return { json }
+  }
+  return projectCompletion(value, id, bytes, slot.node, remaining, maxOutputBytes)
 }
 
 /** Prepare a thrown program value without sending an unbounded stack across the port. */
@@ -1273,6 +1618,22 @@ async function prepareRemoteBoundary(
   maxOutputBytes: number,
   objectGroup: string,
 ): Promise<DoneFragment> {
+  // A primitive never gets an objectId: the Inspector INLINES its value in the
+  // evaluate response, so by the time this runs the whole thing is already a
+  // detached value in this isolate's heap. Sending it back through
+  // `callFunctionOn` would serialize and reparse it a second time for nothing —
+  // measured at 4.6 s and 2.5 GiB for a 128 MiB string, half of it this second
+  // round trip (`bench/results/g1-exit-gate.json`). The remaining half is the
+  // response that already happened, and no early exit can reach it: it is spent
+  // before this module sees the value at all.
+  //
+  // Applied only when the Inspector actually gave a value. An unserializable
+  // primitive — a bigint, `NaN`, `-0` — arrives as `unserializableValue` with no
+  // `value` at all, and has to go the remote route to reach the boundary as the
+  // real thing rather than as its rendering.
+  if (value.objectId === undefined && capturedObjectHasOwn(value, 'value')) {
+    return prepareBoundary(kind, value.value, remaining, maxOutputBytes)
+  }
   const prepared = await inspectorSession.post('Runtime.callFunctionOn', {
     objectId: boundaryObjectId,
     functionDeclaration: CALL_BOUNDARY,
@@ -1307,6 +1668,8 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
     cancel: new CapturedAbortController(),
   }
   active = run
+  runMetrics = capturedObjectCreate(null) as RealmRunMetrics
+  projectedCompletion = false
 
   // Everything from lease installation onwards is inside the guard: a run must
   // reach exactly one terminal message even if the SETUP fails, or the host
@@ -1317,6 +1680,7 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
     // Inside the guard with the rest of the setup: a malformed run message must
     // still reach a terminal, not strand the host waiting out its wall clock.
     completionLimits = message.completion.limits
+    projectionLimits = message.completion.projection
     installCompletionIntrinsics()
     installNamespaces(message.namespaces)
     const parameters: ReplEvaluateParameters = {
@@ -1377,7 +1741,16 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
     call.reject('tool lease revoked: the run that issued this call has ended')
   }])
   capturedReflectApply(capturedMapClear, run.pending, [])
-  post({ type: 'done', runId: run.id, nonce: run.nonce, ...done })
+  // The projection marker is the run's own nonce, which never reaches the
+  // program: a completion the model built to look like an envelope travels the
+  // ordinary path and arrives without it. Set only alongside a value — a chain
+  // that ran out of budget ends in `output-limit`, which is not a projection.
+  if (refusedAccesses > 0) {
+    runMetrics.refused = refusedAccesses
+    refusedAccesses = 0
+  }
+  const projected = projectedCompletion && done.json !== undefined ? { projected: run.nonce } : {}
+  post({ type: 'done', runId: run.id, nonce: run.nonce, ...done, ...projected, metrics: runMetrics })
 }
 
 port.on('message', (message: HostToRealm) => {

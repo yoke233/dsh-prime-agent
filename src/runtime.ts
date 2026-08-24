@@ -15,7 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { watchHostParent } from './realm/host-parent.js'
 import { installPrimePreset } from './realm/preset-install.js'
-import type { RealmBudgets, RealmCompletionHistoryLimits } from './realm/realm.js'
+import type { RealmBudgets, RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './realm/realm.js'
 
 export const name = 'prime-code-runtime'
 
@@ -68,6 +68,22 @@ const COMPLETION_HISTORY_FIELDS = [
   'maxCompletionHistoryEntryBytes',
 ] as const
 
+/**
+ * Completion projection ceilings, decided in plan §5.2 and restated here on the
+ * same terms as the history defaults above.
+ * `DEFAULT_COMPLETION_PROJECTION_LIMITS` in `src/realm/protocol.ts` is the
+ * single source these must track.
+ */
+const COMPLETION_PROJECTION_DEFAULTS = {
+  maxCompletionFullBytes: 65_536,
+  maxCompletionProjectionBytes: 4_096,
+} as const
+
+const COMPLETION_PROJECTION_FIELDS = [
+  'maxCompletionFullBytes',
+  'maxCompletionProjectionBytes',
+] as const
+
 const DEFAULT_MAX_ACTIVE_REALMS = 8
 const DEFAULT_MAX_IDLE_MS = 600_000
 const DEFAULT_MAX_HOST_CALLS_PER_RUN = 200
@@ -105,6 +121,10 @@ export interface Config {
   maxCompletionHistoryNodes?: number
   /** Capture-time serialized bytes one single retained completion may occupy. */
   maxCompletionHistoryEntryBytes?: number
+  /** Serialized bytes a completion may occupy and still reach the model verbatim. */
+  maxCompletionFullBytes?: number
+  /** Serialized bytes one bounded completion reference may occupy. */
+  maxCompletionProjectionBytes?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -121,6 +141,8 @@ export const Config: z<Config> = z.object({
   maxCompletionHistoryEstimatedBytes: z.natural().min(1).default(COMPLETION_HISTORY_DEFAULTS.maxCompletionHistoryEstimatedBytes),
   maxCompletionHistoryNodes: z.natural().min(1).default(COMPLETION_HISTORY_DEFAULTS.maxCompletionHistoryNodes),
   maxCompletionHistoryEntryBytes: z.natural().min(1).default(COMPLETION_HISTORY_DEFAULTS.maxCompletionHistoryEntryBytes),
+  maxCompletionFullBytes: z.natural().min(1).default(COMPLETION_PROJECTION_DEFAULTS.maxCompletionFullBytes),
+  maxCompletionProjectionBytes: z.natural().min(1).default(COMPLETION_PROJECTION_DEFAULTS.maxCompletionProjectionBytes),
 }) as unknown as z<Config>
 
 /**
@@ -223,6 +245,15 @@ function completionHistoryLimits(config: Config): RealmCompletionHistoryLimits {
   return limits
 }
 
+/** One realm's projection ceilings, defaulted field by field. */
+function completionProjectionLimits(config: Config): RealmCompletionProjectionLimits {
+  const limits = {} as Record<(typeof COMPLETION_PROJECTION_FIELDS)[number], number>
+  for (const field of COMPLETION_PROJECTION_FIELDS) {
+    limits[field] = config[field] ?? COMPLETION_PROJECTION_DEFAULTS[field]
+  }
+  return limits
+}
+
 /**
  * Monitor this host's owner, mount the official one-shot runtime privately, and
  * publish the hybrid runtime. Realm ownership is claimed lazily after an
@@ -284,6 +315,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     fallback,
     budgets: realmBudgets(config),
     completionHistory: completionHistoryLimits(config),
+    completionProjection: completionProjectionLimits(config),
     maxActiveRealms: config.maxActiveRealms ?? DEFAULT_MAX_ACTIVE_REALMS,
     maxIdleMs: config.maxIdleMs ?? DEFAULT_MAX_IDLE_MS,
   })

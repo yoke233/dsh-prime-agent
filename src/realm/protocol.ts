@@ -76,16 +76,87 @@ export const DEFAULT_COMPLETION_HISTORY_LIMITS: RealmCompletionHistoryLimits = {
   maxCompletionHistoryEntryBytes: 8_388_608,
 }
 
-/** Fill in whatever a caller left blank, then reject anything unusable. */
-export function resolveCompletionHistoryLimits(
-  overrides: Partial<RealmCompletionHistoryLimits> | undefined,
-): RealmCompletionHistoryLimits {
-  const limits = { ...DEFAULT_COMPLETION_HISTORY_LIMITS, ...overrides }
+/**
+ * Per-realm ceilings on what a completion may put in FRONT OF THE MODEL, which
+ * is a different budget from what the realm may retain.
+ *
+ * The two are deliberately separate knobs. Collapsing them into one number would
+ * be self-consistent — a value no larger than a projection gains nothing from
+ * being projected — but it would also push every 4-64 KiB result through the
+ * projector, and a model that has to re-fetch a mid-sized result it could have
+ * read directly makes more tool calls, not fewer (plan §5.2, acceptance #16).
+ */
+export interface RealmCompletionProjectionLimits {
+  /**
+   * Serialized bytes a completion may occupy and still cross VERBATIM. Above it
+   * the model gets a bounded envelope instead, even when the wire budget could
+   * have carried the whole value.
+   */
+  maxCompletionFullBytes: number
+  /**
+   * Serialized bytes one RICH envelope may occupy — the rung that carries a
+   * projection of the value.
+   *
+   * It deliberately does not bound the minimal reference below it. That rung is
+   * bounded by the wire budget alone, because a projection ceiling small enough
+   * to reject a 45-byte handle would make the last rung of the chain
+   * unreachable and put an oversized completion back to failing.
+   */
+  maxCompletionProjectionBytes: number
+}
+
+/**
+ * Decided in plan §5.2. `maxCompletionFullBytes` matches upstream IPython's
+ * 65,536-character single-stream truncation, which is the prior the model was
+ * trained against; the projection ceiling comes from the Phase 0 measurement of
+ * real envelopes (rich 265-985 B, minimal reference 86-119 B).
+ */
+export const DEFAULT_COMPLETION_PROJECTION_LIMITS: RealmCompletionProjectionLimits = {
+  maxCompletionFullBytes: 65_536,
+  maxCompletionProjectionBytes: 4_096,
+}
+
+/**
+ * Byte ceiling on the smallest envelope the degradation chain can fall back to.
+ *
+ * It exists to be checked against the WORST legal configuration rather than the
+ * default one: a realm may be configured down to {@link MIN_OUTPUT_BYTES}, which
+ * leaves a completion roughly 254 bytes once the empty log array is paid for. A
+ * minimal reference has to fit inside that with room to spare, or the last rung
+ * of the chain is unreachable and an oversized completion still fails.
+ */
+export const MINIMAL_ENVELOPE_BYTES = 128
+
+/** Reject any ceiling that is not a positive safe integer. */
+function assertPositiveIntegers(limits: Record<string, number>): void {
   for (const [key, value] of Object.entries(limits)) {
     if (!(Number.isSafeInteger(value) && value > 0)) {
       throw new Error(`dsh-prime-agent: ${key} must be a positive safe integer, got ${String(value)}`)
     }
   }
+}
+
+/** Fill in whatever a caller left blank, then reject anything unusable. */
+export function resolveCompletionHistoryLimits(
+  overrides: Partial<RealmCompletionHistoryLimits> | undefined,
+): RealmCompletionHistoryLimits {
+  const limits = { ...DEFAULT_COMPLETION_HISTORY_LIMITS, ...overrides }
+  assertPositiveIntegers(limits)
+  return limits
+}
+
+/**
+ * Fill in whatever a caller left blank, then reject anything unusable.
+ *
+ * The two ceilings are validated independently: no rule ties the full-value
+ * threshold to the projection budget, and a deployment that wants every
+ * completion projected is free to set the first below the second.
+ */
+export function resolveCompletionProjectionLimits(
+  overrides: Partial<RealmCompletionProjectionLimits> | undefined,
+): RealmCompletionProjectionLimits {
+  const limits = { ...DEFAULT_COMPLETION_PROJECTION_LIMITS, ...overrides }
+  assertPositiveIntegers(limits)
   return limits
 }
 
@@ -105,6 +176,34 @@ export interface RealmCompletionPlan {
   /** The handle this run may consume if its completion opens a new slot. */
   id: number
   limits: RealmCompletionHistoryLimits
+  projection: RealmCompletionProjectionLimits
+}
+
+/**
+ * The bounded reference a large completion crosses as, instead of its value.
+ *
+ * Every field is optional except `truncated`, because the chain that produces it
+ * degrades: a full envelope carries the handle, the capture size and a bounded
+ * projection, and the last rung carries little more than the handle. What the
+ * SHAPE never conveys is authenticity — a program can return an object of
+ * exactly this form, and it travels as an ordinary completion. The `projected`
+ * marker on the terminal message is the only discriminator (§7.2).
+ */
+export interface RealmCompletionEnvelope {
+  /** The handle the value was retained under; absent when it was not retained. */
+  $out?: number
+  /** A copyable expression that reaches the value, e.g. `$out(17)`. */
+  use?: string
+  retained?: boolean
+  /** `object`, `array`, `string`, `number`, `boolean` or `null`. */
+  type?: string
+  /** Exact serialized bytes, present only when the capture walk measured them. */
+  serializedBytesAtCapture?: number
+  /** The bounded projection of the value; absent on a minimal reference. */
+  projection?: CodeJsonValue
+  /** Why the value was not retained, present only alongside `retained: false`. */
+  reason?: string
+  truncated: true
 }
 
 /** Program-visible typed rejection contract for one namespace. */
@@ -162,7 +261,62 @@ export type RealmToHost =
   | { type: 'call'; runId: number; nonce: string; id: number; global: string; name: string; json: string }
   | { type: 'log'; runId: number; nonce: string; text: string }
   | { type: 'output-limit'; runId: number; nonce: string }
-  | { type: 'done'; runId: number; nonce: string; json?: string; error?: RealmProgramFailure }
+  | {
+    type: 'done'
+    runId: number
+    nonce: string
+    json?: string
+    error?: RealmProgramFailure
+    /**
+     * Set only when `json` is an envelope the PROJECTOR built, and set to the
+     * run's own nonce.
+     *
+     * The marker and its proof are one field on purpose. Presence answers "is
+     * this a projection", which the envelope's shape cannot: model code may
+     * return an object with a `$out` key and a `use` string, and that value
+     * travels the ordinary completion path with this field absent. The value
+     * answers "did the worker say so", which matters because the field is the
+     * only thing that makes the host treat a completion as runtime-authored
+     * metadata rather than as the program's own result. Neither reaches the
+     * program: the nonce never enters the isolate's model-visible world, and the
+     * marker is stripped from the wire before the value is handed on.
+     */
+    projected?: string
+    /**
+     * This run's contribution to the realm's bounded metrics (plan §11). Absent
+     * when the run had nothing to report, and NEVER carrying content: only
+     * counts, sizes and the resulting history levels.
+     */
+    metrics?: RealmRunMetrics
+  }
+
+/**
+ * One run's completion-history bookkeeping, reported once at settlement.
+ *
+ * Counts are per-run DELTAS rather than generation totals so the host can simply
+ * add them: a hard kill takes the worker's counters with it, and a host that
+ * accumulated snapshots would either lose a generation's activity or count it
+ * twice. The two `history*` fields are the exception — they are levels, not
+ * deltas, and describe the store as it stood when the run settled.
+ */
+export interface RealmRunMetrics {
+  /** Exact serialized bytes of the completion, when the capture walk measured them. */
+  captureBytes?: number
+  /** Object-graph nodes the capture walk counted, when it ran to completion. */
+  captureNodes?: number
+  /** Whether the completion opened a slot or reused one by identity. */
+  retained?: boolean
+  /** Whether a completion was refused admission to the history. */
+  rejected?: boolean
+  /** Slots evicted to make room for this run's completion. */
+  evicted?: number
+  /** Handles this run asked for and did not get, because they had expired. */
+  expired?: number
+  /** History accesses refused for running outside their own cell. */
+  refused?: number
+  historyEntries?: number
+  historyBytes?: number
+}
 
 /** Exact serialized bytes of one string as a JSON string, quotes included. */
 function jsonStringBytes(text: string): number {

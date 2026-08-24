@@ -354,21 +354,30 @@ describe('scenario 2: oversized outer completion', () => {
   })
 })
 
-describe('scenario 3: the hard output cap is unchanged', () => {
-  it('still fails with output-limit when a completion exceeds maxOutputBytes, and spills no artifact', async () => {
-    // 1024 − the 512-byte trailing-notice reserve leaves the realm 512 bytes.
+describe('scenario 3: the hard output cap references instead of failing', () => {
+  it('answers a completion past maxOutputBytes with a bounded reference, and spills no artifact', async () => {
+    // REWRITTEN BY PHASE 2 (plan §9 Phase 2, §10 "affected existing
+    // assertions"). 1024 − the 512-byte trailing-notice reserve leaves the realm
+    // 512 bytes, and 2000 characters do not fit in them. What used to be the
+    // hard cap's failure is now its reference: the cap is still exactly where it
+    // was, but a legal value no longer dies against it.
     const { spillRoot, agent } = await bootPrime({ backend: 'local', maxOutputBytes: 1024 })
 
     const execution = await runCode(agent, `"Z".repeat(2000)`)
 
-    expect(execution.isError).toBe(true)
-    if (!execution.isError) throw new Error('expected the hard cap to fail the run')
-    expect(execution.error.message).toContain('output-limit')
-    expect(execution.error.message).toContain('outer output exceeded 512 bytes')
-    // The diagnostic is small, so nothing was spilled: the hard cap is settled
-    // BEFORE the presentation policy and offers no artifact recovery.
+    expect(execution.isError).toBe(false)
+    const envelope = runValue(execution).result as Record<string, unknown>
+    expect(envelope).toMatchObject({ retained: true, type: 'string', serializedBytesAtCapture: 2002, truncated: true })
+    expect(envelope.use).toBe(`$out(${String(envelope.$out)})`)
+    // The reference is bounded, so it fits the wire whole and nothing was
+    // spilled — the presentation policy never sees a payload worth an artifact.
+    expect(Buffer.byteLength(JSON.stringify(envelope), 'utf8')).toBeLessThanOrEqual(512)
     expect(await spillFiles(spillRoot)).toHaveLength(0)
     expect(textOf(execution.content)).not.toContain('Full formatted result stored at:')
+
+    // And the value the reference names is still there, in full, for the next cell.
+    const recovered = await runCode(agent, `$out(${String(envelope.$out)}).length`)
+    expect(runValue(recovered).result).toBe(2000)
   })
 })
 

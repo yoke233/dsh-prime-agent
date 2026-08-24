@@ -19,11 +19,17 @@ import { CodeRuntime } from '@deepseek-ai/dsh-code-runtime'
 import type { CodeBindingFunction, CodeRunFailure, CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
 import { RealmIdentityStore } from './identity.js'
 import type { RealmVerification } from './identity.js'
-import { HIDDEN_BINDING_MEMBER, MIN_OUTPUT_BYTES, OutputLedger, resolveCompletionHistoryLimits } from './protocol.js'
-import type { RealmCompletionHistoryLimits } from './protocol.js'
+import {
+  HIDDEN_BINDING_MEMBER,
+  MIN_OUTPUT_BYTES,
+  OutputLedger,
+  resolveCompletionHistoryLimits,
+  resolveCompletionProjectionLimits,
+} from './protocol.js'
+import type { RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './protocol.js'
 import { acquireRealmLease, RealmLeaseError } from './realm-lease.js'
-import { PersistentRealm } from './realm.js'
-import type { RealmBudgets, RealmRunNotice } from './realm.js'
+import { addRealmMetrics, emptyRealmMetrics, PersistentRealm } from './realm.js'
+import type { RealmBudgets, RealmMetrics, RealmRunNotice } from './realm.js'
 
 /** The only handshake protocol version this runtime speaks. */
 const HANDSHAKE_PROTOCOL = 1
@@ -64,6 +70,12 @@ export interface PrimeCodeRuntimeOptions {
    * Prime path, so the one-shot fallback keeps the official semantics exactly.
    */
   completionHistory?: Partial<RealmCompletionHistoryLimits>
+  /**
+   * Projection ceilings for every realm this runtime creates: the size past
+   * which a completion is referenced rather than shown, and how much a reference
+   * may itself cost. Blank fields take the plan defaults.
+   */
+  completionProjection?: Partial<RealmCompletionProjectionLimits>
   /** Realms that may hold a worker at once; admission past it reclaims or refuses. */
   maxActiveRealms: number
   /** How long a realm may sit idle before its worker is reclaimed. */
@@ -220,6 +232,14 @@ export class PrimeCodeRuntime extends CodeRuntime {
   private readonly identity: RealmIdentityStore
   private readonly budgets: RealmBudgets
   private readonly completionHistory: RealmCompletionHistoryLimits
+  private readonly completionProjection: RealmCompletionProjectionLimits
+  /**
+   * Counters inherited from realms this runtime has already retired, so the
+   * totals describe the whole process rather than only the realms still pooled.
+   * A retired realm holds nothing, so its history LEVELS are dropped here rather
+   * than carried forward.
+   */
+  private readonly retiredMetrics = emptyRealmMetrics()
   /** The deployment's full output cap, which a pre-worker failure may use whole. */
   private readonly outputBytes: number
   private readonly maxActiveRealms: number
@@ -245,6 +265,7 @@ export class PrimeCodeRuntime extends CodeRuntime {
     // Resolved at construction rather than at first admission, so a bad
     // deployment fails at plugin load instead of on some session's first run.
     this.completionHistory = resolveCompletionHistoryLimits(options.completionHistory)
+    this.completionProjection = resolveCompletionProjectionLimits(options.completionProjection)
     if (!(Number.isSafeInteger(options.maxActiveRealms) && options.maxActiveRealms > 0)) {
       throw new Error(`dsh-prime-agent: maxActiveRealms must be a positive safe integer, got ${String(options.maxActiveRealms)}`)
     }
@@ -270,6 +291,21 @@ export class PrimeCodeRuntime extends CodeRuntime {
       return () => { clearInterval(sweep) }
     }, 'prime realm idle sweep')
     ctx.effect(() => () => this.teardown(), 'prime realm pool teardown')
+  }
+
+  /**
+   * Bounded completion counters across every realm this runtime has hosted
+   * (plan §11).
+   *
+   * Exposed as a getter and nothing else: the numbers are for tests and for a
+   * deployment that wants to check the mechanism is reducing tokens rather than
+   * only relabelling failures. They never reach a logger, the Session, the wire
+   * or the model, and they carry no content.
+   */
+  get metrics(): RealmMetrics {
+    const total = addRealmMetrics(emptyRealmMetrics(), this.retiredMetrics)
+    for (const realm of this.pool.values()) addRealmMetrics(total, realm.metrics)
+    return total
   }
 
   /**
@@ -432,6 +468,7 @@ export class PrimeCodeRuntime extends CodeRuntime {
           realmId,
           budgets: this.budgets,
           completionHistory: this.completionHistory,
+          completionProjection: this.completionProjection,
         })
         this.pool.set(realmId, realm)
         return { result: realm.run(request, onStart) }
@@ -488,6 +525,9 @@ export class PrimeCodeRuntime extends CodeRuntime {
    */
   private reclaim(realmId: string, realm: PersistentRealm): void {
     this.pool.delete(realmId)
+    // Take its counters before the worker goes: reclamation releases the whole
+    // history, so the levels it was reporting stop being true immediately.
+    addRealmMetrics(this.retiredMetrics, { ...realm.metrics, historyEntries: 0, historyBytes: 0 })
     const retirement = (async () => {
       try {
         await realm.dispose()

@@ -119,6 +119,38 @@ function notices(result: CodeRunResult): string[] {
   return result.logs.filter(line => line.startsWith('[prime-realm] '))
 }
 
+/**
+ * Everything one result puts on the wire, in the ledger's own units: the
+ * serialized log array plus the serialized completion or diagnostic. This is the
+ * number `maxOutputBytes` bounds, and Phase 2's degradation chain has to keep it
+ * bounded whichever rung it ends on.
+ */
+function wireBytes(result: CodeRunResult): number {
+  const logs = Buffer.byteLength(JSON.stringify(result.logs), 'utf8')
+  if (result.error) return logs + jsonStringBytes(result.error.message)
+  return logs + (Object.hasOwn(result, 'value') ? Buffer.byteLength(JSON.stringify(result.value), 'utf8') : 0)
+}
+
+/** One projected completion, as the worker's envelope reaches the model. */
+interface Envelope {
+  $out?: number
+  use?: string
+  retained?: boolean
+  type?: string
+  serializedBytesAtCapture?: number
+  projection?: Record<string, unknown>
+  reason?: string
+  truncated: true
+}
+
+/** Read one result as a projection envelope, failing loudly when it is not one. */
+function envelopeOf(result: CodeRunResult): Envelope {
+  expect(result.error).toBeUndefined()
+  const value = result.value as Envelope
+  expect(value?.truncated).toBe(true)
+  return value
+}
+
 describe('completion contract: values that cross the boundary unchanged', () => {
   it('returns a small lossless completion in its original shape', async () => {
     // CURRENT CONTRACT (plan §4.2, §8 "small legal completion"): a small value is
@@ -265,11 +297,14 @@ describe('completion contract: invalid-output', () => {
 })
 
 describe('completion contract: output-limit byte boundaries', () => {
-  it('admits a completion that exactly fills the cap and refuses the next byte', async () => {
-    // CURRENT CONTRACT (plan §6.1): the ledger opens at 2 bytes for the empty
-    // logs array, so a bare completion may use `maxOutputBytes - 2`. Both
-    // boundaries are pinned because Phase 2's degradation chain has to keep the
-    // final wire cap exactly where it is.
+  it('admits a completion that exactly fills the cap and references the next byte', async () => {
+    // REWRITTEN BY PHASE 2 (plan §4.3, §6.1, §9 Phase 2). The ledger still opens
+    // at 2 bytes for the empty logs array, so a bare completion may still use
+    // `maxOutputBytes - 2` VERBATIM — that half of the Phase 0 contract is
+    // unchanged and pinned as tightly as before. What moved is the byte after
+    // it: a completion the wire cannot carry whole is no longer a failure, it is
+    // a successful bounded reference, and the cap is what the reference is
+    // measured against rather than what the value is refused by.
     const realm = createRealm({ maxOutputBytes: MIN_OUTPUT_BYTES })
     const fits = MIN_OUTPUT_BYTES - 2 - 2 // minus the empty-array bytes, minus the JSON quotes
 
@@ -278,17 +313,24 @@ describe('completion contract: output-limit byte boundaries', () => {
     expect(jsonStringBytes(atCap.value as string)).toBe(MIN_OUTPUT_BYTES - 2)
 
     const overCap = await realm.run({ program: `"y".repeat(${fits + 1})`, bindings: [] })
-    expect(overCap.error).toEqual({ kind: 'output-limit', message: `outer output exceeded ${MIN_OUTPUT_BYTES} bytes` })
-    expect(overCap.value).toBeUndefined()
-    // An oversized completion is a presentation failure, not a heap failure: the
-    // namespace survives. Phase 2 turns this case into a SUCCESS, so this
-    // expectation is one the plan rewrites rather than deletes.
+    const envelope = envelopeOf(overCap)
+    // At this cap the rich envelope cannot fit either — it would carry a 253
+    // character string that is under the projector's own truncation threshold —
+    // so the chain lands on the minimal reference, which is the rung the plan
+    // sizes against exactly this configuration.
+    expect(envelope.projection).toBeUndefined()
+    expect(envelope.use).toBe(`$out(${envelope.$out ?? 0})`)
+    expect(wireBytes(overCap)).toBeLessThanOrEqual(MIN_OUTPUT_BYTES)
+    // Still not a heap failure: the namespace survives, as it did when this was
+    // reported as an overflow.
     expect(realm.generation).toBe(1)
   })
 
   it('charges the cap in UTF-8 bytes rather than in characters', async () => {
-    // CURRENT CONTRACT: a 3-byte code point costs three times an ASCII one. Any
-    // Phase 2/3 projector that counts characters would silently move this cap.
+    // CURRENT CONTRACT: a 3-byte code point costs three times an ASCII one. The
+    // Phase 2 projector counts the same way — the last assertion here is what
+    // catches a projector that switched to characters, because a character-
+    // counting boundary would have let this value cross whole.
     const realm = createRealm({ maxOutputBytes: MIN_OUTPUT_BYTES })
     const fitting = Math.floor((MIN_OUTPUT_BYTES - 4) / 3)
 
@@ -300,15 +342,18 @@ describe('completion contract: output-limit byte boundaries', () => {
     expect(jsonStringBytes(multibyte.value as string)).toBe(fitting * 3 + 2)
 
     const overCap = await realm.run({ program: `"中".repeat(${fitting + 1})`, bindings: [] })
-    expect(overCap.error?.kind).toBe('output-limit')
+    expect(envelopeOf(overCap).truncated).toBe(true)
+    expect(wireBytes(overCap)).toBeLessThanOrEqual(MIN_OUTPUT_BYTES)
     expect(realm.generation).toBe(1)
   })
 
   it('spends one shared budget on logs and the completion together', async () => {
     // CURRENT CONTRACT (plan §6.1 "model projection budget"): logs are admitted
-    // first and shrink what the completion may use. Phase 3 changes how logs are
-    // COLLECTED, but the plan keeps one merged wire cap, so this arithmetic has
-    // to keep holding.
+    // first and shrink what the completion may use. One merged wire cap is the
+    // settled shape, so this arithmetic holds regardless of how logs are ever
+    // collected. Phase 2 rewrote only what happens once the completion no longer
+    // fits what the logs left: it is referenced rather than refused, and the logs
+    // it was competing with are all still there.
     const realm = createRealm({ maxOutputBytes: MIN_OUTPUT_BYTES })
     const logged = 'x'.repeat(100)
     const remaining = MIN_OUTPUT_BYTES - 2 - jsonStringBytes(logged)
@@ -321,26 +366,52 @@ describe('completion contract: output-limit byte boundaries', () => {
     expect(jsonStringBytes(atCap.value as string)).toBe(remaining)
 
     const overCap = await realm.run({ program: program(remaining - 1), bindings: [] })
-    expect(overCap.error).toEqual({ kind: 'output-limit', message: `outer output exceeded ${MIN_OUTPUT_BYTES} bytes` })
-    // The already-admitted log survives the completion's overflow: only the
-    // completion is dropped, and the retained prefix is whole entries.
+    expect(envelopeOf(overCap).truncated).toBe(true)
     expect(overCap.logs).toEqual([logged])
+    expect(wireBytes(overCap)).toBeLessThanOrEqual(MIN_OUTPUT_BYTES)
+    expect(realm.generation).toBe(1)
+  })
+
+  it('still reports output-limit when even a minimal reference does not fit', async () => {
+    // REWRITTEN BY PHASE 2 (plan §6.1, §7.2, acceptance #12). The last rung of
+    // the chain is a real one: when the logs have eaten the budget down past what
+    // a bare `$out(N)` reference costs, the run reports `output-limit` rather
+    // than sending a truncated envelope. This is the case the plan requires the
+    // log accounting to be re-reconciled for — the diagnostic wins, and the logs
+    // are cut to whole entries to pay for it.
+    const realm = createRealm({ maxOutputBytes: MIN_OUTPUT_BYTES })
+    const logged = 'x'.repeat(222) // leaves 28 bytes, under the ~43-byte minimal reference
+
+    const starved = await realm.run({
+      program: `console.log("x".repeat(222))\n({ rows: [1, 2, 3] })`,
+      bindings: [],
+    })
+    expect(starved.error).toEqual({ kind: 'output-limit', message: `outer output exceeded ${MIN_OUTPUT_BYTES} bytes` })
+    // The whole-entry prefix rule decides the logs: this one entry plus the fixed
+    // diagnostic does not fit, so it is dropped whole rather than sliced.
+    expect(starved.logs).toEqual([])
+    expect(jsonStringBytes(logged)).toBeGreaterThan(MIN_OUTPUT_BYTES - jsonStringBytes(`outer output exceeded ${MIN_OUTPUT_BYTES} bytes`))
+    expect(wireBytes(starved)).toBeLessThanOrEqual(MIN_OUTPUT_BYTES)
     expect(realm.generation).toBe(1)
   })
 
   it('separates a completion overflow from a log overflow by whether the realm survives', async () => {
     // CURRENT CONTRACT: the asymmetry is load-bearing and easy to lose. A
-    // completion that overflows is reported by a worker that already finished
-    // the program, so the namespace is intact; a log that overflows is reported
-    // mid-run and costs the generation, dropping every line. Phase 3 is the
-    // phase that is allowed to change the log half.
+    // completion too big for the wire is handled by a worker that already
+    // finished the program, so the namespace is intact; a log that overflows is
+    // reported mid-run and costs the generation, dropping every line. Both halves
+    // are SETTLED CONTRACT, not provisional behaviour awaiting a later phase:
+    // changing either one means rewriting this case first and arguing for the new
+    // asymmetry on its own merits. Phase 2 changed only how the completion half
+    // REPORTS — a reference instead of a refusal — and the survival contract this
+    // case exists to pin is unchanged.
     const realm = createRealm({ maxOutputBytes: MIN_OUTPUT_BYTES })
 
     const completionOverflow = await realm.run({
       program: 'const keptAcrossCompletionOverflow = "v1"\n"y".repeat(4000)',
       bindings: [],
     })
-    expect(completionOverflow.error?.kind).toBe('output-limit')
+    expect(envelopeOf(completionOverflow).truncated).toBe(true)
     expect(realm.generation).toBe(1)
     expect((await realm.run({ program: 'keptAcrossCompletionOverflow', bindings: [] })).value).toBe('v1')
 
@@ -552,9 +623,10 @@ describe('completion contract: host-level notices and the notice reserve', () =>
 
   it('gives the realm the deployment cap minus the fixed notice reserve', async () => {
     // CURRENT CONTRACT: the realm never sees the last 512 bytes of the
-    // deployment's `maxOutputBytes`, and the overflow diagnostic quotes the
-    // REDUCED cap. Phase 2's minimum-envelope constant is budgeted against this
-    // reduced number, not against the configured one.
+    // deployment's `maxOutputBytes`. Phase 2 rewrote only what the realm DOES at
+    // that reduced cap — a value past it is referenced rather than refused — and
+    // the reserve's own guarantee is asserted here against the envelope instead
+    // of against the diagnostic that used to take its place.
     await makeRoot('dsh-prime-contract-reserve-')
     const maxOutputBytes = 2_048
     const realmBytes = maxOutputBytes - NOTICE_RESERVE_BYTES
@@ -564,14 +636,14 @@ describe('completion contract: host-level notices and the notice reserve', () =>
       program: `"Z".repeat(${realmBytes})`,
       bindings: primeFor('session-reserve'),
     })
-    expect(overflowed.error).toEqual({ kind: 'output-limit', message: `outer output exceeded ${realmBytes} bytes` })
+    const envelope = envelopeOf(overflowed)
+    expect(envelope.type).toBe('string')
+    expect(envelope.serializedBytesAtCapture).toBe(realmBytes + 2)
     expect(notices(overflowed)).toEqual(['[prime-realm] live namespace started empty'])
 
     // Even with the notice appended, the whole wire payload stays under the
     // deployment's cap — the property the reserve exists to guarantee.
-    const wireBytes = Buffer.byteLength(JSON.stringify(overflowed.logs), 'utf8')
-      + jsonStringBytes(overflowed.error?.message ?? '')
-    expect(wireBytes).toBeLessThanOrEqual(maxOutputBytes)
+    expect(wireBytes(overflowed)).toBeLessThanOrEqual(maxOutputBytes)
 
     // One byte under the reduced cap still crosses, so the reserve is a clean
     // subtraction rather than an approximate margin.
@@ -581,6 +653,40 @@ describe('completion contract: host-level notices and the notice reserve', () =>
     })
     expect(fits.error).toBeUndefined()
     expect(jsonStringBytes(fits.value as string)).toBe(realmBytes - 2)
+  })
+
+  it('fits a minimal reference beside the notice reserve at the smallest legal cap', async () => {
+    // REWRITTEN BY PHASE 2 (plan §6.1, §10 "the minimal envelope constant is
+    // verified together with the notice reserve"). The 128-byte constant is
+    // sized against the WORST legal deployment, not the default one: at the
+    // configured floor the realm sees 256 bytes and the completion has about 254
+    // of them. If the constant were budgeted against a comfortable cap, this is
+    // the configuration where the last rung of the chain would quietly stop
+    // being reachable and every large completion would fail instead.
+    await makeRoot('dsh-prime-contract-minimal-')
+    const maxOutputBytes = MIN_OUTPUT_BYTES + NOTICE_RESERVE_BYTES
+    const ctx = await startHost({ maxOutputBytes })
+
+    const referenced = await ctx.codeRuntime.run({
+      program: `"Z".repeat(4000)`,
+      bindings: primeFor('session-minimal'),
+    })
+    const envelope = envelopeOf(referenced)
+    expect(envelope.use).toBe(`$out(${envelope.$out ?? 0})`)
+    expect(Buffer.byteLength(JSON.stringify(envelope), 'utf8')).toBeLessThanOrEqual(128)
+
+    // The notice is appended after the realm finalized its ledger, and the whole
+    // payload still clears the deployment's cap.
+    expect(notices(referenced)).toEqual(['[prime-realm] live namespace started empty'])
+    expect(wireBytes(referenced)).toBeLessThanOrEqual(maxOutputBytes)
+
+    // And the reference works: the value it names survived the cap that could
+    // not carry it.
+    const recovered = await ctx.codeRuntime.run({
+      program: `$out(${envelope.$out ?? 0}).length`,
+      bindings: primeFor('session-minimal'),
+    })
+    expect(recovered.value).toBe(4000)
   })
 
   it('refuses a deployment cap that cannot pay for both the reserve and the floor', async () => {

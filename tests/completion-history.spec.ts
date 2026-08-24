@@ -114,6 +114,8 @@ interface HistoryRow {
   type: string
   serializedBytesAtCapture: number
   nodes: number
+  /** Own key total of a root object; 0 for every other type. */
+  keyCount: number
 }
 
 /**
@@ -210,18 +212,21 @@ describe('completion history: what enters a slot', () => {
     expect((missing.value as unknown as CaughtRejection).message).toContain('recompute it')
   })
 
-  it('opens no slot for an exception, an invalid completion or an overflowing one', async () => {
+  it('opens no slot for an exception or an invalid completion', async () => {
     // Plan §7.1: only the SUCCESS arm of the boundary retains. `startRun`'s
     // `finally` releases the object group on every path, so a slot opened there
     // would also capture values from runs that failed.
     const realm = createRealm()
     expect((await realm.run({ program: 'throw new Error("boom")', bindings: [] })).error?.kind).toBe('exception')
     expect((await realm.run({ program: '({ fn: () => 1 })', bindings: [] })).error).toEqual(INVALID_COMPLETION)
-    // Phase 1 keeps the oversized completion failing; Phase 2 turns it into a
-    // projection, and the "success only" retention rule is what makes that a
-    // change of ONE branch rather than of the retention point.
-    expect((await realm.run({ program: '"y".repeat(70000)', bindings: [] })).error?.kind).toBe('output-limit')
     expect(await history(realm)).toEqual([])
+    // REWRITTEN BY PHASE 2 (plan §9 Phase 2): the oversized completion used to
+    // belong on this list, as the third way a run could fail. It is now a
+    // success that retains — which is the whole point of the phase, and which
+    // this suite covers where the projection lives rather than here.
+    const projected = await realm.run({ program: '"y".repeat(70000)', bindings: [] })
+    expect(projected.error).toBeUndefined()
+    expect(await history(realm)).toHaveLength(1)
     // None of the three cost the realm its heap.
     expect(realm.generation).toBe(1)
   })
@@ -447,10 +452,13 @@ describe('completion history: budgets and eviction', () => {
     expect(await history(nodeBound)).toEqual(nodeBefore)
   })
 
-  it('publishes only bounded metadata, never the keys it sampled', async () => {
-    // The walk samples root keys for Phase 2 to build on, but nothing stores or
-    // publishes them: the boundary admits a 20,000-character key, so sixteen of
-    // them in a metadata row would be a quarter-megabyte answer to `list()`.
+  it('publishes the key COUNT but never the keys themselves', async () => {
+    // REWRITTEN BY PHASE 4 (plan §9 Phase 2, §7.4): the count is one small
+    // integer whatever the value's shape, and it answers the question a model
+    // actually asks of a handle — how big is this. The NAMES stay out, and that
+    // is the part this test exists to hold: the boundary admits a
+    // 20,000-character key, so sixteen of them in a row would be a
+    // quarter-megabyte answer to a metadata query.
     const realm = createRealm()
     await realm.run({
       program: 'const wide = {}\nfor (let i = 0; i < 40; i++) wide["k".repeat(500) + i] = i\nwide',
@@ -458,8 +466,9 @@ describe('completion history: budgets and eviction', () => {
     })
     const rows = await history(realm)
     expect(rows).toHaveLength(1)
-    expect(Object.keys(rows[0] ?? {}).sort()).toEqual(['id', 'nodes', 'serializedBytesAtCapture', 'type'])
-    // Bounded regardless of how wide the value was.
+    expect(Object.keys(rows[0] ?? {}).sort()).toEqual(['id', 'keyCount', 'nodes', 'serializedBytesAtCapture', 'type'])
+    expect(rows[0]?.keyCount).toBe(40)
+    // Bounded regardless of how wide the value was, and of how long its keys are.
     expect(JSON.stringify(rows[0]).length).toBeLessThan(120)
   })
 
@@ -514,6 +523,7 @@ describe('completion history: explicit release', () => {
       type: 'object',
       serializedBytesAtCapture: rows[0]?.serializedBytesAtCapture,
       nodes: rows[0]?.nodes,
+      keyCount: rows[0]?.keyCount,
     }])
   })
 

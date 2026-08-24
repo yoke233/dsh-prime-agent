@@ -14,8 +14,8 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { CodeRuntime } from '@deepseek-ai/dsh-code-runtime';
 import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
-import type { RealmCompletionHistoryLimits } from './protocol.js';
-import type { RealmBudgets } from './realm.js';
+import type { RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './protocol.js';
+import type { RealmBudgets, RealmMetrics } from './realm.js';
 /** Everything the runtime needs that is not a per-run input. */
 export interface PrimeCodeRuntimeOptions {
     /**
@@ -34,6 +34,12 @@ export interface PrimeCodeRuntimeOptions {
      * Prime path, so the one-shot fallback keeps the official semantics exactly.
      */
     completionHistory?: Partial<RealmCompletionHistoryLimits>;
+    /**
+     * Projection ceilings for every realm this runtime creates: the size past
+     * which a completion is referenced rather than shown, and how much a reference
+     * may itself cost. Blank fields take the plan defaults.
+     */
+    completionProjection?: Partial<RealmCompletionProjectionLimits>;
     /** Realms that may hold a worker at once; admission past it reclaims or refuses. */
     maxActiveRealms: number;
     /** How long a realm may sit idle before its worker is reclaimed. */
@@ -52,6 +58,14 @@ export declare class PrimeCodeRuntime extends CodeRuntime {
     private readonly identity;
     private readonly budgets;
     private readonly completionHistory;
+    private readonly completionProjection;
+    /**
+     * Counters inherited from realms this runtime has already retired, so the
+     * totals describe the whole process rather than only the realms still pooled.
+     * A retired realm holds nothing, so its history LEVELS are dropped here rather
+     * than carried forward.
+     */
+    private readonly retiredMetrics;
     /** The deployment's full output cap, which a pre-worker failure may use whole. */
     private readonly outputBytes;
     private readonly maxActiveRealms;
@@ -68,6 +82,16 @@ export declare class PrimeCodeRuntime extends CodeRuntime {
     private readonly admissionStopped;
     private disposed;
     constructor(ctx: Context, options: PrimeCodeRuntimeOptions);
+    /**
+     * Bounded completion counters across every realm this runtime has hosted
+     * (plan §11).
+     *
+     * Exposed as a getter and nothing else: the numbers are for tests and for a
+     * deployment that wants to check the mechanism is reducing tokens rather than
+     * only relabelling failures. They never reach a logger, the Session, the wire
+     * or the model, and they carry no content.
+     */
+    get metrics(): RealmMetrics;
     /**
      * Route one request. A non-Prime request is delegated verbatim; a Prime
      * request is authenticated first and never degrades to the one-shot path.

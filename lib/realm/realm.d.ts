@@ -12,8 +12,49 @@
  * @module dsh-prime-agent/realm/realm
  */
 import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
-import type { RealmCompletionHistoryLimits } from './protocol.js';
-export type { RealmCompletionHistoryLimits } from './protocol.js';
+import type { RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './protocol.js';
+export type { RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './protocol.js';
+/**
+ * Bounded counters for one realm's completion traffic (plan §11).
+ *
+ * Deliberately content-free: sizes, counts and the resulting history levels, and
+ * nothing that could identify a value, a path, a credential or a session. The
+ * reduction ratio the plan asks for is `projectionBytes / captureBytes` and is
+ * left to the reader rather than stored, so the two numbers it comes from stay
+ * independently checkable.
+ */
+export interface RealmMetrics {
+    /** Completions the model received verbatim. */
+    completionsFull: number;
+    /** Completions the model received as a bounded reference instead. */
+    completionsProjected: number;
+    /** Projections that had to degrade past the rich envelope to a minimal one. */
+    completionsMinimal: number;
+    /** Runs that ended in `output-limit`, whatever exhausted the budget. */
+    outputLimits: number;
+    /** Exact serialized bytes of every completion the capture walk measured. */
+    captureBytes: number;
+    /** Wire bytes the projections actually cost. */
+    projectionBytes: number;
+    completionsRetained: number;
+    completionsRejected: number;
+    slotsEvicted: number;
+    /** Handles asked for and refused because they had expired. */
+    handlesExpired: number;
+    /** History accesses refused for running outside their own cell. */
+    accessesRefused: number;
+    /** Slots and capture bytes the history held when its realm last settled a run. */
+    historyEntries: number;
+    historyBytes: number;
+}
+/** A zeroed counter set, and the shape every accumulator here starts from. */
+export declare function emptyRealmMetrics(): RealmMetrics;
+/**
+ * Fold one realm's counters into a running total. The `history*` pair are LEVELS
+ * rather than deltas, so they are summed across realms — the total is what the
+ * pool holds — but never accumulated over time within one realm.
+ */
+export declare function addRealmMetrics(total: RealmMetrics, part: RealmMetrics): RealmMetrics;
 /** Per-run resource ceilings. Every field is an increment for ONE run, not a realm lifetime total. */
 export interface RealmBudgets {
     /** Event-loop busy-time budget for one run, measured as the worker's ELU delta since that run started. */
@@ -62,6 +103,8 @@ export declare class PersistentRealm {
     readonly realmId: string;
     private readonly budgets;
     private readonly completionHistory;
+    private readonly completionProjection;
+    private readonly counters;
     private readonly queue;
     private readonly inflight;
     private readonly terminations;
@@ -79,6 +122,8 @@ export declare class PersistentRealm {
         budgets: RealmBudgets;
         /** Completion-history ceilings; every field left blank takes its plan default. */
         completionHistory?: Partial<RealmCompletionHistoryLimits>;
+        /** Projection ceilings; every field left blank takes its plan default. */
+        completionProjection?: Partial<RealmCompletionProjectionLimits>;
     });
     /**
      * The current worker generation, counting from 1. A hard kill schedules the
@@ -86,6 +131,8 @@ export declare class PersistentRealm {
      * so repeated reads between two runs stay stable.
      */
     get generation(): number;
+    /** This realm's bounded completion counters, as of the last settled run. */
+    get metrics(): RealmMetrics;
     /** No run is active and none is waiting. */
     get idle(): boolean;
     /** Epoch milliseconds of the most recent admission or settlement, for pool LRU/TTL. */
@@ -135,6 +182,8 @@ export declare class PersistentRealm {
     private onHostCallSettled;
     /** Settle one run after its worker terminal and accepted host calls are both complete. */
     private onDone;
+    /** Fold one run's worker-side completion bookkeeping into this realm's counters. */
+    private recordRunMetrics;
     /**
      * Charge one binding call against this run's host-call budgets, or report why
      * it is refused. Counting happens BEFORE the host function is reached, so a

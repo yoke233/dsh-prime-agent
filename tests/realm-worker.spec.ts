@@ -573,13 +573,19 @@ describe('budgets and completion', () => {
     expect(realm.generation).toBe(2)
   })
 
-  it('fails an oversized completion without losing the realm heap', async () => {
+  it('references an oversized completion without losing the realm heap', async () => {
+    // REWRITTEN BY PHASE 2 (plan §9 Phase 2, §10 "affected existing
+    // assertions"): a completion too large for the wire is no longer a failure.
+    // The cell succeeds, the model gets a bounded reference to the value, and
+    // the namespace it was declared in is untouched — which is the half of this
+    // case that was always the point.
     const realm = createRealm({ maxOutputBytes: 512 })
     const result = await realm.run({
       program: 'const keptAfterOversizedCompletion = "v1"\n"y".repeat(2000)',
       bindings: [],
     })
-    expect(result.error?.kind).toBe('output-limit')
+    expect(result.error).toBeUndefined()
+    expect(result.value).toMatchObject({ retained: true, type: 'string', truncated: true })
     expect(realm.generation).toBe(1)
     expect((await realm.run({ program: 'keptAfterOversizedCompletion', bindings: [] })).value).toBe('v1')
   })
