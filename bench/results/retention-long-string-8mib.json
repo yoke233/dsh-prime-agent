@@ -1,0 +1,210 @@
+{
+  "shape": "long-string",
+  "unitMib": 8,
+  "slots": 8,
+  "node": "v24.18.0",
+  "curves": {
+    "identity/bound": {
+      "points": [
+        {
+          "slot": 1,
+          "heapBytes": 8397448,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 2,
+          "heapBytes": 16786432,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 3,
+          "heapBytes": 25175208,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 4,
+          "heapBytes": 33564120,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 5,
+          "heapBytes": 41953008,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 6,
+          "heapBytes": 50343824,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 7,
+          "heapBytes": 58732552,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 8,
+          "heapBytes": 67121152,
+          "captureBytes": 8388608
+        }
+      ],
+      "totalHeapBytes": 67121664,
+      "captureMs": 67.25,
+      "probe": 16
+    },
+    "identity/unbound": {
+      "points": [
+        {
+          "slot": 1,
+          "heapBytes": 8389784,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 2,
+          "heapBytes": 16778664,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 3,
+          "heapBytes": 25167624,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 4,
+          "heapBytes": 33567656,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 5,
+          "heapBytes": 41956360,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 6,
+          "heapBytes": 50345200,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 7,
+          "heapBytes": 58733928,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 8,
+          "heapBytes": 67122656,
+          "captureBytes": 8388608
+        }
+      ],
+      "totalHeapBytes": 67122672,
+      "captureMs": 65.092,
+      "probe": 8
+    },
+    "snapshot/bound": {
+      "points": [
+        {
+          "slot": 1,
+          "heapBytes": 8389352,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 2,
+          "heapBytes": 16778232,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 3,
+          "heapBytes": 25166960,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 4,
+          "heapBytes": 33555688,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 5,
+          "heapBytes": 41944416,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 6,
+          "heapBytes": 50333144,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 7,
+          "heapBytes": 58721872,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 8,
+          "heapBytes": 67110600,
+          "captureBytes": 8388608
+        }
+      ],
+      "totalHeapBytes": 67110616,
+      "captureMs": 64.338,
+      "probe": 16
+    },
+    "snapshot/unbound": {
+      "points": [
+        {
+          "slot": 1,
+          "heapBytes": 8388960,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 2,
+          "heapBytes": 16777840,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 3,
+          "heapBytes": 25166568,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 4,
+          "heapBytes": 33555296,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 5,
+          "heapBytes": 41944024,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 6,
+          "heapBytes": 50332752,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 7,
+          "heapBytes": 58721480,
+          "captureBytes": 8388608
+        },
+        {
+          "slot": 8,
+          "heapBytes": 67110208,
+          "captureBytes": 8388608
+        }
+      ],
+      "totalHeapBytes": 67110224,
+      "captureMs": 64.025,
+      "probe": 8
+    }
+  },
+  "drift": {
+    "grow10x": {
+      "name": "grow ~10x in place",
+      "skipped": "completion value is a primitive; not mutable in place"
+    },
+    "shrink": {
+      "name": "truncate to 1 element",
+      "skipped": "completion value is a primitive; not mutable in place"
+    },
+    "nonJson": {
+      "name": "mutate into non-JSON",
+      "skipped": "completion value is a primitive; not mutable in place"
+    }
+  }
+}

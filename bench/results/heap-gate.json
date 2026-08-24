@@ -1,0 +1,176 @@
+{
+  "node": "v24.18.0",
+  "mib": 64,
+  "heaps": [
+    512,
+    768,
+    1024
+  ],
+  "rows": [
+    {
+      "shape": "flat-array",
+      "mib": 64,
+      "heapMb": 512,
+      "survived": true,
+      "error": null,
+      "totalMs": 2142.216,
+      "jsonBytes": 67108861,
+      "rssPeakDeltaBytes": 709902336,
+      "maxRssBytes": 863064064
+    },
+    {
+      "shape": "record-array",
+      "mib": 64,
+      "heapMb": 512,
+      "survived": true,
+      "error": null,
+      "totalMs": 844.693,
+      "jsonBytes": 64581137,
+      "rssPeakDeltaBytes": 517726208,
+      "maxRssBytes": 779816960
+    },
+    {
+      "shape": "wide-object",
+      "mib": 64,
+      "heapMb": 512,
+      "survived": true,
+      "error": null,
+      "totalMs": 4705.668,
+      "jsonBytes": 55924041,
+      "rssPeakDeltaBytes": 312684544,
+      "maxRssBytes": 641568768
+    },
+    {
+      "shape": "long-string",
+      "mib": 64,
+      "heapMb": 512,
+      "survived": true,
+      "error": null,
+      "totalMs": 70.403,
+      "jsonBytes": 67108864,
+      "rssPeakDeltaBytes": 111333376,
+      "maxRssBytes": 385953792
+    },
+    {
+      "shape": "deep-nested",
+      "mib": 64,
+      "heapMb": 512,
+      "survived": true,
+      "error": null,
+      "totalMs": 546.17,
+      "jsonBytes": 67114995,
+      "rssPeakDeltaBytes": 273793024,
+      "maxRssBytes": 514609152
+    },
+    {
+      "shape": "flat-array",
+      "mib": 64,
+      "heapMb": 768,
+      "survived": true,
+      "error": null,
+      "totalMs": 2095.861,
+      "jsonBytes": 67108861,
+      "rssPeakDeltaBytes": 760430592,
+      "maxRssBytes": 912068608
+    },
+    {
+      "shape": "record-array",
+      "mib": 64,
+      "heapMb": 768,
+      "survived": true,
+      "error": null,
+      "totalMs": 762.677,
+      "jsonBytes": 64581137,
+      "rssPeakDeltaBytes": 527917056,
+      "maxRssBytes": 807829504
+    },
+    {
+      "shape": "wide-object",
+      "mib": 64,
+      "heapMb": 768,
+      "survived": true,
+      "error": null,
+      "totalMs": 5064.71,
+      "jsonBytes": 55924041,
+      "rssPeakDeltaBytes": 360058880,
+      "maxRssBytes": 689070080
+    },
+    {
+      "shape": "long-string",
+      "mib": 64,
+      "heapMb": 768,
+      "survived": true,
+      "error": null,
+      "totalMs": 58.377,
+      "jsonBytes": 67108864,
+      "rssPeakDeltaBytes": 122068992,
+      "maxRssBytes": 386007040
+    },
+    {
+      "shape": "deep-nested",
+      "mib": 64,
+      "heapMb": 768,
+      "survived": true,
+      "error": null,
+      "totalMs": 574.189,
+      "jsonBytes": 67114995,
+      "rssPeakDeltaBytes": 282963968,
+      "maxRssBytes": 513900544
+    },
+    {
+      "shape": "flat-array",
+      "mib": 64,
+      "heapMb": 1024,
+      "survived": true,
+      "error": null,
+      "totalMs": 2347.829,
+      "jsonBytes": 67108861,
+      "rssPeakDeltaBytes": 882098176,
+      "maxRssBytes": 1034715136
+    },
+    {
+      "shape": "record-array",
+      "mib": 64,
+      "heapMb": 1024,
+      "survived": true,
+      "error": null,
+      "totalMs": 765.678,
+      "jsonBytes": 64581137,
+      "rssPeakDeltaBytes": 508059648,
+      "maxRssBytes": 808136704
+    },
+    {
+      "shape": "wide-object",
+      "mib": 64,
+      "heapMb": 1024,
+      "survived": true,
+      "error": null,
+      "totalMs": 5112.315,
+      "jsonBytes": 55924041,
+      "rssPeakDeltaBytes": 458141696,
+      "maxRssBytes": 798859264
+    },
+    {
+      "shape": "long-string",
+      "mib": 64,
+      "heapMb": 1024,
+      "survived": true,
+      "error": null,
+      "totalMs": 70.097,
+      "jsonBytes": 67108864,
+      "rssPeakDeltaBytes": 122138624,
+      "maxRssBytes": 385863680
+    },
+    {
+      "shape": "deep-nested",
+      "mib": 64,
+      "heapMb": 1024,
+      "survived": true,
+      "error": null,
+      "totalMs": 527.183,
+      "jsonBytes": 67114995,
+      "rssPeakDeltaBytes": 274722816,
+      "maxRssBytes": 512983040
+    }
+  ]
+}

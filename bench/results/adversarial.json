@@ -1,0 +1,75 @@
+{
+  "node": "v24.18.0",
+  "amplification": [
+    {
+      "leafBytes": 1024,
+      "fanout": 2,
+      "levels": 8,
+      "liveHeapBytes": 11296,
+      "snapshotMs": 2.104,
+      "stringifyMs": 0.981,
+      "nodes": 26879,
+      "liveNodes": 112,
+      "nodeAmplification": 240,
+      "jsonBytes": 267763,
+      "ok": true
+    },
+    {
+      "leafBytes": 1024,
+      "fanout": 2,
+      "levels": 14,
+      "liveHeapBytes": -14200,
+      "snapshotMs": 79.372,
+      "stringifyMs": 45.727,
+      "nodes": 1720319,
+      "liveNodes": 118,
+      "nodeAmplification": 14579,
+      "jsonBytes": 17137651,
+      "ok": true
+    },
+    {
+      "leafBytes": 1024,
+      "fanout": 2,
+      "levels": 18,
+      "liveHeapBytes": -6208,
+      "snapshotMs": 1082.371,
+      "stringifyMs": 738.109,
+      "nodes": 27525119,
+      "liveNodes": 122,
+      "nodeAmplification": 225615.7,
+      "jsonBytes": 274202611,
+      "ok": true
+    },
+    {
+      "leafBytes": 4096,
+      "fanout": 4,
+      "levels": 6,
+      "liveHeapBytes": -2080,
+      "snapshotMs": 58.227,
+      "stringifyMs": 44.573,
+      "nodes": 1684821,
+      "liveNodes": 417,
+      "nodeAmplification": 4040.3,
+      "jsonBytes": 16840013,
+      "ok": true
+    },
+    {
+      "leafBytes": 16384,
+      "fanout": 8,
+      "levels": 4,
+      "liveHeapBytes": 8176,
+      "snapshotMs": 226.41,
+      "stringifyMs": 170.207,
+      "nodes": 6718025,
+      "liveNodes": 1644,
+      "nodeAmplification": 4086.4,
+      "jsonBytes": 67174393,
+      "ok": true
+    }
+  ],
+  "depth": {
+    "maxSurvivedDepth": 7797,
+    "firstFailingDepth": 7798,
+    "failureAt": false
+  }
+}

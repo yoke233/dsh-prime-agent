@@ -1,0 +1,78 @@
+{
+  "node": "v24.18.0",
+  "mib": 16,
+  "rows": [
+    {
+      "shape": "zeros",
+      "elements": 8388608,
+      "jsonBytes": 16777217,
+      "nodes": 8388609,
+      "liveHeapBytes": 67109752,
+      "snapshotHeapBytes": 96023000,
+      "liveHeapPerJsonByte": 4,
+      "liveHeapPerNode": 8,
+      "snapshotMs": 2952.581,
+      "probe": 25165825
+    },
+    {
+      "shape": "empty-arrays",
+      "elements": 5592405,
+      "jsonBytes": 16777216,
+      "nodes": 5592406,
+      "liveHeapBytes": 223697224,
+      "snapshotHeapBytes": 248572808,
+      "liveHeapPerJsonByte": 13.33,
+      "liveHeapPerNode": 40,
+      "snapshotMs": 2219.725,
+      "probe": 22369621
+    },
+    {
+      "shape": "empty-objects",
+      "elements": 5592405,
+      "jsonBytes": 16777216,
+      "nodes": 5592406,
+      "liveHeapBytes": 357914808,
+      "snapshotHeapBytes": 1098616768,
+      "liveHeapPerJsonByte": 21.33,
+      "liveHeapPerNode": 64,
+      "snapshotMs": 2752.053,
+      "probe": 22369621
+    },
+    {
+      "shape": "one-key-objects",
+      "elements": 1864135,
+      "jsonBytes": 14913081,
+      "nodes": 3728271,
+      "liveHeapBytes": 74566816,
+      "snapshotHeapBytes": 373582168,
+      "liveHeapPerJsonByte": 5,
+      "liveHeapPerNode": 20,
+      "snapshotMs": 754.525,
+      "probe": 16777216
+    },
+    {
+      "shape": "empty-strings",
+      "elements": 5592405,
+      "jsonBytes": 16777216,
+      "nodes": 5592406,
+      "liveHeapBytes": 44740152,
+      "snapshotHeapBytes": 69611848,
+      "liveHeapPerJsonByte": 2.67,
+      "liveHeapPerNode": 8,
+      "snapshotMs": 1735.039,
+      "probe": 22369621
+    },
+    {
+      "shape": "nulls",
+      "elements": 3355443,
+      "jsonBytes": 16777216,
+      "nodes": 3355444,
+      "liveHeapBytes": 26844432,
+      "snapshotHeapBytes": 52004432,
+      "liveHeapPerJsonByte": 1.6,
+      "liveHeapPerNode": 8,
+      "snapshotMs": 861.172,
+      "probe": 20132659
+    }
+  ]
+}

@@ -1,0 +1,231 @@
+{
+  "shape": "record-array",
+  "unitMib": 8,
+  "slots": 8,
+  "node": "v24.18.0",
+  "curves": {
+    "identity/bound": {
+      "points": [
+        {
+          "slot": 1,
+          "heapBytes": 49951008,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 2,
+          "heapBytes": 62918808,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 3,
+          "heapBytes": 75883688,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 4,
+          "heapBytes": 88848152,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 5,
+          "heapBytes": 101812616,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 6,
+          "heapBytes": 114776920,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 7,
+          "heapBytes": 127741296,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 8,
+          "heapBytes": 140705744,
+          "captureBytes": 8072455
+        }
+      ],
+      "totalHeapBytes": 140706256,
+      "captureMs": 745.648,
+      "probe": 16
+    },
+    "identity/unbound": {
+      "points": [
+        {
+          "slot": 1,
+          "heapBytes": 49927208,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 2,
+          "heapBytes": 62891664,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 3,
+          "heapBytes": 75855968,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 4,
+          "heapBytes": 88830456,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 5,
+          "heapBytes": 101794968,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 6,
+          "heapBytes": 114759384,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 7,
+          "heapBytes": 127723688,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 8,
+          "heapBytes": 140687992,
+          "captureBytes": 8072455
+        }
+      ],
+      "totalHeapBytes": 140688008,
+      "captureMs": 729.862,
+      "probe": 8
+    },
+    "snapshot/bound": {
+      "points": [
+        {
+          "slot": 1,
+          "heapBytes": 49926720,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 2,
+          "heapBytes": 99852968,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 3,
+          "heapBytes": 149779064,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 4,
+          "heapBytes": 199705160,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 5,
+          "heapBytes": 249631256,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 6,
+          "heapBytes": 299557352,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 7,
+          "heapBytes": 349483448,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 8,
+          "heapBytes": 399409544,
+          "captureBytes": 8072455
+        }
+      ],
+      "totalHeapBytes": 399409560,
+      "captureMs": 806.472,
+      "probe": 16
+    },
+    "snapshot/unbound": {
+      "points": [
+        {
+          "slot": 1,
+          "heapBytes": 41791880,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 2,
+          "heapBytes": 83583680,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 3,
+          "heapBytes": 125375328,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 4,
+          "heapBytes": 167166976,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 5,
+          "heapBytes": 208958624,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 6,
+          "heapBytes": 250750272,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 7,
+          "heapBytes": 292541920,
+          "captureBytes": 8072455
+        },
+        {
+          "slot": 8,
+          "heapBytes": 334333568,
+          "captureBytes": 8072455
+        }
+      ],
+      "totalHeapBytes": 334333584,
+      "captureMs": 951.388,
+      "probe": 8
+    }
+  },
+  "drift": {
+    "grow10x": {
+      "name": "grow ~10x in place",
+      "captureBytes": 8072455,
+      "identityRealBytesNow": 83569925,
+      "identityStillLosslessJson": true,
+      "identityDriftRatio": 10.352,
+      "snapshotBytesNow": 8072455,
+      "snapshotDriftRatio": 1,
+      "heapDeltaAfterMutationBytes": 86965936,
+      "probe": 7676847
+    },
+    "shrink": {
+      "name": "truncate to 1 element",
+      "captureBytes": 8072455,
+      "identityRealBytesNow": 64,
+      "identityStillLosslessJson": true,
+      "identityDriftRatio": 0,
+      "snapshotBytesNow": 8072455,
+      "snapshotDriftRatio": 1,
+      "heapDeltaAfterMutationBytes": -8133760,
+      "probe": 1
+    },
+    "nonJson": {
+      "name": "mutate into non-JSON",
+      "captureBytes": 8072455,
+      "identityRealBytesNow": null,
+      "identityStillLosslessJson": false,
+      "identityDriftRatio": null,
+      "snapshotBytesNow": 8072455,
+      "snapshotDriftRatio": 1,
+      "heapDeltaAfterMutationBytes": 509256,
+      "probe": 127101
+    }
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "node": "v24.18.0",
+  "rows": [
+    {
+      "mib": 1,
+      "strategy": "Object.keys().slice(0,16)",
+      "minMs": 3.345
+    },
+    {
+      "mib": 1,
+      "strategy": "Reflect.ownKeys().slice(0,16)",
+      "minMs": 5.332
+    },
+    {
+      "mib": 1,
+      "strategy": "for..in + break at 16",
+      "minMs": 3.453
+    },
+    {
+      "mib": 1,
+      "strategy": "for..in statement + break at 16",
+      "minMs": 3.576
+    },
+    {
+      "mib": 16,
+      "strategy": "Object.keys().slice(0,16)",
+      "minMs": 113.815
+    },
+    {
+      "mib": 16,
+      "strategy": "Reflect.ownKeys().slice(0,16)",
+      "minMs": 235.747
+    },
+    {
+      "mib": 16,
+      "strategy": "for..in + break at 16",
+      "minMs": 105.481
+    },
+    {
+      "mib": 16,
+      "strategy": "for..in statement + break at 16",
+      "minMs": 133.134
+    },
+    {
+      "mib": 64,
+      "strategy": "Object.keys().slice(0,16)",
+      "minMs": 857.034
+    },
+    {
+      "mib": 64,
+      "strategy": "Reflect.ownKeys().slice(0,16)",
+      "minMs": 1951.838
+    },
+    {
+      "mib": 64,
+      "strategy": "for..in + break at 16",
+      "minMs": 818.524
+    },
+    {
+      "mib": 64,
+      "strategy": "for..in statement + break at 16",
+      "minMs": 819.816
+    }
+  ]
+}

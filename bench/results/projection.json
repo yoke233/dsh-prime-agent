@@ -1,0 +1,203 @@
+{
+  "node": "v24.18.0",
+  "limits": {
+    "maxDepth": 4,
+    "maxArraySample": 8,
+    "maxObjectKeys": 16,
+    "maxStringChars": 256,
+    "maxNodes": 512
+  },
+  "rows": [
+    {
+      "shape": "flat-array",
+      "mib": 1,
+      "captureBytes": 1048571,
+      "richProjectionBytes": 265,
+      "minimalBytes": 94,
+      "projectMinMs": 0.003,
+      "reductionRatio": 3956.9
+    },
+    {
+      "shape": "record-array",
+      "mib": 1,
+      "captureBytes": 1009028,
+      "richProjectionBytes": 982,
+      "minimalBytes": 94,
+      "projectMinMs": 0.004,
+      "reductionRatio": 1027.5
+    },
+    {
+      "shape": "wide-object",
+      "mib": 1,
+      "captureBytes": 873801,
+      "richProjectionBytes": 503,
+      "minimalBytes": 94,
+      "projectMinMs": 3.569,
+      "reductionRatio": 1737.2
+    },
+    {
+      "shape": "long-string",
+      "mib": 1,
+      "captureBytes": 1048576,
+      "richProjectionBytes": 443,
+      "minimalBytes": 95,
+      "projectMinMs": 0.001,
+      "reductionRatio": 2367
+    },
+    {
+      "shape": "deep-nested",
+      "mib": 1,
+      "captureBytes": 1054995,
+      "richProjectionBytes": 792,
+      "minimalBytes": 95,
+      "projectMinMs": 0.003,
+      "reductionRatio": 1332.1
+    },
+    {
+      "shape": "flat-array",
+      "mib": 8,
+      "captureBytes": 8388601,
+      "richProjectionBytes": 265,
+      "minimalBytes": 94,
+      "projectMinMs": 0.001,
+      "reductionRatio": 31655.1
+    },
+    {
+      "shape": "record-array",
+      "mib": 8,
+      "captureBytes": 8072455,
+      "richProjectionBytes": 983,
+      "minimalBytes": 94,
+      "projectMinMs": 0.004,
+      "reductionRatio": 8212.1
+    },
+    {
+      "shape": "wide-object",
+      "mib": 8,
+      "captureBytes": 6990501,
+      "richProjectionBytes": 505,
+      "minimalBytes": 95,
+      "projectMinMs": 40.525,
+      "reductionRatio": 13842.6
+    },
+    {
+      "shape": "long-string",
+      "mib": 8,
+      "captureBytes": 8388608,
+      "richProjectionBytes": 443,
+      "minimalBytes": 95,
+      "projectMinMs": 0.001,
+      "reductionRatio": 18935.9
+    },
+    {
+      "shape": "deep-nested",
+      "mib": 8,
+      "captureBytes": 8394995,
+      "richProjectionBytes": 792,
+      "minimalBytes": 95,
+      "projectMinMs": 0.003,
+      "reductionRatio": 10599.7
+    },
+    {
+      "shape": "flat-array",
+      "mib": 16,
+      "captureBytes": 16777211,
+      "richProjectionBytes": 267,
+      "minimalBytes": 95,
+      "projectMinMs": 0.001,
+      "reductionRatio": 62836
+    },
+    {
+      "shape": "record-array",
+      "mib": 16,
+      "captureBytes": 16145231,
+      "richProjectionBytes": 984,
+      "minimalBytes": 95,
+      "projectMinMs": 0.004,
+      "reductionRatio": 16407.8
+    },
+    {
+      "shape": "wide-object",
+      "mib": 16,
+      "captureBytes": 13981001,
+      "richProjectionBytes": 506,
+      "minimalBytes": 96,
+      "projectMinMs": 110.926,
+      "reductionRatio": 27630.4
+    },
+    {
+      "shape": "long-string",
+      "mib": 16,
+      "captureBytes": 16777216,
+      "richProjectionBytes": 445,
+      "minimalBytes": 96,
+      "projectMinMs": 0.001,
+      "reductionRatio": 37701.6
+    },
+    {
+      "shape": "deep-nested",
+      "mib": 16,
+      "captureBytes": 16784995,
+      "richProjectionBytes": 797,
+      "minimalBytes": 96,
+      "projectMinMs": 0.003,
+      "reductionRatio": 21060.2
+    },
+    {
+      "shape": "flat-array",
+      "mib": 64,
+      "captureBytes": 67108861,
+      "richProjectionBytes": 267,
+      "minimalBytes": 95,
+      "projectMinMs": 0.001,
+      "reductionRatio": 251344
+    },
+    {
+      "shape": "record-array",
+      "mib": 64,
+      "captureBytes": 64581137,
+      "richProjectionBytes": 985,
+      "minimalBytes": 95,
+      "projectMinMs": 0.003,
+      "reductionRatio": 65564.6
+    },
+    {
+      "shape": "wide-object",
+      "mib": 64,
+      "captureBytes": 55924041,
+      "richProjectionBytes": 507,
+      "minimalBytes": 96,
+      "projectMinMs": 787.468,
+      "reductionRatio": 110303.8
+    },
+    {
+      "shape": "long-string",
+      "mib": 64,
+      "captureBytes": 67108864,
+      "richProjectionBytes": 445,
+      "minimalBytes": 96,
+      "projectMinMs": 0.001,
+      "reductionRatio": 150806.4
+    },
+    {
+      "shape": "deep-nested",
+      "mib": 64,
+      "captureBytes": 67114995,
+      "richProjectionBytes": 797,
+      "minimalBytes": 96,
+      "projectMinMs": 0.003,
+      "reductionRatio": 84209.5
+    }
+  ],
+  "envelopeFloor": {
+    "minimalSmallestBytes": 86,
+    "minimalWorstCaseBytes": 119,
+    "richLimitsUsed": {
+      "maxDepth": 4,
+      "maxArraySample": 8,
+      "maxObjectKeys": 16,
+      "maxStringChars": 256,
+      "maxNodes": 512
+    }
+  }
+}
