@@ -26,7 +26,7 @@ import * as primeAgent from '../src/index.js'
 import { registerRealmIdentity } from '../src/realm/identity-tool.js'
 import * as primeRuntime from '../src/runtime.js'
 
-const LOST = '[prime-realm] live namespace restarted; previous bindings were lost'
+const LOST = '[prime-realm] live namespace restarted; previous bindings and retained results were lost'
 const MISSING_PATH = 'missing.txt'
 const READABLE_PATH = 'alpha.txt'
 

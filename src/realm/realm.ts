@@ -20,8 +20,18 @@ import type { EventLoopUtilization } from 'node:perf_hooks'
 import type { Readable } from 'node:stream'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import type { CodeBindingNamespace, CodeJsonValue, CodeRunFailure, CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
-import { HIDDEN_BINDING_MEMBER, MIN_OUTPUT_BYTES, OutputLedger } from './protocol.js'
-import type { HostToRealm, RealmNamespaceSpec, RealmToHost } from './protocol.js'
+import {
+  COMPLETION_EXPIRED_ERROR,
+  COMPLETION_HISTORY_GLOBAL,
+  HIDDEN_BINDING_MEMBER,
+  LAST_RESULT_GLOBAL,
+  MIN_OUTPUT_BYTES,
+  OutputLedger,
+  resolveCompletionHistoryLimits,
+} from './protocol.js'
+import type { HostToRealm, RealmCompletionHistoryLimits, RealmNamespaceSpec, RealmToHost } from './protocol.js'
+
+export type { RealmCompletionHistoryLimits } from './protocol.js'
 
 /** Per-run resource ceilings. Every field is an increment for ONE run, not a realm lifetime total. */
 export interface RealmBudgets {
@@ -86,6 +96,34 @@ const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 const RESERVED_BINDING_GLOBALS: ReadonlySet<string> = new Set([
   'console', '__dsh_main__', '__builtins__', '__name__', '__debug__',
 ])
+
+/**
+ * Program globals the REALM itself installs, which no binding declaration may
+ * claim. Unlike `RESERVED_BINDING_GLOBALS` this set is not a mirror of the seam
+ * package: it exists because the worker installs these names before any cell
+ * runs, so a namespace or error class declaring one would collide with an
+ * intrinsic the realm owns — for the error class, fatally: its global is
+ * immutable, and failing to install it costs the realm its generation.
+ *
+ * `$out` and `$_` are listed even though neither can pass the identifier test
+ * below. Reserving them by name states the intent; leaving them to the character
+ * set would rest the guarantee on a regex that exists for an unrelated reason
+ * and could be relaxed without anyone noticing what it had been protecting.
+ */
+const REALM_OWNED_GLOBALS: ReadonlySet<string> = new Set([
+  COMPLETION_EXPIRED_ERROR,
+  COMPLETION_HISTORY_GLOBAL,
+  LAST_RESULT_GLOBAL,
+])
+
+/**
+ * Handles for retained completions, monotonic across every realm and every
+ * worker generation this process hosts. Module scope is the point: a handle the
+ * model saw before a hard kill must be ABSENT from the next generation's store
+ * rather than name a different value there, and only a counter that outlives the
+ * worker can promise that.
+ */
+let nextCompletionId = 0
 
 /** Mirrors `RESERVED_ERROR_MEMBERS` in `@deepseek-ai/dsh-code-runtime`. */
 const RESERVED_ERROR_MEMBERS: ReadonlySet<string> = new Set([
@@ -284,6 +322,8 @@ interface RunEntry {
   runId: number
   nonce: string
   ledger: OutputLedger
+  /** The completion handle reserved for this run, spent only if it opens a slot. */
+  completionId: number
   logs: string[]
   answered: Set<number>
   hostCalls: number
@@ -313,6 +353,7 @@ export class PersistentRealm {
   readonly realmId: string
 
   private readonly budgets: RealmBudgets
+  private readonly completionHistory: RealmCompletionHistoryLimits
   private readonly queue: RunEntry[] = []
   private readonly inflight = new Set<Promise<void>>()
   private readonly terminations = new Set<Promise<void>>()
@@ -326,9 +367,15 @@ export class PersistentRealm {
   private lastUsed = Date.now()
   private disposed = false
 
-  constructor(options: { realmId: string; budgets: RealmBudgets }) {
+  constructor(options: {
+    realmId: string
+    budgets: RealmBudgets
+    /** Completion-history ceilings; every field left blank takes its plan default. */
+    completionHistory?: Partial<RealmCompletionHistoryLimits>
+  }) {
     if (options.realmId.length === 0) throw new Error('dsh-prime-agent: realm id must not be empty')
     this.realmId = options.realmId
+    this.completionHistory = resolveCompletionHistoryLimits(options.completionHistory)
     this.budgets = { ...options.budgets }
     for (const [key, value] of Object.entries(this.budgets)) {
       if (!(Number.isFinite(value) && value > 0)) {
@@ -405,6 +452,7 @@ export class PersistentRealm {
       runId: 0,
       nonce: '',
       ledger: new OutputLedger(this.budgets.maxOutputBytes),
+      completionId: 0,
       logs: [],
       answered: new Set<number>(),
       hostCalls: 0,
@@ -459,6 +507,12 @@ export class PersistentRealm {
   private validateBindings(request: CodeRunRequest): Map<string, CodeBindingNamespace> {
     const bindings = new Map<string, CodeBindingNamespace>()
     for (const namespace of request.bindings) {
+      // Ahead of the identifier test on purpose: a realm-owned name must be
+      // refused BECAUSE it is reserved, not incidentally because of the
+      // characters in it.
+      if (REALM_OWNED_GLOBALS.has(namespace.global)) {
+        throw new Error(`dsh-prime-agent: reserved binding global ${JSON.stringify(namespace.global)}`)
+      }
       if (!IDENTIFIER.test(namespace.global) || PORTABLE_RESERVED_WORDS.has(namespace.global)) {
         throw new Error(`dsh-prime-agent: binding global ${JSON.stringify(namespace.global)} is not a usable identifier`)
       }
@@ -478,6 +532,9 @@ export class PersistentRealm {
     for (const namespace of request.bindings) {
       const descriptor = namespace.errorClass
       if (!descriptor) continue
+      if (REALM_OWNED_GLOBALS.has(descriptor.name)) {
+        throw new Error(`dsh-prime-agent: reserved binding global ${JSON.stringify(descriptor.name)}`)
+      }
       if (!IDENTIFIER.test(descriptor.name) || PORTABLE_RESERVED_WORDS.has(descriptor.name)) {
         throw new Error(`dsh-prime-agent: binding error class ${JSON.stringify(descriptor.name)} is not a usable identifier`)
       }
@@ -595,6 +652,10 @@ export class PersistentRealm {
     entry.session = session
     entry.runId = ++this.runCounter
     entry.nonce = randomBytes(NONCE_BYTES).toString('base64url')
+    // One handle per dispatched run, spent only if the completion opens a new
+    // slot. A run produces at most one completion, so reserving here is
+    // sufficient; identity reuse simply leaves gaps in the sequence.
+    entry.completionId = ++nextCompletionId
     // This run owns the worker's native pipes until it settles.
     session.strayOwner = entry
     if (entry.onStart) {
@@ -637,6 +698,7 @@ export class PersistentRealm {
       code,
       namespaces,
       maxOutputBytes: this.budgets.maxOutputBytes,
+      completion: { id: entry.completionId, limits: this.completionHistory },
     })
   }
 

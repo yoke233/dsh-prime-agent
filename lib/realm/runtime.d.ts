@@ -14,6 +14,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { CodeRuntime } from '@deepseek-ai/dsh-code-runtime';
 import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
+import type { RealmCompletionHistoryLimits } from './protocol.js';
 import type { RealmBudgets } from './realm.js';
 /** Everything the runtime needs that is not a per-run input. */
 export interface PrimeCodeRuntimeOptions {
@@ -27,6 +28,12 @@ export interface PrimeCodeRuntimeOptions {
     fallback: CodeRuntime;
     /** Per-run ceilings handed to every realm this runtime creates. */
     budgets: RealmBudgets;
+    /**
+     * Completion-history ceilings for every realm this runtime creates. Blank
+     * fields take the plan defaults; the history exists only on this authenticated
+     * Prime path, so the one-shot fallback keeps the official semantics exactly.
+     */
+    completionHistory?: Partial<RealmCompletionHistoryLimits>;
     /** Realms that may hold a worker at once; admission past it reclaims or refuses. */
     maxActiveRealms: number;
     /** How long a realm may sit idle before its worker is reclaimed. */
@@ -44,6 +51,7 @@ export declare class PrimeCodeRuntime extends CodeRuntime {
     private readonly fallback;
     private readonly identity;
     private readonly budgets;
+    private readonly completionHistory;
     /** The deployment's full output cap, which a pre-worker failure may use whole. */
     private readonly outputBytes;
     private readonly maxActiveRealms;

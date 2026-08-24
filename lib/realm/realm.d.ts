@@ -12,6 +12,8 @@
  * @module dsh-prime-agent/realm/realm
  */
 import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
+import type { RealmCompletionHistoryLimits } from './protocol.js';
+export type { RealmCompletionHistoryLimits } from './protocol.js';
 /** Per-run resource ceilings. Every field is an increment for ONE run, not a realm lifetime total. */
 export interface RealmBudgets {
     /** Event-loop busy-time budget for one run, measured as the worker's ELU delta since that run started. */
@@ -59,6 +61,7 @@ export declare class PersistentRealm {
     /** Opaque routing identity; never rendered into a result or diagnostic. */
     readonly realmId: string;
     private readonly budgets;
+    private readonly completionHistory;
     private readonly queue;
     private readonly inflight;
     private readonly terminations;
@@ -74,6 +77,8 @@ export declare class PersistentRealm {
     constructor(options: {
         realmId: string;
         budgets: RealmBudgets;
+        /** Completion-history ceilings; every field left blank takes its plan default. */
+        completionHistory?: Partial<RealmCompletionHistoryLimits>;
     });
     /**
      * The current worker generation, counting from 1. A hard kill schedules the

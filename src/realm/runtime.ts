@@ -19,7 +19,8 @@ import { CodeRuntime } from '@deepseek-ai/dsh-code-runtime'
 import type { CodeBindingFunction, CodeRunFailure, CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
 import { RealmIdentityStore } from './identity.js'
 import type { RealmVerification } from './identity.js'
-import { HIDDEN_BINDING_MEMBER, MIN_OUTPUT_BYTES, OutputLedger } from './protocol.js'
+import { HIDDEN_BINDING_MEMBER, MIN_OUTPUT_BYTES, OutputLedger, resolveCompletionHistoryLimits } from './protocol.js'
+import type { RealmCompletionHistoryLimits } from './protocol.js'
 import { acquireRealmLease, RealmLeaseError } from './realm-lease.js'
 import { PersistentRealm } from './realm.js'
 import type { RealmBudgets, RealmRunNotice } from './realm.js'
@@ -57,6 +58,12 @@ export interface PrimeCodeRuntimeOptions {
   fallback: CodeRuntime
   /** Per-run ceilings handed to every realm this runtime creates. */
   budgets: RealmBudgets
+  /**
+   * Completion-history ceilings for every realm this runtime creates. Blank
+   * fields take the plan defaults; the history exists only on this authenticated
+   * Prime path, so the one-shot fallback keeps the official semantics exactly.
+   */
+  completionHistory?: Partial<RealmCompletionHistoryLimits>
   /** Realms that may hold a worker at once; admission past it reclaims or refuses. */
   maxActiveRealms: number
   /** How long a realm may sit idle before its worker is reclaimed. */
@@ -160,9 +167,14 @@ function parseHandshake(value: unknown): { token: string; proof: string } | unde
   }
 }
 
-/** Render the one lifecycle fact a fresh worker needs to expose. */
+/**
+ * Render the one lifecycle fact a fresh worker needs to expose. The restart line
+ * names the completion history too, because a hard kill takes both with it and
+ * the plan deliberately keeps ONE restart mechanism rather than adding a second
+ * notice for the history.
+ */
 function namespaceNotice(fresh: boolean, lost: boolean): string | undefined {
-  if (lost) return '[prime-realm] live namespace restarted; previous bindings were lost'
+  if (lost) return '[prime-realm] live namespace restarted; previous bindings and retained results were lost'
   if (fresh) return '[prime-realm] live namespace started empty'
   return undefined
 }
@@ -207,6 +219,7 @@ export class PrimeCodeRuntime extends CodeRuntime {
   private readonly fallback: CodeRuntime
   private readonly identity: RealmIdentityStore
   private readonly budgets: RealmBudgets
+  private readonly completionHistory: RealmCompletionHistoryLimits
   /** The deployment's full output cap, which a pre-worker failure may use whole. */
   private readonly outputBytes: number
   private readonly maxActiveRealms: number
@@ -229,6 +242,9 @@ export class PrimeCodeRuntime extends CodeRuntime {
   constructor(ctx: Context, options: PrimeCodeRuntimeOptions) {
     super(ctx)
     assertBudgets(options.budgets)
+    // Resolved at construction rather than at first admission, so a bad
+    // deployment fails at plugin load instead of on some session's first run.
+    this.completionHistory = resolveCompletionHistoryLimits(options.completionHistory)
     if (!(Number.isSafeInteger(options.maxActiveRealms) && options.maxActiveRealms > 0)) {
       throw new Error(`dsh-prime-agent: maxActiveRealms must be a positive safe integer, got ${String(options.maxActiveRealms)}`)
     }
@@ -412,7 +428,11 @@ export class PrimeCodeRuntime extends CodeRuntime {
       }
 
       try {
-        const realm = new PersistentRealm({ realmId, budgets: this.budgets })
+        const realm = new PersistentRealm({
+          realmId,
+          budgets: this.budgets,
+          completionHistory: this.completionHistory,
+        })
         this.pool.set(realmId, realm)
         return { result: realm.run(request, onStart) }
       } catch (error: unknown) {

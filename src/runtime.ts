@@ -15,7 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { watchHostParent } from './realm/host-parent.js'
 import { installPrimePreset } from './realm/preset-install.js'
-import type { RealmBudgets } from './realm/realm.js'
+import type { RealmBudgets, RealmCompletionHistoryLimits } from './realm/realm.js'
 
 export const name = 'prime-code-runtime'
 
@@ -47,6 +47,27 @@ const OFFICIAL_DEFAULTS = {
 /** Fields passed to the official fallback verbatim, under its own names. */
 const OFFICIAL_FIELDS = ['computeMs', 'maxWallMs', 'maxOutputBytes', 'maxOldGenerationSizeMb'] as const
 
+/**
+ * Completion-history ceilings, decided by the Phase 0 benchmark
+ * (`docs/plan/phase0-bench-results.zh.md` §4.1) and restated here so the schema
+ * can publish them. `DEFAULT_COMPLETION_HISTORY_LIMITS` in
+ * `src/realm/protocol.ts` is the single source these must track.
+ */
+const COMPLETION_HISTORY_DEFAULTS = {
+  maxCompletionHistoryEntries: 16,
+  maxCompletionHistoryEstimatedBytes: 33_554_432,
+  maxCompletionHistoryNodes: 1_000_000,
+  maxCompletionHistoryEntryBytes: 8_388_608,
+} as const
+
+/** Config fields that make up one realm's completion-history limits. */
+const COMPLETION_HISTORY_FIELDS = [
+  'maxCompletionHistoryEntries',
+  'maxCompletionHistoryEstimatedBytes',
+  'maxCompletionHistoryNodes',
+  'maxCompletionHistoryEntryBytes',
+] as const
+
 const DEFAULT_MAX_ACTIVE_REALMS = 8
 const DEFAULT_MAX_IDLE_MS = 600_000
 const DEFAULT_MAX_HOST_CALLS_PER_RUN = 200
@@ -76,6 +97,14 @@ export interface Config {
   maxHostCallsPerRun?: number
   /** Host binding calls one run may have in flight at once. */
   maxParallelHostCallsPerRun?: number
+  /** Retained completions one Prime realm generation may hold at once. */
+  maxCompletionHistoryEntries?: number
+  /** Combined capture-time serialized bytes across a realm's retained completions. */
+  maxCompletionHistoryEstimatedBytes?: number
+  /** Combined object-graph nodes across a realm's retained completions. */
+  maxCompletionHistoryNodes?: number
+  /** Capture-time serialized bytes one single retained completion may occupy. */
+  maxCompletionHistoryEntryBytes?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -88,6 +117,10 @@ export const Config: z<Config> = z.object({
   maxIdleMs: z.natural().min(1).default(DEFAULT_MAX_IDLE_MS),
   maxHostCallsPerRun: z.natural().min(1).default(DEFAULT_MAX_HOST_CALLS_PER_RUN),
   maxParallelHostCallsPerRun: z.natural().min(1).default(DEFAULT_MAX_PARALLEL_HOST_CALLS_PER_RUN),
+  maxCompletionHistoryEntries: z.natural().min(1).default(COMPLETION_HISTORY_DEFAULTS.maxCompletionHistoryEntries),
+  maxCompletionHistoryEstimatedBytes: z.natural().min(1).default(COMPLETION_HISTORY_DEFAULTS.maxCompletionHistoryEstimatedBytes),
+  maxCompletionHistoryNodes: z.natural().min(1).default(COMPLETION_HISTORY_DEFAULTS.maxCompletionHistoryNodes),
+  maxCompletionHistoryEntryBytes: z.natural().min(1).default(COMPLETION_HISTORY_DEFAULTS.maxCompletionHistoryEntryBytes),
 }) as unknown as z<Config>
 
 /**
@@ -181,6 +214,15 @@ function realmBudgets(config: Config): RealmBudgets {
   }
 }
 
+/** One realm's completion-history ceilings, defaulted field by field. */
+function completionHistoryLimits(config: Config): RealmCompletionHistoryLimits {
+  const limits = {} as Record<(typeof COMPLETION_HISTORY_FIELDS)[number], number>
+  for (const field of COMPLETION_HISTORY_FIELDS) {
+    limits[field] = config[field] ?? COMPLETION_HISTORY_DEFAULTS[field]
+  }
+  return limits
+}
+
 /**
  * Monitor this host's owner, mount the official one-shot runtime privately, and
  * publish the hybrid runtime. Realm ownership is claimed lazily after an
@@ -241,6 +283,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     stateDirectory,
     fallback,
     budgets: realmBudgets(config),
+    completionHistory: completionHistoryLimits(config),
     maxActiveRealms: config.maxActiveRealms ?? DEFAULT_MAX_ACTIVE_REALMS,
     maxIdleMs: config.maxIdleMs ?? DEFAULT_MAX_IDLE_MS,
   })

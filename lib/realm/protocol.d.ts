@@ -20,6 +20,68 @@ export declare const HIDDEN_BINDING_MEMBER = "prime_realm_identity";
  * hard cap never has to truncate its own failure message.
  */
 export declare const MIN_OUTPUT_BYTES = 256;
+/**
+ * Program-visible name of the runtime's completion-expiry rejection class. It is
+ * installed as an immutable worker global, so no binding namespace or injected
+ * error class may claim it; the host refuses such a declaration as caller misuse
+ * rather than letting the worker fail to install its own intrinsic.
+ */
+export declare const COMPLETION_EXPIRED_ERROR = "CompletionExpiredError";
+/**
+ * The two model-visible completion-history intrinsics, reserved on the same
+ * terms. Neither currently survives the host's identifier test for a binding
+ * global, but that is an accident of the character set rather than a decision:
+ * naming them here is what actually reserves them.
+ */
+export declare const COMPLETION_HISTORY_GLOBAL = "$out";
+export declare const LAST_RESULT_GLOBAL = "$_";
+/**
+ * Per-realm ceilings on the runtime-owned completion history.
+ *
+ * Both `Bytes` fields and the node budget are ADMISSION APPROXIMATIONS taken
+ * when a value was captured, not heap guarantees. The history retains the
+ * program's own object, so later in-place mutation drifts the accounting — the
+ * Phase 0 benchmark measured drift up to 11.8x upward and down to zero
+ * (`docs/plan/phase0-bench-results.zh.md` §3.4), and 16 MiB of legal JSON can
+ * correspond to a 341 MiB live object graph (§3.5). The only hard heap boundary
+ * is still the worker's `maxOldGenerationSizeMb`, which is why these defaults
+ * sit far below it.
+ */
+export interface RealmCompletionHistoryLimits {
+    /** Retained completions one realm generation may hold at once. */
+    maxCompletionHistoryEntries: number;
+    /** Combined capture-time serialized bytes across every retained completion. */
+    maxCompletionHistoryEstimatedBytes: number;
+    /** Combined object-graph nodes across every retained completion. */
+    maxCompletionHistoryNodes: number;
+    /** Capture-time serialized bytes one single completion may occupy. */
+    maxCompletionHistoryEntryBytes: number;
+}
+/**
+ * The Phase 0 benchmark's decided defaults
+ * (`docs/plan/phase0-bench-results.zh.md` §4.1). Restated in `realm-worker.ts`,
+ * which cannot import this module at runtime.
+ */
+export declare const DEFAULT_COMPLETION_HISTORY_LIMITS: RealmCompletionHistoryLimits;
+/** Fill in whatever a caller left blank, then reject anything unusable. */
+export declare function resolveCompletionHistoryLimits(overrides: Partial<RealmCompletionHistoryLimits> | undefined): RealmCompletionHistoryLimits;
+/**
+ * What one run may spend on the completion history.
+ *
+ * The handle is allocated HOST-side, one per dispatched run, from a counter that
+ * is monotonic for the whole runtime process. A run produces at most one
+ * completion, so one candidate handle per run is sufficient, and the worker
+ * simply leaves it unspent when the value it completed with is already retained.
+ * Allocating host-side is what makes the identifier unforgeable across worker
+ * generations: a hard-killed generation cannot have consumed a number the next
+ * one will hand out, so a handle the model saw before a restart is guaranteed to
+ * be ABSENT from the new store rather than to name a different value.
+ */
+export interface RealmCompletionPlan {
+    /** The handle this run may consume if its completion opens a new slot. */
+    id: number;
+    limits: RealmCompletionHistoryLimits;
+}
 /** Program-visible typed rejection contract for one namespace. */
 export interface RealmErrorClassSpec {
     name: string;
@@ -50,6 +112,7 @@ export type HostToRealm = {
     code: string;
     namespaces: RealmNamespaceSpec[];
     maxOutputBytes: number;
+    completion: RealmCompletionPlan;
 } | {
     type: 'reply';
     runId: number;

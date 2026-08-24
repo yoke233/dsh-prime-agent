@@ -18,7 +18,13 @@ import { createRequire } from 'node:module'
 import { inspect } from 'node:util'
 import { workerData } from 'node:worker_threads'
 import type { MessagePort } from 'node:worker_threads'
-import type { HostToRealm, RealmNamespaceSpec, RealmProgramFailure, RealmToHost } from './protocol.js'
+import type {
+  HostToRealm,
+  RealmCompletionHistoryLimits,
+  RealmNamespaceSpec,
+  RealmProgramFailure,
+  RealmToHost,
+} from './protocol.js'
 
 const CapturedAbortController = AbortController
 const CapturedAbortSignal = AbortSignal
@@ -29,6 +35,7 @@ const capturedAsyncLocalStorageGetStore = AsyncLocalStorage.prototype.getStore
 const capturedAsyncLocalStorageRun = AsyncLocalStorage.prototype.run
 const capturedAbortSignalAny = AbortSignal.any
 const capturedArrayPush = Array.prototype.push
+const capturedArraySplice = Array.prototype.splice
 const capturedArrayIsArray = Array.isArray
 const capturedBufferByteLength = Buffer.byteLength
 const capturedJsonParse = JSON.parse
@@ -39,8 +46,10 @@ const capturedMapForEach = Map.prototype.forEach
 const capturedMapGet = Map.prototype.get
 const capturedMapSet = Map.prototype.set
 const capturedNumberIsFinite = Number.isFinite
+const capturedNumberIsSafeInteger = Number.isSafeInteger
 const capturedObjectCreate = Object.create
 const capturedObjectDefineProperty = Object.defineProperty
+const capturedObjectFreeze = Object.freeze
 const capturedObjectGetPrototypeOf = Object.getPrototypeOf
 const capturedObjectHasOwn = Object.hasOwn
 const capturedObjectIs = Object.is
@@ -194,6 +203,11 @@ interface ActiveRun {
   id: number
   /** The host's single-use secret for this run; quoted on every outbound message. */
   nonce: string
+  /**
+   * The completion handle the host reserved for this run, spent only if the run
+   * completes with a value that opens a NEW history slot.
+   */
+  completionId: number
   logs: LogBuffer
   pending: Map<number, PendingCall>
   nextCallId: number
@@ -626,16 +640,105 @@ function revokeLeases(): void {
 }
 
 /**
+ * Bookkeeping the capture walk fills in as it goes.
+ *
+ * Everything here is gathered during the SINGLE traversal that already builds
+ * the boundary snapshot. A second pass is not an option: the walk reads program
+ * getters, so re-walking would fire their side effects twice and a getter that
+ * threw on the second pass would turn an already-successful run into a failure.
+ * The same rule covers key enumeration — a dictionary-mode object has no cheap
+ * "first N keys" path (`Object.keys().slice` costs 857 ms on a 64 MiB wide
+ * object, `docs/plan/phase0-bench-results.zh.md` §3.7), so the sample below is
+ * taken from the enumeration the walk performs anyway.
+ */
+interface CaptureStats {
+  /** Every value visited, containers and leaves alike. */
+  nodes: number
+  nodeLimit: number
+  /**
+   * Set the moment the walk crosses `nodeLimit`, which permanently disqualifies
+   * the value from the history.
+   *
+   * What is true TODAY: the flag is written during the walk, read only after it
+   * finishes, and the walk always runs to completion. Phase 1 therefore does NOT
+   * avoid the expansion — it only avoids being fooled by it. Writing the flag
+   * inline rather than deriving it from a finished snapshot is groundwork for
+   * Phase 2, and it is also the only way the answer can be right: `seen` is a
+   * path set (deleted on exit below) that refuses cycles without recognizing
+   * sharing, so a few KiB of live DAG expands into tens of millions of nodes at
+   * the boundary (§3.8) and a post-hoc count would be a count of the
+   * amplification rather than of the value.
+   *
+   * Do NOT turn this into an early exit while Phase 1's wire contract stands.
+   * The full JSON is still what crosses, and a value can blow the node budget
+   * while its serialization fits `maxOutputBytes` with room to spare; abandoning
+   * the walk would abandon that serialization too, so a cell that succeeds today
+   * would start failing with `invalid-output` — a model-visible regression, not
+   * an internal one. Guarded by "refuses a shared subgraph whose expansion the
+   * walk counted, without abandoning the walk" in
+   * `tests/completion-history.spec.ts`. Phase 2, which projects a large
+   * completion instead of serializing it, is where the early return becomes
+   * correct.
+   *
+   * Nothing in the walk READS this flag, and nothing may start to: the sampling
+   * below has to survive it intact. Phase 1 gets away with that for free, since
+   * a value tripping the flag is refused outright and its stats are discarded
+   * with it — but Phase 2 must still PROJECT a value it refuses to retain, and
+   * that projection needs this walk's key sample. A "stop collecting once the
+   * budget is blown" shortcut would leave exactly the oversized values that need
+   * a projection without the material to build one, and re-enumerating keys is
+   * the one thing the benchmark rules out (§3.7). Guarded from Phase 2 onwards
+   * by the first Phase 2 acceptance item in the plan: the projector must produce
+   * an envelope carrying a key sample for a value that tripped this flag.
+   */
+  overNodeLimit: boolean
+  /** Container nesting, so root metadata can be taken without a second look. */
+  depth: number
+  /**
+   * Own key total of a root OBJECT, and the first `ROOT_KEY_SAMPLE` of its keys.
+   *
+   * Only the count reaches a slot; the sample lives and dies with one capture.
+   * It is collected anyway because this walk is the only place it can be had
+   * cheaply, and because the invariant above — sampling is never cut short by a
+   * blown budget — has to be true of the MECHANISM before Phase 2 can build a
+   * projection on it.
+   */
+  rootKeyCount: number
+  rootKeys: string[]
+}
+
+/** How many root keys one capture samples; the sample is never stored past it. */
+const ROOT_KEY_SAMPLE = 16
+
+/** A walk whose node budget can never bind, for values that are not completions. */
+const UNLIMITED_NODES = Number.POSITIVE_INFINITY
+
+function newCaptureStats(nodeLimit: number): CaptureStats {
+  const stats = capturedObjectCreate(null) as CaptureStats
+  stats.nodes = 0
+  stats.nodeLimit = nodeLimit
+  stats.overNodeLimit = false
+  stats.depth = 0
+  stats.rootKeyCount = 0
+  stats.rootKeys = []
+  return stats
+}
+
+/**
  * Validate and detach one boundary value as lossless JSON. Throws on anything
  * JSON would drop, coerce, or fail to round-trip: non-finite numbers, negative
  * zero, functions, symbols, bigints, exotic prototypes, sparse or
  * extra-propertied arrays, symbol/non-enumerable properties, and cycles.
  */
 function snapshotJson(value: unknown): unknown {
-  return snapshotValue(value, new CapturedSet<object>())
+  return snapshotValue(value, new CapturedSet<object>(), newCaptureStats(UNLIMITED_NODES))
 }
 
-function snapshotValue(value: unknown, seen: Set<object>): unknown {
+function snapshotValue(value: unknown, seen: Set<object>, stats: CaptureStats): unknown {
+  stats.nodes += 1
+  // Written here, read only after the walk returns; see `CaptureStats.overNodeLimit`
+  // for why this must not become an early exit.
+  if (stats.nodes > stats.nodeLimit) stats.overNodeLimit = true
   if (value === null) return null
   const kind = typeof value
   if (kind === 'boolean' || kind === 'string') return value
@@ -647,6 +750,8 @@ function snapshotValue(value: unknown, seen: Set<object>): unknown {
   const source = value as object
   if (capturedReflectApply(capturedSetHas, seen, [source])) throw new CapturedError('value is not lossless JSON')
   capturedReflectApply(capturedSetAdd, seen, [source])
+  const root = stats.depth === 0
+  stats.depth += 1
   let snapshot: unknown
   if (capturedArrayIsArray(source)) {
     const items = source as unknown[]
@@ -654,7 +759,7 @@ function snapshotValue(value: unknown, seen: Set<object>): unknown {
     const target: unknown[] = []
     for (let index = 0; index < items.length; index++) {
       if (!capturedObjectHasOwn(items, index)) throw new CapturedError('value is not lossless JSON')
-      capturedReflectApply(capturedArrayPush, target, [snapshotValue(items[index], seen)])
+      capturedReflectApply(capturedArrayPush, target, [snapshotValue(items[index], seen, stats)])
     }
     snapshot = target
   } else {
@@ -662,18 +767,365 @@ function snapshotValue(value: unknown, seen: Set<object>): unknown {
     if (prototype !== null && prototype !== capturedObjectPrototype) throw new CapturedError('value is not lossless JSON')
     const target = capturedObjectCreate(null) as Record<string, unknown>
     const keys = capturedReflectOwnKeys(source)
+    if (root) stats.rootKeyCount = keys.length
     for (let index = 0; index < keys.length; index++) {
       const key = keys[index] as string | symbol
       if (typeof key !== 'string' || !capturedReflectApply(capturedPropertyIsEnumerable, source, [key])) {
         throw new CapturedError('value is not lossless JSON')
       }
-      target[key] = snapshotValue((source as Record<string, unknown>)[key], seen)
+      // Sampled from the enumeration above rather than from a second one; see
+      // the note on `CaptureStats`.
+      if (root && stats.rootKeys.length < ROOT_KEY_SAMPLE) {
+        capturedReflectApply(capturedArrayPush, stats.rootKeys, [key])
+      }
+      target[key] = snapshotValue((source as Record<string, unknown>)[key], seen, stats)
     }
     snapshot = target
   }
+  stats.depth -= 1
   capturedReflectApply(capturedSetDelete, seen, [source])
   return snapshot
 }
+
+/**
+ * One retained completion. `value` is the program's ORIGINAL object, not a copy:
+ * the Phase 0 benchmark measured the null-prototype snapshot copy at 1.7x-2.8x
+ * the heap of the original whenever a user binding holds it too, and 3.1x on the
+ * worst legal shape (`docs/plan/phase0-bench-results.zh.md` §3.3, §4.2). Keeping
+ * the identity is also what makes `$out.drop(id)` release the history's claim
+ * WITHOUT touching a binding the program declared over the same object.
+ */
+interface CompletionSlot {
+  id: number
+  value: unknown
+  /** Serialized bytes at CAPTURE time; in-place mutation drifts this, by design. */
+  bytes: number
+  nodes: number
+  type: string
+  /**
+   * Own key total of a root object. The first keys are sampled by the walk but
+   * deliberately NOT stored: Phase 2 generates its projection inline during the
+   * capture traversal rather than from slot metadata, so a stored sample would
+   * be retained by every slot and read by nobody.
+   */
+  keyCount: number
+}
+
+/** Model-visible intrinsics this runtime owns; see `protocol.ts` for the reserved name. */
+const COMPLETION_HISTORY_GLOBAL = '$out'
+const LAST_RESULT_GLOBAL = '$_'
+const COMPLETION_EXPIRED_ERROR = 'CompletionExpiredError'
+
+/** Emitted once, when the program takes `$_` for itself; Node's REPL rule for `_`. */
+const LAST_RESULT_CLAIMED_NOTICE = `[prime-realm] ${LAST_RESULT_GLOBAL} is now a program variable, `
+  + `so automatic last-result tracking is off; use ${COMPLETION_HISTORY_GLOBAL}(id) to reach retained results`
+
+/**
+ * Restates `DEFAULT_COMPLETION_HISTORY_LIMITS` in `./protocol.ts`, which this
+ * module cannot import at runtime. Only a placeholder: the host sends the
+ * realm's real limits with every run, before any completion can be captured.
+ */
+let completionLimits: RealmCompletionHistoryLimits = {
+  maxCompletionHistoryEntries: 16,
+  maxCompletionHistoryEstimatedBytes: 33_554_432,
+  maxCompletionHistoryNodes: 1_000_000,
+  maxCompletionHistoryEntryBytes: 8_388_608,
+}
+
+/** Retained completions in FIFO order, oldest first. Generation-local by construction. */
+const completionSlots: CompletionSlot[] = []
+let retainedBytes = 0
+let retainedNodes = 0
+/**
+ * The slot the LAST completion landed in, which is not the newest slot: an
+ * identity hit reuses an older slot and deliberately keeps its FIFO position, so
+ * reading `$_` off the tail would answer with somebody else's value.
+ */
+let lastRetainedId: number | undefined
+
+/** How `$out.list()` names a value, without rendering any of its content. */
+function completionType(value: unknown): string {
+  if (value === null) return 'null'
+  if (capturedArrayIsArray(value)) return 'array'
+  return typeof value
+}
+
+function findCompletionSlot(id: number): CompletionSlot | undefined {
+  for (let index = 0; index < completionSlots.length; index++) {
+    const slot = completionSlots[index] as CompletionSlot
+    if (slot.id === id) return slot
+  }
+  return undefined
+}
+
+/** Drop the oldest slot, releasing the history's claim on its value. */
+function evictOldestCompletion(): void {
+  const evicted = capturedReflectApply(capturedArraySplice, completionSlots, [0, 1]) as CompletionSlot[]
+  const slot = evicted[0]
+  if (slot === undefined) return
+  retainedBytes -= slot.bytes
+  retainedNodes -= slot.nodes
+}
+
+/** Whether one more entry of this size fits inside all three history budgets. */
+function completionHistoryFits(bytes: number, nodes: number): boolean {
+  return completionSlots.length + 1 <= completionLimits.maxCompletionHistoryEntries
+    && retainedBytes + bytes <= completionLimits.maxCompletionHistoryEstimatedBytes
+    && retainedNodes + nodes <= completionLimits.maxCompletionHistoryNodes
+}
+
+/**
+ * Whether this value could be retained AT ALL, in an empty history.
+ *
+ * Asked before anything is evicted, because a value that cannot fit on its own
+ * will not fit after the store is emptied either — and emptying it would trade
+ * every handle the model still holds for nothing.
+ */
+function completionFitsAlone(bytes: number, nodes: number): boolean {
+  return bytes <= completionLimits.maxCompletionHistoryEntryBytes
+    && bytes <= completionLimits.maxCompletionHistoryEstimatedBytes
+    // Already implied by the walk's own node budget; restated so this test
+    // stands on its own rather than on that coupling.
+    && nodes <= completionLimits.maxCompletionHistoryNodes
+}
+
+/**
+ * Admit one successful run's completion into the history.
+ *
+ * Identity first: an OBJECT already retained keeps its slot, its handle and its
+ * FIFO position, and costs nothing. The Phase 0 simulation showed per-slot
+ * billing flushing the history in two of three recirculation traces, and failing
+ * in the worst possible shape — the object still in the store under a new id
+ * while the handle the model was holding had expired
+ * (`docs/plan/phase0-bench-results.zh.md` §3.6, §4.3).
+ *
+ * Primitives are excluded from that scan on purpose. `Object.is` on two strings
+ * compares CONTENT, so two independently computed equal strings are not the same
+ * result in any sense the model would recognize, and folding them together would
+ * park the newer one at the older one's FIFO position. The comparison is also
+ * O(length) per slot, which a run returning long strings would pay on every
+ * capture.
+ */
+function retainCompletion(value: unknown, bytes: number, stats: CaptureStats): void {
+  if (typeof value === 'object' && value !== null) {
+    for (let index = 0; index < completionSlots.length; index++) {
+      const slot = completionSlots[index] as CompletionSlot
+      if (capturedObjectIs(slot.value, value)) {
+        lastRetainedId = slot.id
+        return
+      }
+    }
+  }
+  const run = active
+  if (run === undefined) return
+  // Refused outright rather than evicted for: one oversized result must not cost
+  // the model every earlier handle it still holds.
+  if (stats.overNodeLimit || !completionFitsAlone(bytes, stats.nodes)) return
+  while (completionSlots.length > 0 && !completionHistoryFits(bytes, stats.nodes)) evictOldestCompletion()
+  /* c8 ignore next 2 -- unreachable: the value fits an empty store and the entry budget is a positive integer, so an emptied store always has room. */
+  if (!completionHistoryFits(bytes, stats.nodes)) return
+  const slot = capturedObjectCreate(null) as CompletionSlot
+  slot.id = run.completionId
+  slot.value = value
+  slot.bytes = bytes
+  slot.nodes = stats.nodes
+  slot.type = completionType(value)
+  slot.keyCount = stats.rootKeyCount
+  capturedReflectApply(capturedArrayPush, completionSlots, [slot])
+  retainedBytes += bytes
+  retainedNodes += stats.nodes
+  lastRetainedId = slot.id
+}
+
+/**
+ * The rejection a stale handle gets. Installed as an immutable global through
+ * the same mechanism as a namespace's binding-error class, so a program can
+ * branch on it by identity, and the host reserves the name so no binding
+ * declaration can collide with it.
+ */
+const CompletionExpiredError = class CompletionExpiredError extends CapturedError {
+  constructor(message: string) {
+    super(message)
+    defineBindingErrorField(this, 'name', COMPLETION_EXPIRED_ERROR)
+  }
+}
+capturedObjectFreeze(CompletionExpiredError.prototype)
+capturedObjectFreeze(CompletionExpiredError)
+installReadonlyGlobal(COMPLETION_EXPIRED_ERROR, CompletionExpiredError)
+
+/**
+ * Refuse any history access from outside its own run.
+ *
+ * The history is runtime-owned state reachable from model code, so it takes the
+ * same fencing a leased binding does: without it a continuation an earlier run
+ * parked could read — or clear — whatever the CURRENT run has retained.
+ */
+function requireCompletionRun(intrinsic: string): void {
+  if (leasedRunId() === undefined) {
+    throw new CapturedError(`${intrinsic} is only reachable while its own cell is running`)
+  }
+}
+
+function requireCompletionHandle(id: unknown): number {
+  if (typeof id !== 'number' || !capturedNumberIsSafeInteger(id)) {
+    throw new CapturedError(`${COMPLETION_HISTORY_GLOBAL}(id) takes an integer completion handle`)
+  }
+  return id
+}
+
+/**
+ * Retrieve one retained completion, or say plainly that it is gone.
+ *
+ * An arrow rather than a declaration, here and below: a function declaration
+ * carries a `prototype` object, which would hand model code a mutable surface
+ * hanging off a frozen intrinsic and would let `new $out()` mean something.
+ */
+const completionHandle = (id: unknown): unknown => {
+  requireCompletionRun(COMPLETION_HISTORY_GLOBAL)
+  const handle = requireCompletionHandle(id)
+  const slot = findCompletionSlot(handle)
+  // A handle from a previous generation lands here too: ids are never reused, so
+  // an old one is simply absent and can never name a value it did not create.
+  if (slot === undefined) throw new CompletionExpiredError(`result ${handle} was evicted; recompute it`)
+  return slot.value
+}
+
+/** Bounded metadata for every retained completion, in creation order. */
+const completionList = (): unknown[] => {
+  requireCompletionRun(COMPLETION_HISTORY_GLOBAL)
+  const rows: unknown[] = []
+  for (let index = 0; index < completionSlots.length; index++) {
+    const slot = completionSlots[index] as CompletionSlot
+    capturedReflectApply(capturedArrayPush, rows, [{
+      id: slot.id,
+      type: slot.type,
+      serializedBytesAtCapture: slot.bytes,
+      nodes: slot.nodes,
+    }])
+  }
+  return rows
+}
+
+/** Release one retained completion. Idempotent: an unknown handle answers `false`. */
+const completionDrop = (id: unknown): boolean => {
+  requireCompletionRun(COMPLETION_HISTORY_GLOBAL)
+  const handle = requireCompletionHandle(id)
+  for (let index = 0; index < completionSlots.length; index++) {
+    const slot = completionSlots[index] as CompletionSlot
+    if (slot.id !== handle) continue
+    capturedReflectApply(capturedArraySplice, completionSlots, [index, 1])
+    retainedBytes -= slot.bytes
+    retainedNodes -= slot.nodes
+    if (lastRetainedId === handle) lastRetainedId = undefined
+    return true
+  }
+  return false
+}
+
+/** Release the whole history, answering how many slots that was. */
+const completionClear = (): number => {
+  requireCompletionRun(COMPLETION_HISTORY_GLOBAL)
+  const released = completionSlots.length
+  completionSlots.length = 0
+  retainedBytes = 0
+  retainedNodes = 0
+  lastRetainedId = undefined
+  return released
+}
+
+/** The value of the most recent retained completion, or `undefined`. */
+function lastRetainedValue(): unknown {
+  if (lastRetainedId === undefined) return undefined
+  return findCompletionSlot(lastRetainedId)?.value
+}
+
+/** Attach one immutable method to the program-visible `$out` function. */
+function defineIntrinsicMethod(target: object, name: string, value: unknown): void {
+  capturedObjectDefineProperty(target, name, { value, enumerable: true, writable: false, configurable: false })
+}
+defineIntrinsicMethod(completionHandle, 'list', completionList)
+defineIntrinsicMethod(completionHandle, 'drop', completionDrop)
+defineIntrinsicMethod(completionHandle, 'clear', completionClear)
+capturedObjectFreeze(completionHandle)
+
+/**
+ * Hand one intrinsic name over to the program, as an ordinary global assignment
+ * would leave it. Nothing is lost that the runtime needs: the history stays
+ * runtime-owned and the next generation reinstalls the accessor.
+ */
+function claimIntrinsicName(name: string, assigned: unknown): void {
+  capturedObjectDefineProperty(globalThis, name, {
+    value: assigned,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  })
+}
+
+/**
+ * Install the two model-visible intrinsics.
+ *
+ * CONFIGURABLE on purpose. A non-configurable own global makes a top-level
+ * `const $out` fail the whole cell with `Identifier has already been declared`,
+ * and `tests/completion-contracts.spec.ts` pins that declaration as legal today.
+ * Configurable accessors let a lexical declaration shadow them the way Node's
+ * REPL lets a user shadow `_`; the function object itself is frozen, so the
+ * program can lose its own access to the history but can never reshape it.
+ *
+ * Both accessors are fenced on BOTH sides. A getter that answered outside its
+ * run would leak a later run's values to a parked continuation; a setter that
+ * answered would let that continuation retire an intrinsic the CURRENT run is
+ * relying on. Refusing the write is not a loss for the program either: an
+ * assignment nobody is running to observe had no legitimate reader.
+ */
+function completionIntrinsicDescriptor(name: string): PropertyDescriptor {
+  const descriptor = capturedObjectCreate(null) as PropertyDescriptor
+  descriptor.get = name === COMPLETION_HISTORY_GLOBAL
+    ? (): unknown => completionHandle
+    : (): unknown => {
+        requireCompletionRun(LAST_RESULT_GLOBAL)
+        return lastRetainedValue()
+      }
+  // Assignment retires the accessor for this generation, which is what makes the
+  // `$_` notice single-shot: the setter no longer exists to fire a second time.
+  descriptor.set = (assigned: unknown): void => {
+    requireCompletionRun(name)
+    claimIntrinsicName(name, assigned)
+    if (name === LAST_RESULT_GLOBAL) emit(LAST_RESULT_CLAIMED_NOTICE)
+  }
+  descriptor.enumerable = false
+  descriptor.configurable = true
+  return descriptor
+}
+
+/**
+ * Install both intrinsics, and reinstall either one the program DELETED.
+ *
+ * Deletion and assignment are different acts and get different answers. An
+ * assignment leaves a data property the program is now using, and reviving the
+ * accessor over it would take a live variable away mid-namespace; a deletion
+ * leaves the name free, and nothing is served by making the model live without
+ * the history for the rest of the generation over one stray `delete`. Testing
+ * for the name's ABSENCE tells the two apart without tracking any extra state,
+ * and running it at the start of every run also repairs a deletion issued from a
+ * detached continuation, which no run could otherwise undo.
+ *
+ * A convenience, NOT a security boundary — do not build one on it. A program
+ * that deletes the name and defines its own in the same cell reaches exactly the
+ * end state an ordinary assignment would, and keeps it: that is the same
+ * acceptable self-harm, reached by a longer route. What actually protects the
+ * history is that the store is reachable only through closures, never through
+ * this global.
+ */
+function installCompletionIntrinsics(): void {
+  if (!capturedObjectHasOwn(globalThis, COMPLETION_HISTORY_GLOBAL)) {
+    capturedObjectDefineProperty(globalThis, COMPLETION_HISTORY_GLOBAL, completionIntrinsicDescriptor(COMPLETION_HISTORY_GLOBAL))
+  }
+  if (!capturedObjectHasOwn(globalThis, LAST_RESULT_GLOBAL)) {
+    capturedObjectDefineProperty(globalThis, LAST_RESULT_GLOBAL, completionIntrinsicDescriptor(LAST_RESULT_GLOBAL))
+  }
+}
+installCompletionIntrinsics()
 
 /** The terminal fragment of one run, without its envelope fields. */
 type DoneFragment = { json?: string; error?: RealmProgramFailure }
@@ -689,16 +1141,26 @@ function boundedFailure(kind: 'exception' | 'invalid-output', message: string, r
   return { error: { kind, message } }
 }
 
-/** Prepare the program's completion value; only lossless JSON within budget crosses. */
+/**
+ * Prepare the program's completion value; only lossless JSON within budget
+ * crosses. A value that does cross is also the only thing the history retains:
+ * this is the one place that holds the live value, its exact serialized size and
+ * its node count at once, and it runs before the run's Inspector object group is
+ * released. Reached only from the SUCCESS arm of the boundary, so an exception,
+ * abort, timeout, cancellation or output overflow never opens a slot.
+ */
 function prepareCompletion(value: unknown, remaining: number, maxOutputBytes: number): DoneFragment {
   if (value === undefined) return {}
+  const stats = newCaptureStats(completionLimits.maxCompletionHistoryNodes)
   let json: string
   try {
-    json = capturedJsonStringify(snapshotJson(value))
+    json = capturedJsonStringify(snapshotValue(value, new CapturedSet<object>(), stats))
   } catch {
     return boundedFailure('invalid-output', 'program completion must be lossless JSON', remaining, maxOutputBytes)
   }
-  if (capturedBufferByteLength(json, 'utf8') > remaining) return outputLimit(maxOutputBytes)
+  const bytes = capturedBufferByteLength(json, 'utf8')
+  if (bytes > remaining) return outputLimit(maxOutputBytes)
+  retainCompletion(value, bytes, stats)
   return { json }
 }
 
@@ -837,6 +1299,7 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
   const run: ActiveRun = {
     id: message.runId,
     nonce: message.nonce,
+    completionId: message.completion.id,
     logs: new LogBuffer(message.maxOutputBytes, message.runId, message.nonce),
     pending: new CapturedMap<number, PendingCall>(),
     nextCallId: 1,
@@ -851,6 +1314,10 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
   let done: DoneFragment
   const objectGroup = `dsh-prime-run-${run.id}`
   try {
+    // Inside the guard with the rest of the setup: a malformed run message must
+    // still reach a terminal, not strand the host waiting out its wall clock.
+    completionLimits = message.completion.limits
+    installCompletionIntrinsics()
     installNamespaces(message.namespaces)
     const parameters: ReplEvaluateParameters = {
       // The directive and the program's first line deliberately share a
