@@ -4,11 +4,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import { assertCallableReferences } from './command.js'
 import { HarnessStore, renderHarnessState } from './store.js'
 import type { HarnessEdit, HarnessLimits, HarnessScope, HarnessState } from './types.js'
-
-/** The sole model-visible execution tool; a presentation transport, never a callable capability. */
-const REPL_TOOL_NAME = 'repl'
 
 /** Deployment configuration for persistence, refinement bounds, and prompt budgets. */
 export interface ContinualConfig {
@@ -207,18 +205,7 @@ export function registerContinual(ctx: Context, config: ContinualConfig): Harnes
         throw new Error('prime-agent: apply requires trigger, evidence, expected_outcome, and edits')
       }
       const edits = args.edits as HarnessEdit[]
-      for (const edit of edits) {
-        if (edit.action === 'delete' || (edit.kind !== 'skill' && edit.kind !== 'subagent')) continue
-        const referencedTool = edit.reference?.tool.trim()
-        if (referencedTool === undefined || referencedTool.length === 0) continue
-        if (referencedTool === REPL_TOOL_NAME) {
-          throw new Error(`prime-agent: ${edit.kind}:${edit.id} cannot reference ${referencedTool}; it is a presentation transport, not a tools SDK member`)
-        }
-        const visible = ctx.tools.get(referencedTool, scope === 'local' ? exec.agent : undefined)
-        if (visible === undefined) {
-          throw new Error(`prime-agent: ${edit.kind}:${edit.id} references unavailable tool ${JSON.stringify(referencedTool)}`)
-        }
-      }
+      assertCallableReferences(ctx, exec.agent, scope, edits)
       const result = await store.apply(
         scope,
         owner,

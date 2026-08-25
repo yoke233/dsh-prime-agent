@@ -28,7 +28,8 @@ Merge remote-tracking branch 'origin/main' into pr-1053
 | `agent_message` 回复与 family roster | `report`、`send_message`、`list_agents` 与 DSH Agent/Subagent 服务 | 复用 DSH 直接父子授权和消息队列，不另建消息总线 |
 | `rlm.list_subagents()` / `delete_subagent()` | `list_agents` / 当前无 delete | 复用现有目录与权限检查，不把 interrupt 冒充 delete |
 | Continual Harness | `refine` | 适配证据、scope、并发和回滚规则 |
-| Auto-refine 与 refine review | 当前未适配 | 必须先重新审阅上游真实契约，不能从本地路线名称反推实现 |
+| 手动 `/refine` | DSH 斜杠命令 + 独立有界 LLM proposal + 现有事务 store | 复用接收 Agent 路由，以 maintenance 串行，并在 store apply 前 fail closed |
+| Auto-refine 与独立 refine review | 当前未适配 | 必须先重新审阅上游真实契约，不能从手动 `/refine` 反推实现 |
 | Goal、compaction、heartbeat、daemon 生命周期 | DSH Goal、Compaction、Jobs、Schedule、Session | 组合，不重复实现 |
 | Python/kernel-owned MCP programs | DSH Host MCP 工具注册表 + repl cell bindings | 复用 Host 的连接、认证、工具代际和清理；不在 Realm 内创建第二套 MCP runtime |
 | TUI、ACP、provider、计费、安装器 | 不属于本插件 | 除非改变模型可见 RLM 契约，否则忽略 |
@@ -123,7 +124,7 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 - Prime 的 child answer 可以进入 parent 仍在进行的计算。DSH 0.1.1-rc.2 已原生实现该不变量：官方 `tool-subagent-report` 默认使用 `next-step`，由 continuation manager 调用 `parent.steer()`，让运行中的 parent 在最近 step 消费并唤醒空闲 parent，同时维护唤醒记账以及 report-before-settlement FIFO。本插件直接组合该能力，不再替换 report row 或维护私有 adapter。
 - Prime 的 Python heap 能保存活对象和函数；当前适配用可信 `exec.agent.id` 解析的 Realm identity 选择 Persistent TypeScript Realm，在同一 Worker generation 中保留 TypeScript live objects。IPython 只用于参考行为与失败语义，不是产品 backend。
 - 当前跨 Agent 上下文使用共享工作区 handoff file。写后不改是 policy 约定，不存在独立 Capsule store、`share`/`mount` 或文件访问授权。
-- `refine` 目前需要显式调用，不会自动观察效果或生成 proposal。
+- 手动 `/refine` 会生成有界 edits proposal，并通过现有 revision 检查 store 提交；它不会观察效果或自动触发。
 - Prime 可以为单个 child 选择 reasoning level；DSH 0.1.1-rc.2 的 Subagent 调用当前没有对应的 per-spawn 参数。
 - Prime compaction 会清理无法纳入有界快照的超大 Python 变量；DSH compaction 不遍历、快照或清理 Realm heap。spill 只在 backend 可用时 best-effort 约束模型 projection 与日志，失败时保留 inline 结果，其 artifact 生命周期由 DSH store/部署层负责。
 - Prime 的 MCP program 运行在 Kernel/ACP runtime；DSH 的对应能力属于 Host 工具注册表，只有 profile 显式安装的 MCP client/tools 才会进入 repl 单元的绑定。

@@ -8,6 +8,7 @@ import { defineTool, renderToolsSdk, type JsonValue } from '@deepseek-ai/dsh-too
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { registerApplyPatch } from './apply-patch/plugin.js'
 import { registerContinual } from './continual/plugin.js'
+import { registerRefineCommand } from './continual/command.js'
 import type { HarnessLimits } from './continual/types.js'
 import { registerPolicy } from './policy.js'
 import { RealmIdentityStore } from './realm/identity.js'
@@ -23,6 +24,8 @@ export interface Config {
   stateDirectory: string
   refineToolName?: string
   allowGlobalRefinement?: boolean
+  refinementMaxTokens?: number
+  refinementMaxConversationChars?: number
   requireOrchestrationTools?: boolean
   continual?: Partial<HarnessLimits>
 }
@@ -32,6 +35,8 @@ export const Config: z<Config> = z.object({
   stateDirectory: z.string().required(),
   refineToolName: z.string().default('refine'),
   allowGlobalRefinement: z.boolean().default(false),
+  refinementMaxTokens: z.natural().min(256).default(4096),
+  refinementMaxConversationChars: z.natural().min(1000).default(80000),
   requireOrchestrationTools: z.boolean().default(true),
   continual: z.object({
     maxEntriesPerScope: z.natural().min(1).default(64),
@@ -307,7 +312,14 @@ export function apply(ctx: Context, config: Config): void {
 
   registerApplyPatch(ctx)
   registerPolicy(ctx, { requireOrchestrationTools: config.requireOrchestrationTools ?? true })
-  registerContinual(ctx, { stateDirectory: join(stateDirectory, 'continual'), toolName: refineToolName, allowGlobal: config.allowGlobalRefinement ?? false, limits: continualLimits })
+  const allowGlobalRefinement = config.allowGlobalRefinement ?? false
+  const continualStore = registerContinual(ctx, { stateDirectory: join(stateDirectory, 'continual'), toolName: refineToolName, allowGlobal: allowGlobalRefinement, limits: continualLimits })
+  registerRefineCommand(ctx, continualStore, {
+    allowGlobal: allowGlobalRefinement,
+    limits: continualLimits,
+    maxTokens: config.refinementMaxTokens ?? 4096,
+    maxConversationChars: config.refinementMaxConversationChars ?? 80000,
+  })
 
   ctx.tools.guard(exec => exec.parent === undefined && exec.name !== REPL_TOOL_NAME ? 'use the repl tool for this session' : undefined)
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {

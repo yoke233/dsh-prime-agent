@@ -28,7 +28,8 @@ Synchronize behavioral contracts and architecture, not implementation language o
 | `agent_message` replies and family roster | `report`, `send_message`, `list_agents`, and DSH Agent/Subagent services | Reuse DSH direct-parent authority and inboxes; do not invent a second message bus |
 | `rlm.list_subagents()` / `delete_subagent()` | `list_agents` / no current delete | Reuse the existing catalog and authority checks; never present interrupt as delete |
 | Continual Harness | `refine` | Adapt evidence, scope, concurrency, and rollback rules |
-| Auto-refine and refine review | Not currently adapted | Re-review the upstream contract before implementation; do not infer it from a local roadmap label |
+| Manual `/refine` | DSH slash command + independent bounded LLM proposal + existing transactional store | Reuse the receiving Agent route, serialize with maintenance, and fail closed before store apply |
+| Auto-refine and separate refine review | Not currently adapted | Re-review the upstream contract before implementation; do not infer it from manual `/refine` |
 | Goals, compaction, heartbeat, daemon lifecycle | Existing DSH Goal, Compaction, Jobs, Schedule, and Session capabilities | Compose; do not duplicate |
 | Python/kernel-owned MCP programs | DSH Host MCP tool registry + repl cell bindings | Reuse Host connection, authentication, tool-generation, and cleanup ownership; do not create a second MCP runtime inside the Realm |
 | TUI, ACP, providers, billing, installer | Outside this plugin | Ignore unless they change an RLM-visible contract |
@@ -123,7 +124,7 @@ This record is not an upstream baseline change; it documents one destructive rep
 - Prime child answers can inform the parent's active computation. DSH 0.1.1-rc.2 now owns this invariant: the official `tool-subagent-report` defaults to `next-step`, and the continuation manager calls `parent.steer()` so a running parent consumes the report at its nearest step while an idle parent wakes. The manager also owns waking accounting and report-before-settlement FIFO. This plugin composes that capability directly and no longer replaces the report row or maintains a private adapter.
 - Prime's Python heap preserves live objects and functions; the current adapter selects a Persistent TypeScript Realm through the Realm identity resolved from the trusted `exec.agent.id` and retains TypeScript live objects inside one Worker generation. IPython remains reference material for behavior and failure semantics, not a product backend.
 - Cross-agent context currently uses workspace handoff files. Write-once behavior is a policy convention; there is no separate Capsule store, `share`/`mount`, or file-access grant.
-- `refine` is explicit; it does not yet observe outcomes or propose refinements automatically.
+- Manual `/refine` proposes bounded edits and commits them through the existing revision-checked store; it does not observe outcomes or trigger automatically.
 - Prime can select a reasoning level for one child; DSH 0.1.1-rc.2 currently has no corresponding per-spawn Subagent parameter.
 - Prime compaction removes oversized Python variables that cannot enter a bounded snapshot; DSH compaction does not traverse, snapshot, or prune Realm heap. Spilling bounds model projections and logs only on the best-effort path, preserves inline results on failure, and leaves artifact lifecycle to the DSH store/deployment layer.
 - Prime MCP programs run in Kernel/ACP runtimes; the DSH counterpart belongs to the Host tool registry, so only MCP clients/tools explicitly installed by the profile enter the repl cell bindings.

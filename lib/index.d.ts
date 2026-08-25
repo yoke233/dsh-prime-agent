@@ -11,6 +11,8 @@ export interface Config {
     stateDirectory: string;
     refineToolName?: string;
     allowGlobalRefinement?: boolean;
+    refinementMaxTokens?: number;
+    refinementMaxConversationChars?: number;
     requireOrchestrationTools?: boolean;
     continual?: Partial<HarnessLimits>;
 }

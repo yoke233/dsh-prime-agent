@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import CommandRuntime from '@deepseek-ai/dsh-commands'
+import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt, { renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as primeAgent from '../src/index.js'
@@ -29,6 +31,8 @@ async function loadComposition(): Promise<Context> {
   await writeFile(configPath, [
     "- name: '@deepseek-ai/dsh-system-prompt'",
     "- name: '@deepseek-ai/dsh-tools'",
+    "- name: '@deepseek-ai/dsh-session'",
+    "- name: '@deepseek-ai/dsh-commands'",
     "- name: 'dsh-prime-agent/runtime'",
     '  config:',
     `    stateDirectory: ${JSON.stringify(stateDirectory)}`,
@@ -46,6 +50,8 @@ async function loadComposition(): Promise<Context> {
   const modules = new Map<string, unknown>([
     ['@deepseek-ai/dsh-system-prompt', SystemPrompt],
     ['@deepseek-ai/dsh-tools', ToolRuntime],
+    ['@deepseek-ai/dsh-session', SessionStore],
+    ['@deepseek-ai/dsh-commands', CommandRuntime],
     ['dsh-prime-agent/runtime', primeRuntime],
     ['dsh-prime-agent', primeAgent],
   ])
@@ -75,6 +81,7 @@ describe('dsh-prime-agent Loader composition', () => {
     expect(ctx.tools.get('prime_realm_identity')).toBeUndefined()
 
     const agent = { id: 'loader-agent' } as Agent
+    expect(ctx.commands.find(agent, 'refine')).toBeDefined()
     const assembly = await ctx.systemPrompt.assemble({ agent })
     expect(assembly.tools.map(tool => tool.name)).toEqual(['repl'])
     const snapshot = renderContextSnapshot(assembly)

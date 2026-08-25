@@ -72,7 +72,7 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 - 记录 before/after 并支持冲突安全 rollback；
 - 不保存任务过程数据和大上下文。
 
-上游已经提供自动 refinement，但当前 DSH 适配只实现显式 inspect/apply/rollback。没有完成新的上游行为审阅前，不从本地路线名称反推 proposal、review、权限或效果观察契约。
+上游已经提供自动 refinement；当前 DSH 适配实现显式 inspect/apply/rollback 和人类触发的 `/refine` 有界 proposal，但不实现 auto-refine、独立人工 review 或效果观察。没有完成新的上游行为审阅前，不从本地路线名称反推自动触发与批准契约。
 
 ## Continual Harness 数据分类
 
@@ -107,7 +107,7 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 | list/follow-up/cancel child | `list_agents` / `send_message` / `interrupt_agent` |
 | delete child | 当前无对应操作；持久 child Session 不由插件删除 |
 | `rlm.harness` | `refine` |
-| `/refine` / auto-refine | 显式 inspect/apply/rollback；自动 proposal 尚未实现 |
+| `/refine` / auto-refine | 手动 `/refine` 独立生成有界 proposal 并复用事务 store；auto-refine 未实现 |
 | per-child `thinking` | 当前无 per-spawn 参数；等待 DSH Subagent 原生支持并按 resolved model 校验 |
 | kernel-owned MCP programs | DSH Host MCP client 注册统一 tools；repl 单元从 catalog 生成 `tools.*` bindings |
 | IPython snapshot pruning | Realm 不 snapshot/GC；任务文件 + spill artifact + 紧凑 live 工作集 |

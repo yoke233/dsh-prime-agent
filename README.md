@@ -30,15 +30,15 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
   <img src="./assets/readme/architecture.svg" width="100%" alt="repl {code} 经 Agent scope 用可信 exec.agent.id 解析 Realm identity,host primeRealmRuntime 服务准入持久 Realm Worker;官方 code-runtime row 未改动,非 Prime 会话继续官方 one-shot">
 </p>
 
-- 模型 catalog 只含 `repl`。其他 DSH 工具不直接可见:prompt assembly 把 tools 列表过滤到只剩 `repl`,直接调用其他工具会被 guard 拒绝;这些能力作为 cell 内预加载绑定出现——`tools.*` 是返回已解析 canonical JavaScript value 的 typed bindings,`agents.*`(spawn/fork/list/send/interrupt)与 `jobs.*`(list/output/kill)是 continuable child 与后台任务的薄适配。Agent 固定提示与具体对话、任务、仓库和历史错误无关；当前 catalog 只负责生成真实参数与返回类型声明。
+- 模型 catalog 只含 `repl`。其他 DSH 工具不直接可见:prompt assembly 把 tools 列表过滤到只剩 `repl`,直接调用其他工具会被 guard 拒绝;这些能力作为 cell 内预加载绑定出现——`tools.*` 调用复用 DSH 的模型结果投影：`result.content` 非空时返回其官方内容，只有 content 为空时才回退 canonical value。`agents.*`(spawn/fork/list/send/interrupt)与 `jobs.*`(list/output/kill)是 continuable child 与后台任务的薄适配。Agent 固定提示与具体对话、任务、仓库和历史错误无关。
 - 路由信任 Agent 执行上下文。`repl` 要求拥有 Agent 会话:插件用可信 `exec.agent.id` 从共享 `realm-identity` 存储解析该会话稳定的不透明 Realm id,再把程序、本轮租约绑定与取消信号交给 host 侧的 `ctx.primeRealmRuntime.run(...)`。没有握手、没有模型可见的身份工具;缺少可信执行上下文或无法解析 Realm id 时明确失败,绝不降级。
 - Host 服务与官方运行时并存。`cordis.patch.yml` 只是把 `dsh-prime-agent/runtime` 作为新 row 插入,官方 `code-runtime` row 原样保留;非 Prime 会话继续使用官方 one-shot 语义,不存在 fallback。
 - Realm 内的绑定经跨 run 稳定的 Proxy 与 per-run binding lease 调用:schema、审批、沙箱、日志、并发和取消仍由 DSH 执行,run 结束立即撤销授权。
 - 多个 TUI 进程可共享 Prime 持久状态并同时运行不同 Session；同一 Session 的 live Realm 同时只允许一个进程持有，owner 退出后另一进程以空 namespace 接管。
 - Prime 不封装搜索接口：直接调用 DSH 的 `grep`，并在 repl 程序内把 TypeScript 正则字面量的 `.source` 作为 `pattern`，避免字符串二次转义。
-- Prime 额外注册本地组合能力 `tools.apply_patch({ patch })`：采用严格的 `*** Begin Patch` grammar，一次预检同文件多 hunk 或多文件 Add/Update，再通过 Agent catalog 中正式的 DSH `read`/`write` nested calls 执行；sandbox、approval、observation、日志、取消和 Session cwd 仍归 DSH。当前不支持 Delete/Move，也不承诺多文件事务原子性；正式 `read` 的行 DTO 在组合边界规范化为 LF。
+- Prime 额外注册本地组合能力 `tools.apply_patch({ patch })`：采用严格的 `*** Begin Patch` grammar，一次预检同文件多 hunk 或多文件 Add/Update，再把相对或绝对目标路径原样交给 Agent catalog 中正式的 DSH `read`/`write` nested calls；路径解析与授权、sandbox、approval、observation、日志、取消和 Session cwd 仍归 DSH。parser 只拒绝空路径与 NUL，当前不支持 Delete/Move，也不承诺多文件事务原子性；正式 `read` 的行 DTO 在组合边界规范化为 LF。
 - Profile 显式安装的 DSH Host MCP client 把 server tools 注册进统一 catalog，repl 单元自动获得对应 `tools.*` 绑定；Prime 不复制 Python kernel-owned MCP runtime。
-- 工具结果已经是 Realm 内的 JavaScript value，不对其再次 `JSON.parse`。notebook 结构化 preview 中的 `\\` 只是 JSON notation；模型自行编写 Windows 路径时优先使用 `D:/work/project` 形式，避免额外转义层。
+- `tools.*` 返回值遵循官方模型投影：有 content 时是官方文本，没有 content 时才是 canonical JavaScript value；不要对返回值盲目再次 `JSON.parse`。notebook 结构化 preview 中的 `\\` 只是 JSON notation；模型自行编写 Windows 路径时优先使用 `D:/work/project` 形式，避免额外转义层。
 - Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值；`repl` 的外层 canonical value 仍是可程序化读取的 lossless JSON（`logs`、可选 `result` 与可信 presentation metadata），但模型只看到无类型外壳的 notebook 文本：logs 和字符串原样显示，结构化值只 pretty-print 一次，空结果返回空文本；renderer 不添加 `[repl result: ...]`、`[repl logs]` 或 Markdown fence。外层 notebook 文本超过展示预算时由 DSH 写入 artifact 并返回 locator；保存失败时保留完整 inline 成功结果并告警，不伪造 locator。
 - 完成值由 runtime 自动保留在 generation-local 的 completion history 中：`$_` 是最近已保留结果的首选入口，`$out(N)` 只用于较早结果；runtime-authored preview 由 nonce 验证后的 metadata 驱动，已保留 preview 明确教授这两个入口，未保留 preview 不显示 handle，opaque 值不做结构化渲染。用户主动返回旧 envelope 同形 JSON 时仍按普通 JSON 显示。
 - Realm 是 live-only 的：abort、timeout、OOM 会 hard-kill Worker 并丢失 namespace，下一次真正执行时会明确提示之前的 bindings 与保留结果已丢失。跨重启的检查点由程序显式写入持久任务文件。
@@ -203,7 +203,7 @@ try {
 
 ## 编排工作流
 
-控制面 policy 引导模型在一个程序里组合读取、工具与子 Agent：中间值留在 live namespace；独立前台工作用 `Promise.all`，best-effort 探测逐项捕获，副作用型 mutation 顺序执行。大结果不需要模型自己归约——runtime 会把超过 64 KiB 的完成值换成有界引用 envelope，cell 仍然成功，原值留在 Realm 内可用 envelope 里给出的 `$out(N)` 继续计算。
+控制面 policy 引导模型在一个程序里组合读取、工具与子 Agent：中间值留在 live namespace；只有全部结果都必需时才用 `Promise.all`，独立 best-effort 探测改用 `Promise.allSettled` 或逐项捕获 `ToolCallError`，检查失败并重新抛出意外错误；副作用型 mutation 顺序执行。`grep` 的静态正则优先写成 `/.../.source`，raw 或插值模式使用 `String.raw`，避免 TypeScript 普通字符串吞掉正则反斜杠。大结果不需要模型自己归约——runtime 会把超过 64 KiB 的完成值换成有界引用 envelope，cell 仍然成功，原值留在 Realm 内可用 envelope 里给出的 `$out(N)` 继续计算。
 
 慢任务使用非阻塞控制循环：交给 managed Job 或 continuable child，保存 id/输出位置后继续独立工作，或结束当前 turn 等待通知；不使用 sleep 轮询或长阻塞 `await` 占住交互。多回合或多 child 工作由直接面向用户的 root 在有意义里程碑简洁汇报结果、阻塞和下一步。
 
@@ -219,6 +219,8 @@ Jobs 是独立的后台任务生命周期。后台 shell 或 one-shot background
 - `apply` 需要 inspect 得到的 revision、trigger、具体 evidence、可验证的 expected outcome,以及最小 create/update/delete edits。
 - `rollback` 需要当前 revision 和目标 transaction id,可附带 trigger 记录回滚动机,且只有相关条目没有发生漂移时才成功。
 
+人类可以直接使用 `/refine [--local|--global] [instructions]`。命令在 Agent idle maintenance 阶段复用该 Session 最近一次 provider/model 路由，向独立、无工具的 LLM 请求发送有界文本会话尾部与当前 harness 摘要；空 edits 是成功的 no-op，非空 edits 仍通过同一个 `HarnessStore.apply` revision 检查提交。`/refine rollback <transaction-id> [--global]` 复用现有冲突安全 rollback。自动 refine/效果观察仍未启用。
+
 条目类型包括 `prompt`、`memory`、`skill` 与 `subagent`。skill/subagent 只能引用真实可见的工具;它们记录路由,不会创建能力或扩大权限。
 
 ## 配置
@@ -229,6 +231,8 @@ Jobs 是独立的后台任务生命周期。后台 shell 或 one-shot background
 | --- | --- | --- |
 | `refineToolName` | `refine` | 持续学习工具名（可配置） |
 | `allowGlobalRefinement` | `false` | 允许模型访问 global 学习状态 |
+| `refinementMaxTokens` | `4096` | `/refine` 独立模型请求的最大输出 token |
+| `refinementMaxConversationChars` | `80000` | `/refine` 发送的有界、纯文本会话尾部字符数 |
 | `requireOrchestrationTools` | `true` | 要求 Agent catalog 具备 Subagent admission（`subagent`/`subagent_fork`）与 `agents`/`jobs` 控制（`list_agents`、`send_message`、`interrupt_agent`、`job_output`、`job_list`、`job_kill`） |
 | `continual` | 有界默认值 | 学习条目、事务、状态与 prompt 限制 |
 

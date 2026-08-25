@@ -72,7 +72,7 @@ Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt ass
 - 支持顶层 `await`。
 - cell 的末尾表达式是结果，顶层 `return` 无效。
 - 普通顶层 binding 留在同一 live namespace，供后续 cell 直接使用。
-- cell 内预加载三个绑定命名空间：`tools.*`（当前 Agent catalog 中除 `repl` 外的全部工具，返回已解析 canonical JavaScript value 的 typed bindings）、`agents.*`（`spawn`/`fork`/`list`/`send`/`interrupt` → `subagent`/`subagent_fork`/`list_agents`/`send_message`/`interrupt_agent`）、`jobs.*`（`list`/`output`/`kill` → `job_list`/`job_output`/`job_kill`）。SDK 从当前 catalog 生成真实参数与返回类型，并声明 `$_`、`$out(id)`、`$out.list()/drop(id)/clear()`；这些能力不可作为外层工具直接调用。
+- cell 内预加载三个绑定命名空间：`tools.*`（当前 Agent catalog 中除 `repl` 外的全部工具，非空官方 `result.content` 优先、空 content 回退 canonical value 的 bindings）、`agents.*`（`spawn`/`fork`/`list`/`send`/`interrupt` → `subagent`/`subagent_fork`/`list_agents`/`send_message`/`interrupt_agent`）、`jobs.*`（`list`/`output`/`kill` → `job_list`/`job_output`/`job_kill`）。SDK 从当前 catalog 生成真实参数与返回类型，并声明 `$_`、`$out(id)`、`$out.list()/drop(id)/clear()`；这些能力不可作为外层工具直接调用。
 - 固定 Agent 文案只教授 persistent TypeScript、已解析工具值、生成返回类型、completion intrinsics、preview 不可解析、Windows 路径优先 `/` 与紧凑 live 工作集；不拼接用户聊天、具体任务、仓库路径、历史失败或可选工具名。
 - 必须跨 Worker 或 host 重启保存的进度写入工作区文件。
 
@@ -82,7 +82,7 @@ MCP 同样不进入 Realm runtime。profile 显式安装 DSH Host MCP client 后
 
 ### 本地 `apply_patch` 组合能力
 
-`dsh-prime-agent` 在 Agent scope 注册 `apply_patch`，因此它会进入 Realm 自动生成的 `tools.*` SDK，但外层 prompt assembly 仍只暴露 `repl`。该工具不是新的文件系统 provider：parser 与 planner 在本地纯计算层解析严格的 Codex 风格 patch，读取和写入则通过 `ctx.tools.execute(...)` nested dispatch 调用当前 Agent catalog 中正式的 DSH `read` / `write`，并转发 owning Agent、parent token、root call id 与取消信号。DSH 继续拥有 Session cwd、sandbox、approval、observation、日志和单文件原子发布。
+`dsh-prime-agent` 在 Agent scope 注册 `apply_patch`，因此它会进入 Realm 自动生成的 `tools.*` SDK，但外层 prompt assembly 仍只暴露 `repl`。该工具不是新的文件系统 provider：parser 与 planner 在本地纯计算层解析严格的 Codex 风格 patch；parser 只拒绝空路径与 NUL，相对路径、绝对路径及包含 `..` 的路径均原样交给当前 Agent catalog 中正式的 DSH `read` / `write`，由 owning Session 的文件能力解析并授权。nested dispatch 通过 `ctx.tools.execute(...)` 转发 owning Agent、parent token、root call id 与取消信号，DSH 继续拥有 Session cwd、sandbox、approval、observation、日志和单文件原子发布。
 
 第一版只支持 `*** Add File` 与 `*** Update File`；Delete/Move 在 planning 阶段明确失败。所有目标先完整读取并完成严格、唯一的 hunk 匹配，之后才发生第一次 write，因此 parse、路径、读取或 planning 失败没有文件副作用。正式 `read` 的 canonical 行 DTO 不携带原始换行 metadata，executor 会把非空快照规范化为 LF 且保留一个末尾换行；纯 planner 对直接提供的无损 snapshot 仍保留 LF/CRLF 与末尾换行。
 
@@ -128,13 +128,15 @@ DSH compaction 不遍历、序列化或清理 Realm heap，spill 也不会驱逐
 
 ### 完成值、日志与大输出
 
-Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分类：lossless JSON 完成值走序列化 history，Map、Set、函数、BigInt、循环对象和 class instance 等非 JSON 值走 generation-local opaque history。日志与 Realm → Host 的 completion value 共同受 `maxOutputBytes` 硬上限约束；这层继续是机器可用的 lossless JSON，不是模型呈现格式。
+Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分类：lossless JSON 完成值走序列化 history，Map、Set、函数、BigInt、循环对象和 class instance 等非 JSON 值走 generation-local opaque history。日志与 Realm → Host 的 completion value 共同受 `maxOutputBytes` 硬上限约束。工具 binding 已在 Host 调用边界完成官方模型投影，因此 Worker 只处理投影后的普通完成值。
 
 完成值本身由 runtime 自动保留在 generation-local 的 completion history 中，模型优先通过 `$_` 读取最近已保留结果，只有访问较早结果时才使用 `$out(N)`；`$out.list()/drop(id)/clear()` 提供管理操作。`maxCompletionFullBytes`（默认 64 KiB）以内的完成值原样返回，超过后 Worker 仍产生固定 schema 的有界内部 envelope。Realm 在验证 terminal nonce 与 envelope shape 后才附加 discriminated `ReplPresentation`：retained preview 携带有效 handle，unretained preview 不携带 handle，opaque reference 不携带结构 projection；用户程序伪造旧 envelope 同形对象没有可信 metadata，仍是普通 JSON。降级链是 full → rich projection → minimal reference → output-limit，只有连最小内部引用都放不进剩余预算时才真正失败。捕获遍历带早退：越过 `max(maxCompletionHistoryEntryBytes, maxCompletionFullBytes)` 的值不再被完整走查，因此其超出边界的部分不做 lossless 校验，而 history 保留的是原对象引用、不是快照。handle 由 host 全局单调分配、绝不复用，hard-kill 后旧 handle 明确抛 `CompletionExpiredError`。opaque history 使用独立预算（默认 8 项、估算 8 MiB、262144 nodes）和独立 FIFO，不会挤占 lossless JSON history；`$_`/`$out(N)` 返回原对象 identity，分类过程不调用用户 `toJSON`、`toString` 或 inspect hook。
 
 外层 `repl` canonical value 保持结构化：`logs`、可选 `result` 和可选可信 `presentation` metadata 仍可由调用方程序化读取。模型 renderer 不再 `JSON.stringify({ logs, result })`：logs 和 scalar string 原样显示，full structured value 只 pretty-print 一次；retained preview 首先提示 `$_`、再给历史 `$out(id)`，unretained preview 不显示 handle，opaque reference 不调用用户 hook，无 logs 且无 completion 时返回空文本。renderer 不添加普通结果类型标题或 Markdown fence。preview 是观察文本而非可解析数据，后续计算必须回到命名变量、`$_` 或 `$out(id)`。
 
-工具调用的 canonical value、日志与 spill locator 仍由 DSH 工具层管理。程序可以在 Realm 内使用完整 canonical value 做归约；Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值，超过预算时 spill artifact 保存完整 notebook renderer 文本并按需读取。store 缺失、保存失败或 notice 无法放进预算时，策略保留完整 inline 成功结果并告警，不伪造 locator。这个预算不限制 Realm heap，也不等于上游 IPython 的 snapshot pruning；Realm 不复制 DSH 的 spill 或工具日志存储。
+工具调用的 canonical value、官方 content、日志与 spill locator 仍由 DSH 工具层管理。Prime binding 与官方 native Agent Loop 使用同一选择信号：`result.content.length > 0` 时返回官方模型内容，只有 content 为空时才返回 raw canonical value。Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值，超过预算时 spill artifact 保存完整 notebook renderer 文本并按需读取。store 缺失、保存失败或 notice 无法放进预算时，策略保留完整 inline 成功结果并告警，不伪造 locator。这个预算不限制 Realm heap，也不等于上游 IPython 的 snapshot pruning；Realm 不复制 DSH 的 spill 或工具日志存储。
+
+控制面 policy 只在全部结果都必需时建议 `Promise.all`；独立 best-effort 探测使用 `Promise.allSettled` 或逐项捕获 `ToolCallError`，同时检查失败并重新抛出意外错误。为避免 TypeScript 字符串层先消费反斜杠，静态 `grep` 正则使用 `/.../.source`，raw 或插值模式使用 `String.raw`。这些是模型侧编排约定，不改变 DSH 工具失败或 Realm partial-commit 语义。
 
 ### 失败与换代
 
@@ -180,7 +182,7 @@ handoff file 是写入时刻的快照；“写后不改”由 policy 约束，�
 
 ## Continual Harness
 
-`refine` 是控制面之后的次级学习层，当前接口只有：
+`refine` 是控制面之后的次级学习层。模型侧显式工具接口包括：
 
 - `inspect`：读取 scope 的 revision、entries 与近期 transactions。
 - `apply`：提交带 trigger、具体 evidence、可验证 expected outcome 与最小 edits 的事务。
@@ -188,7 +190,9 @@ handoff file 是写入时刻的快照；“写后不改”由 policy 约束，�
 
 apply 与 rollback 都要求调用方先 inspect，并携带 `expected_revision`；磁盘锁内再次检查 revision。每笔事务保存 before/after，历史有界保留。skill/subagent entry 必须引用调用时真实可见的工具，不能把 `repl` transport 当作 SDK member。
 
-local state 以 Session id 的 SHA-256 摘要命名。`allowGlobalRefinement` 默认为 false，此时 global inspect 和 mutation 都拒绝；启用后使用单一 `global.json`。当前 apply 是直接写入事务，没有 proposal/review 阶段、自动效果观察或 global 人工批准流程。
+人类侧 `/refine [--local|--global] [instructions]` 通过 DSH `ctx.commands.register` 注册。handler 使用 `Agent.runMaintenance` 与普通 turn 串行，按 `session.requestHeader()?.config`、再按 `agent.options` 复用 provider/model；它只向 `ctx.llm.stream()` 发送有界、图片已投影的文本会话尾部、当前 scope 摘要和可选指令，不开放工具。输出必须是 JSON proposal；截断、取消、非 stop、JSON/shape 错误或 revision 冲突全部 fail closed。空 edits 不落盘，非空 edits 走同一个 `HarnessStore.apply`。`/refine rollback <transaction-id> [--global]` 直接复用 `HarnessStore.rollback`。插件卸载先注销命令，再 drain 已开始的调用。
+
+local state 以 Session id 的 SHA-256 摘要命名。`allowGlobalRefinement` 默认为 false，此时 global inspect 和 mutation 都拒绝；启用后使用单一 `global.json`。手动 `/refine` 会生成 proposal 并在校验后直接提交，没有单独的人类 review 阶段、自动效果观察或 global 人工批准流程；auto-refine 仍未启用。
 
 进入 prompt 的 entry 是有界、JSON 引用的非可信建议。它不能替代基础 system prompt，也不能覆盖当前 user 指令、权限、sandbox 或工具约束。任务数据、研究材料、执行进度和大上下文不属于 Continual Harness。
 
@@ -220,6 +224,8 @@ Agent-scope `dsh-prime-agent`：
 | `stateDirectory` | 必填 | Realm identity 与 continual state 根目录。 |
 | `refineToolName` | `refine` | Continual Harness 工具名（可配置）。 |
 | `allowGlobalRefinement` | `false` | 是否允许 global harness 读取和写入。 |
+| `refinementMaxTokens` | `4096` | `/refine` 辅助模型请求的最大输出 token。 |
+| `refinementMaxConversationChars` | `80000` | `/refine` 会话尾部文本预算。 |
 | `requireOrchestrationTools` | `true` | 是否在 prompt assembly 时要求 Agent catalog 具备 Subagent admission（`subagent`/`subagent_fork`）与 `agents`/`jobs` 控制（`list_agents`、`send_message`、`interrupt_agent`、`job_output`、`job_list`、`job_kill`）。 |
 | `continual` | 有界默认值 | entry、evidence、transaction、状态文件和 prompt 预算。 |
 
