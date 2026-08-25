@@ -34,6 +34,8 @@ npm run check
 - 修改 `prime_refine` 时，保持默认 local、显式 inspect/apply/rollback、revision 检查、有界历史和冲突安全回滚；不得把任务材料、运行状态或大上下文写入 continual state。
 - 修改 Prime Agent 上游基线时，完整执行 `docs/upstream-sync.zh.md` 的流程；只有审阅完精确 commit 并记录 Adopt/Adapt/Defer/Reject 结论后，才能更新 `docs/upstream-baseline.json`。
 - Runtime 状态属于 `DSH_HOME`，不得写入源码仓库。不要提交凭据、本机绝对路径、临时评测 profile 或 `prime-agent-v2/` 状态。
+- 用户要求提交并推送时，在创建提交前运行一次 `pnpm run version:patch`；同一批变更只递增一次 patch 版本。
+- 版本递增不自动创建或推送 tag；只有用户明确要求发布时才处理 tag。
 
 ## 验证与完成标准
 
