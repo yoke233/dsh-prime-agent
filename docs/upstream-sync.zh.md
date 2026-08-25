@@ -87,7 +87,7 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 2. 公共行为变化时更新 `docs/architecture.md`、README 与工具 policy。
 3. 审阅随包 Prime preset（`agent-presets/prime/`）与上游 shipped `code` preset 的差异，移植仍然成立的模型面变化；Prime preset 是独立的 agent-plane 组合，不是 shipped preset 的整份快照。
 4. 每个采用或适配的契约都增加回归测试。
-5. 运行 `npm run check`。
+5. 运行 `npm run check:all`。
 6. 运行覆盖 repl、Subagent 与 Jobs 的真实 DSH 组合测试。
 7. 审阅配额、权限、取消、耐久性、重放可见性和失败行为。
 8. 审阅最终 diff，排除对 Prime 实现细节的意外耦合。

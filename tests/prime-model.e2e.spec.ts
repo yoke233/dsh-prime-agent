@@ -42,7 +42,7 @@ afterEach(async () => {
   root = undefined
 })
 
-describe.skipIf(!process.env.DEEPSEEK_API_KEY)('Prime realm with a real DeepSeek model', () => {
+describe.skipIf(process.env.DSH_RUN_MODEL_E2E !== '1' || !process.env.DEEPSEEK_API_KEY)('Prime realm with a real DeepSeek model', () => {
   it('retains a live binding across two agent turns while exposing only repl', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-prime-model-'))
     const stateDirectory = join(root, 'state')

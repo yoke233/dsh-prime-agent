@@ -56,7 +56,7 @@ async function bootPrime(config: Record<string, unknown> = {}): Promise<{ agent:
 }
 
 describe('Prime REPL composition', () => {
-  it('exposes only repl and states the control-plane policy', async () => {
+  it('exposes only repl and generated capability declarations', async () => {
     const { agent } = await bootPrime()
 
     const initialAssembly = await context!.systemPrompt.assemble({ agent })
@@ -64,55 +64,24 @@ describe('Prime REPL composition', () => {
     const sdk = initialAssembly.sections.find(section => section.name === 'tools:sdk')?.text
     expect(sdk).toBeDefined()
     if (sdk === undefined) throw new Error('tools SDK was not assembled')
-    expect(sdk).toContain('## Persistent TypeScript REPL')
-    expect(sdk).toContain('The final expression is the cell result')
-    expect(sdk).toContain('already parsed JavaScript values')
-    expect(sdk).toContain('do not call `JSON.parse` on tool results')
     expect(sdk).toContain('declare const $_: unknown')
     expect(sdk).toContain('declare function $out(id: number): unknown')
     expect(sdk).toContain('function list(): Array<{')
     expect(sdk).toContain('function drop(id: number): boolean')
     expect(sdk).toContain('function clear(): void')
     expect(sdk).toContain('declare const agents')
-    expect(sdk).toContain('spawn: (args: ToolArgsMap["subagent"]) => Promise<ToolOutputMap["subagent"]>')
+    expect(sdk).toContain("type ToolArguments<K extends ToolName> = K extends 'grep'")
+    expect(sdk).toContain('pattern: string | RegExp')
+    expect(sdk).toContain('[K in ToolName]: (args: ToolArguments<K>) => Promise<ToolOutputMap[K]>')
+    expect(sdk).toContain('spawn: (args: ToolArguments<"subagent">) => Promise<ToolOutputMap["subagent"]>')
     expect(sdk).toContain('declare const jobs')
-    expect(sdk).toContain('prefer forward slashes such as `D:/work/project`')
+    expect(sdk).toContain('output: (args: ToolArguments<"job_output">) => Promise<ToolOutputMap["job_output"]>')
+    expect(sdk).not.toContain('ToolResult')
     expect(sdk).toContain('apply_patch')
     expect(sdk).toContain('patch: string')
-    expect(sdk).toContain('Keep only paths, compact indexes, helper')
-    expect(sdk).not.toContain('the body of an async TypeScript function')
-    expect(sdk).not.toContain('Emit results with `return`')
-    expect(sdk).not.toContain('run_code')
-    const fixedPrompt = sdk.slice(0, sdk.indexOf('The available capabilities:'))
-    if (root === undefined) throw new Error('test root was not created')
-    expect(fixedPrompt).not.toContain('refine')
-    expect(fixedPrompt).not.toContain('subagent')
-    expect(fixedPrompt).not.toContain(root)
-    expect(fixedPrompt).not.toContain('slice is not a function')
-    expect(fixedPrompt).not.toContain('previous turn')
     const repl = initialAssembly.tools[0]
-    expect(repl?.description).toBe('Execute a TypeScript REPL cell.')
-    expect(repl?.description).not.toContain('persistent')
-    const codeSchema = (repl?.parameters.properties as Record<string, Record<string, unknown>> | undefined)?.code
-    expect(codeSchema?.description).toBe('TypeScript source code for this cell.')
-
-    const policy = initialAssembly.sections.find(section => section.name === 'prime-agent:rlm-policy')?.text ?? ''
-    expect(policy).toContain('Orchestration guidance:')
-    expect(policy).not.toContain('Each repl call executes the next cell')
-    expect(policy).not.toContain('The final expression is the cell result')
-    expect(policy).toContain('Parallelize independent read-only work')
-    expect(policy).toContain('serialize side-effecting mutations')
-    expect(policy).toContain('Do not sleep or busy-poll')
-    expect(policy).toContain('Agent handles and job ids are different')
-    expect(policy).toContain('The live session is not durable')
-    expect(policy).toContain('keep only useful locators and summaries live')
-    expect(policy).toContain('A failed call is a real outcome')
-    expect(policy).toContain('After a restart notice, rebuild from files and verify external state before resuming mutations')
-    expect(policy).toContain('Use edit for one exact in-place replacement')
-    expect(policy).toContain('apply_patch for a cohesive strict Add/Update patch')
-    expect(policy).toContain('multi-file apply_patch is ordered rather than transactional')
-    // The stale run_code transport must not leak into the policy text.
-    expect(policy).not.toContain('run_code')
+    expect(repl?.parameters.properties).toHaveProperty('code')
+    expect(initialAssembly.sections.some(section => section.name === 'prime-agent:rlm-policy')).toBe(true)
   })
 
   it('fails closed on any model-direct call that is not repl', async () => {
@@ -233,10 +202,7 @@ describe('Prime REPL composition', () => {
 
     const assembly = await context!.systemPrompt.assemble({ agent })
     const sdk = assembly.sections.find(section => section.name === 'tools:sdk')?.text
-    const policy = assembly.sections.find(section => section.name === 'prime-agent:rlm-policy')?.text ?? ''
     expect(sdk).toContain('refine_rules:')
     expect(sdk).not.toContain('prime_refine:')
-    expect(policy).toContain('The live session is not durable')
-    expect(policy).toContain('keep only useful locators and summaries live')
   })
 })

@@ -100,7 +100,7 @@ const bigReportTool = defineTool({
   },
   output: {
     schema: { type: 'json' },
-    render: (_args, value) => [{ type: 'text', text: renderReport(value as unknown as Report) }],
+    render: (args, value) => args.unicode ? [] : [{ type: 'text', text: renderReport(value as unknown as Report) }],
   },
   async execute(args): Promise<JsonValue> {
     return {
@@ -255,31 +255,18 @@ async function spillFiles(spillRoot: string): Promise<string[]> {
 }
 
 describe('scenario 1: nested full value, bounded model-facing content, retained live binding', () => {
-  it('gives the program the whole canonical value while the model-facing content keeps only a preview and locator', async () => {
+  it('returns the official bounded model content instead of the canonical report DTO', async () => {
     const { spillRoot, events, agent } = await bootPrime({ backend: 'local' })
     const expectedRows = reportRows(300, false)
-    const expectedChars = expectedRows.reduce((total, row) => total + row.length, 0)
 
     const first = await runRepl(agent, `
       const report = await tools.big_report({ rows: 300, marker: 'ALPHA' })
-      const summary = {
-        rows: report.rows.length,
-        chars: report.rows.reduce((total, row) => total + row.length, 0),
-        first: report.rows[0],
-        last: report.rows[report.rows.length - 1],
-      }
-      ;({ ...summary, text: report.rows.join('\\n') })
+      report
     `)
 
-    // The program computed over the COMPLETE structured value: a truncated or
-    // locator-substituted binding could not reproduce these two numbers.
     const firstValue = runValue(first)
-    expect(firstValue.result).toMatchObject({
-      rows: 300,
-      chars: expectedChars,
-      first: expectedRows[0],
-      last: expectedRows[299],
-    })
+    expect(firstValue.result).toBe(renderReport({ marker: 'ALPHA', rows: expectedRows }))
+    expect(firstValue.result).toContain('row-0150')
 
     // The model-facing copy is bounded, carries the locator, and drops the body.
     const content = textOf(first.content)
@@ -288,7 +275,7 @@ describe('scenario 1: nested full value, bounded model-facing content, retained 
     expect(content).toContain('Omitted')
     expect(content).not.toContain('row-0150')
 
-    // The artifact is the NOTEBOOK RENDERER's text, byte for byte — not a DTO re-serialization.
+    // The outer artifact contains the notebook rendering of the official tool text.
     const expectedText = renderRepl(firstValue)
     const recovered = await readFile(locatorOf(content), 'utf8')
     expect(recovered).toBe(expectedText)
@@ -297,15 +284,13 @@ describe('scenario 1: nested full value, bounded model-facing content, retained 
     // Exactly one artifact: the small outer result was never spilled as well.
     expect(await spillFiles(spillRoot)).toHaveLength(1)
 
-    // The realm survived the spill: the reduced live binding is readable next run.
-    const second = await runRepl(agent, 'summary')
+    // The realm retained the canonical DTO for code, while the same object identity
+    // continues to use the compact official presentation as a completion.
+    const field = await runRepl(agent, 'report.rows[150]!.text')
+    expect(runValue(field).result).toBe(expectedRows[150]!.text)
+    const second = await runRepl(agent, 'report')
     const secondValue = runValue(second)
-    expect(secondValue.result).toEqual({
-      rows: 300,
-      chars: expectedChars,
-      first: expectedRows[0],
-      last: expectedRows[299],
-    })
+    expect(secondValue.result).toBe(firstValue.result)
 
     // No handshake/bootstrap or code-dispatch projection reached the session log.
     expect(events).toEqual([])
@@ -435,7 +420,7 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
     const body = 'x'.repeat(500)
     const echoProgram = `
       const echoed = await tools.echo_text({ text: 'x'.repeat(500) })
-      echoed.text
+      echoed
     `
     // The notebook renderer's full text for the cell result. The FIRST run of a
     // fresh realm carries the namespace notice in `logs`, so probe the real
@@ -483,14 +468,14 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
     const { store, events, agent } = await bootPrime({ backend: 'stub', maxInlineBytes: 100 })
 
     const empty = await runRepl(agent, `
-      const echoed = await tools.echo_text({ text: '' })
+      const echoed = await tools.echo_text({ text: '' });
       echoed.text.length
     `)
     expect(runValue(empty).result).toBe(0)
 
     // The outer render stays under the cap, so nothing is ever spilled for it.
     const atCap = await runRepl(agent, `
-      const echoed = await tools.echo_text({ text: 'y'.repeat(100) })
+      const echoed = await tools.echo_text({ text: 'y'.repeat(100) });
       echoed.text.length
     `)
     expect(runValue(atCap).result).toBe(100)
@@ -501,7 +486,7 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
     // spills: the boundary is `>` on the model-facing text.
     const overCap = await runRepl(agent, `
       const echoed = await tools.echo_text({ text: 'y'.repeat(101) })
-      echoed.text
+      echoed
     `)
     expect(runValue(overCap).result).toBe('y'.repeat(101))
     expect(store?.saves).toHaveLength(1)
@@ -516,13 +501,13 @@ describe('scenario 5: a refusing spill backend', () => {
 
     const execution = await runRepl(agent, `
       const report = await tools.big_report({ rows: 300, marker: 'ALPHA' })
-      report.rows.join('')
+      report
     `)
 
     // A storage failure must never turn a successful call into an error, nor hide content.
     expect(execution.isError).toBe(false)
     const value = runValue(execution)
-    expect(value.result).toBe(expectedRows.join(''))
+    expect(value.result).toBe(renderReport({ marker: 'ALPHA', rows: expectedRows }))
     const content = textOf(execution.content)
     expect(content).toBe(renderRepl(value))
     expect(content).toContain('row-0150')

@@ -85,8 +85,54 @@ function registerFixtures(ctx: Context): void {
     name: 'repl_probe',
     description: 'Probe the repl bridge binding.',
     parameters: { value: { type: 'string' } },
-    output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: 'Probe completed: ' + String((value as Record<string, unknown>).value) }] },
     execute: args => Promise.resolve({ probe: 'repl-probe', value: args.value ?? '' }),
+  }))
+  ctx.tools.register(defineTool({
+    name: 'silent_probe',
+    description: 'Probe the binding fallback without model presentation.',
+    parameters: {},
+    output: { schema: { type: 'json' }, render: () => [] },
+    execute: () => Promise.resolve({ probe: 'silent' }),
+  }))
+  ctx.tools.register(defineTool({
+    name: 'primitive_probe',
+    description: 'Probe presentation of a primitive canonical value.',
+    parameters: {},
+    output: { schema: { type: 'integer' }, render: () => [{ type: 'text', text: 'Primitive completed: 7' }] },
+    execute: () => Promise.resolve(7),
+  }))
+  ctx.tools.register(defineTool({
+    name: 'mixed_content_probe',
+    description: 'Probe presentation of mixed text and image content.',
+    parameters: {},
+    output: {
+      schema: { type: 'json' },
+      render: () => [{
+        type: 'text',
+        text: 'Image metadata: 1x1',
+      }, {
+        type: 'image',
+        attachment: {
+          attachmentId: 'fixture-image' as never,
+          mediaType: 'image/png',
+          bytes: 1,
+          width: 1,
+          height: 1,
+        },
+      }],
+    },
+    execute: () => Promise.resolve({ image: 'fixture-image' }),
+  }))
+  ctx.tools.register(defineTool({
+    name: 'grep',
+    description: 'Probe RegExp argument projection.',
+    parameters: {
+      pattern: { type: 'string', required: true },
+      path: { type: 'string', required: true },
+    },
+    output: { schema: { type: 'json' }, render: () => [] },
+    execute: args => Promise.resolve({ pattern: args.pattern }),
   }))
 }
 
@@ -120,9 +166,50 @@ describe('Prime realm through the sole repl transport', () => {
     const isolated = await runRepl(beta.agent, '({ empty: typeof read === "undefined" })')
     expect(isolated.result).toEqual({ empty: true })
 
-    // Nested host tools arrive through the bridge and resolve to canonical JSON.
-    const nested = await runRepl(alpha.agent, `await tools.repl_probe({ value: 'bridge-ok' })`)
-    expect(nested.result).toEqual({ probe: 'repl-probe', value: 'bridge-ok' })
+    // Model code receives canonical JSON, while returning that exact object as
+    // the completion uses the tool's compact official presentation.
+    const canonical = await runRepl(alpha.agent, `
+      const probe = await tools.repl_probe({ value: 'bridge-ok' });
+      ({ probe: probe.probe, value: probe.value })
+    `)
+    expect(canonical.result).toEqual({ probe: 'repl-probe', value: 'bridge-ok' })
+    const presented = await runRepl(alpha.agent, `await tools.repl_probe({ value: 'bridge-ok' })`)
+    expect(presented.result).toBe('Probe completed: bridge-ok')
+
+    // A tool with no text rendering falls back to its canonical value.
+    const fallback = await runRepl(alpha.agent, `await tools.silent_probe({})`)
+    expect(fallback.result).toEqual({ probe: 'silent' })
+
+    // Primitive canonical values have no object identity to associate.
+    const primitivePresentation = await runRepl(alpha.agent, `await tools.primitive_probe({})`)
+    expect(primitivePresentation.result).toBe(7)
+
+    const mixedPresentation = await runRepl(alpha.agent, `await tools.mixed_content_probe({})`)
+    expect(mixedPresentation.result).toBe('Image metadata: 1x1')
+
+    const regexpPattern = await runRepl(
+      alpha.agent,
+      String.raw`await tools.grep({ pattern: /output\.render|\.render\(/, path: '.' })`,
+    )
+    expect(regexpPattern.result).toEqual({ pattern: String.raw`output\.render|\.render\(` })
+
+    const capturedRegExpGetter = await runRepl(alpha.agent, `
+      const originalSourceDescriptor = Object.getOwnPropertyDescriptor(RegExp.prototype, 'source')!
+      let safelyProjected
+      try {
+        Object.defineProperty(RegExp.prototype, 'source', { configurable: true, get: () => 'forged' })
+        safelyProjected = await tools.grep({ pattern: /actual/, path: '.' })
+      } finally {
+        Object.defineProperty(RegExp.prototype, 'source', originalSourceDescriptor)
+      }
+      safelyProjected
+    `)
+    expect(capturedRegExpGetter.result).toEqual({ pattern: 'actual' })
+
+    await expect(runRepl(
+      alpha.agent,
+      `await tools.grep({ pattern: /flagged/i, path: '.' })`,
+    )).rejects.toThrow('grep RegExp pattern must not use flags')
 
     // No handshake bootstrap exists in the realm: the identity binding is gone,
     // `repl` itself is not re-exposed, and the bridge supplies the delegation

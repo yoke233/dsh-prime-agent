@@ -64,6 +64,11 @@ function forwardResult(exec: ToolRunContext, result: ToolExecutionResult): void 
   if (!result.isError && result.concludesTurn) exec.concludeTurn()
 }
 
+function officialPresentation(result: ToolExecutionResult): string | undefined {
+  if (result.content.length === 0) return undefined
+  return result.content.filter(block => block.type === 'text').map(block => block.text).join('')
+}
+
 export interface ReplBindings { bindings: CodeBindingNamespace[]; finish(): Promise<void> }
 
 /** Build one cell's leased host capabilities from the calling Agent's catalog. */
@@ -93,7 +98,12 @@ export function createReplBindings(ctx: Context, exec: ToolRunContext): ReplBind
       await previousCommit
       forwardResult(exec, result)
       if (result.isError) throw new Error(result.error.message)
-      return result.value
+      const presentation = officialPresentation(result)
+      return presentation === undefined ? result.value : {
+        $dshPrimeBinding: 'presentation-v1',
+        value: result.value,
+        presentation,
+      }
     } finally {
       releaseCommit()
     }

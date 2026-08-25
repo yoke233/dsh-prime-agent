@@ -24,15 +24,14 @@ Prime REPL 分为三个独立层次。
 
 ### 2.1 执行层
 
-Host 与 Realm 之间只传 lossless JSON canonical value：
+Host 与 Realm 之间只传 lossless JSON：
 
-- binding arguments 必须是 lossless JSON；
-- `tools.*` 成功调用返回 DSH 工具的 canonical JSON value；
-- Realm 中得到的是已解析的 JavaScript value，不是 JSON 字符串；
-- 工具失败在 cell 中抛对应的 typed error；
-- renderer 文本不会回灌为工具返回值。
+- Host binding seam 上的 arguments 必须是 lossless JSON；Realm interface 仅为 `tools.grep.pattern` 接受无 flags 的真实 `RegExp`，并在跨 seam 前通过启动时捕获的原生 getter 投影为 `.source`；
+- `tools.*` 成功调用以内部 `{ value, presentation }` 传输，Worker 立即解包并只把 canonical `value` 返回给程序；
+- object/array value 与非空 text presentation 通过 Worker 私有 WeakMap 按 identity 关联；image content 仍由 deferred context 转发；
+- 工具失败在 cell 中抛对应的 typed error。
 
-模型不得对 `tools.*` 结果再次调用 `JSON.parse`。
+生成 SDK 始终声明 canonical `ToolOutputMap`。关联对象未经转换直接成为 completion 时展示 presentation；字段提取、spread、map 等派生值走普通 completion，primitive value 也保持 canonical。
 
 ### 2.2 保留层
 
@@ -74,28 +73,27 @@ history 只在当前 Worker generation 内有效。hard kill、OOM、active abor
 ## Persistent TypeScript REPL
 
 Use `repl` to execute TypeScript cells. Top-level `await` works. Variables,
-functions, and objects remain available in later cells while the current REPL
-generation is alive. The final expression is the cell result; top-level
-`return` is invalid.
+functions, and objects remain available while the REPL stays active. The final
+expression is the cell result; top-level `return` is invalid.
 
-Call the generated capabilities through `tools.*`, `agents.*`, and `jobs.*`.
-Their results are already parsed JavaScript values. Use the generated return
-types directly; do not call `JSON.parse` on tool results and do not guess their
-fields. Assign values that you will use again. If a value's shape is uncertain,
-inspect it with `Array.isArray(value)` and `Object.keys(value)`.
+Call tools through `tools.*`, `agents.*`, and `jobs.*`. Results are already
+parsed JavaScript values. Follow the provided TypeScript declarations; do not
+call `JSON.parse` on tool results or guess their fields. Assign values that you
+will reuse. If a value's shape is uncertain, inspect it with
+`Array.isArray(value)` and `Object.keys(value)`.
 
-The latest retained cell result is available as `$_`. Retrieve an older retained
-result with `$out(id)`. `$out` is a function, so call `$out(id)`; do not use
+`$_` is the latest available cell result. Retrieve an older result with
+`$out(id)`. `$out` is a function, so call `$out(id)`; do not use
 `$out.property` or `$out[id]`.
 
-Displayed cell output may be a shortened preview. Continue computation from
-your variables, `$_`, or `$out(id)` instead of parsing or copying the displayed
-text. Backslashes shown inside a JSON preview are JSON notation, not additional
+Displayed cell output may be shortened. Continue computation from your
+variables, `$_`, or `$out(id)` instead of parsing or copying displayed text.
+Backslashes shown inside a JSON preview are JSON notation, not additional
 characters in the underlying string. When writing Windows paths yourself,
 prefer forward slashes such as `D:/work/project`.
 
 Keep large source material in files. Keep only paths, compact indexes, helper
-functions, and task-relevant summaries in the live REPL.
+functions, and task-relevant summaries in the REPL.
 ```
 
 固定提示不拼接：
@@ -344,16 +342,17 @@ D:/work/project
 5. handle 由 Host 全局单调分配且不复用；
 6. projection 来源由 nonce 验证；
 7. presentation metadata 不携带任务内容、路径、凭据或 Session identity；
-8. DSH 工具 canonical output 不被 Prime 包装成第二套 schema；
-9. outer renderer 不改变程序化 canonical value；
-10. 普通结果不添加类型标题或 Markdown fence。
+8. Prime 不重新实现工具 renderer，而是直接使用 DSH 已生成的 `result.content`；
+9. 程序始终得到 canonical value；关联对象直接成为 completion 时优先展示非空 content；
+10. outer renderer 不再次改变程序化 completion value；
+11. 普通结果不添加类型标题或 Markdown fence。
 
 ## 11. 验证
 
 完整源码验证：
 
 ```powershell
-npm run check
+npm run check:all
 ```
 
 重点回归：

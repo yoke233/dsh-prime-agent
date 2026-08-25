@@ -4,13 +4,13 @@
 
 在本仓库增加 Prime Realm 隐藏能力 `tools.apply_patch`，用于一次表达多 hunk、多文件的文本创建与更新。Prime 外层模型 catalog 仍只包含 `repl`；`apply_patch` 由现有 Realm SDK 从 Agent catalog 生成 typed binding，不成为第二个模型可见入口。
 
-本计划只修改本仓库。`../deepseek-harness` 是只读 checkout，只可用于 diff、preset 审阅和事实核对；实现不要求修改、提交或发布 DSH。文件访问必须组合已安装 DSH 的公开工具执行 seam，继续由 DSH 持有 workspace 解析、sandbox、approval、observation、日志、取消和 Session 所有权。
+本计划只修改本仓库。Codex 行为基线固定为 `openai/codex@a63cb33e8deab97002c4ab6bb872183fbde99aa6` 的 `codex-rs/apply-patch`。`../deepseek-harness` 是只读 checkout，只可用于 diff、preset 审阅和事实核对；实现不要求修改、提交或发布 DSH。文件访问必须组合已安装 DSH 的公开工具执行 seam，继续由 DSH 持有 workspace 解析、sandbox、approval、observation、日志、取消和 Session 所有权。
 
 第一版范围：
 
 - 支持 `*** Add File` 和 `*** Update File`。
 - 明确拒绝 `*** Delete File` 和 `*** Move to`，不把删除伪装为空内容写入，也不把移动拆成无保护的读写组合。
-- 严格上下文匹配，不做 fuzzy、空白归一化或近似定位。
+- 对齐 Codex 上下文定位：依次尝试 exact、忽略行尾空白、忽略首尾空白和 Unicode 标点/空格归一化，并选择首个命中。
 - 所有 parse、路径、快照和 plan 校验在首次 mutation 前完成；这些阶段失败时零文件副作用。
 - mutation 阶段只调用正式 DSH `write` 工具。公开 seam 当前没有多文件事务，因此不承诺多文件 crash-atomic 或失败回滚；后续 write 失败必须以失败结束，不能返回部分成功的 canonical success。
 
@@ -94,7 +94,7 @@ planPatch(
 2. 文件 section 只能是 `*** Add File: <path>` 或 `*** Update File: <path>`。
 3. `*** Delete File` 和 Update section 中的 `*** Move to` 必须返回明确的 unsupported-operation 错误；未知 header 也必须失败。
 4. Add body 的每一行以 `+` 开头，去掉前缀后组成新文件内容；Add 计为一个 hunk。
-5. Update 至少含一个以 `@@` 开始的 hunk。hunk 行只接受空格上下文、`-` 删除和 `+` 新增前缀；每个 hunk 必须包含实际变化，并具有可严格定位的 old sequence。
+5. Update 至少含一个 hunk；首个 hunk 可省略 `@@`。hunk 行接受空格上下文、裸空行上下文、`-` 删除和 `+` 新增前缀，old sequence 按 Codex 渐进匹配定位。
 6. planner 在当前虚拟文件内容中按顺序应用 hunk。上下文与删除行逐字匹配；零匹配或多匹配都失败，后续 hunk 不得回到前一 hunk 之前。
 7. Add 要求 snapshot 为 `null`；Update 要求 snapshot 为字符串。Update 计算结果与原文相同必须失败。
 8. parser 保留 patch 行号，planner 错误同时尽可能带 `path` 与 1-based `hunk`，便于调用方定位。
@@ -103,15 +103,14 @@ Parser 与 planner 都是纯计算，不访问 Cordis、DSH catalog、磁盘、�
 
 ## 4. 路径不变量
 
-Patch 路径是 owning Session workspace 下的词法相对路径。进入任何 DSH read 前统一校验：
+Patch 路径由 owning Session 的正式文件能力解释和授权，`apply_patch` 不建立第二套 workspace policy：
 
-- 拒绝空路径、NUL、POSIX 绝对路径、Windows drive 路径和 UNC 路径。
-- 将 `\\` 视为路径分隔符参与安全检查；拒绝任何 `..` segment。
-- 拒绝解析后为空或只表示当前目录的路径。
-- 同一路径在一个 patch 中只能出现一次；按统一分隔符后的词法 key 检测重复，不能用 `a/b` 与 `a\\b` 绕过。
-- 不在本地转换为绝对路径，不自行跟随 symlink；validated relative path 原样交给 DSH `read` / `write`，由正式 DSH seam 完成 workspace、sandbox 与 observation 检查。
+- parser 仅拒绝无法安全承载于 patch grammar 的空路径与 NUL。
+- 相对路径、POSIX/Windows/UNC 绝对路径和包含 `..` 的路径均保持原样。
+- 原始字符串完全相同的 source path 在一个 patch 中只能出现一次；跨表示形式的目标同一性由文件 provider 决定，组合层不猜测 canonical path。
+- 路径原样交给 DSH `read` / `write`，由正式 DSH seam 完成 cwd 解析、workspace、sandbox、approval 与 observation 检查。
 
-任何路径无效或重复都属于 parse/plan gate failure，首次 mutation 前终止。
+结构无效的路径属于 parse gate failure；重复路径按 patch 顺序规划。权限拒绝属于 nested 文件调用结果，并在首次 mutation 前的 preflight 阶段终止。
 
 ## 5. 本仓库模块划分
 
@@ -145,7 +144,7 @@ Executor 顺序固定为：
 1. `parsePatch(input.patch)`；失败时没有 DSH read/write。
 2. 确认当前 Agent catalog 同时提供正式 `read` 和 `write`。
 3. 按文件顺序读取全部目标，得到完整 `ReadonlyMap<string, string | null>`；任一非 missing read failure 时终止。
-4. 调用 `planPatch(parsed, snapshots)`；任一 existence、上下文、重复或 no-op 错误时终止。
+4. 调用 `planPatch(parsed, snapshots)`；任一 Update existence、上下文或 unsupported-operation 错误时终止。
 5. 只有完整 `PatchPlan` 已形成后，才按 plan 顺序调用正式 DSH `write`，内容是 planner 计算出的完整最终文本。
 6. 所有 writes 成功后返回 canonical success。
 
@@ -167,12 +166,12 @@ Parser 覆盖：
 - 单文件与多文件 Add/Update、多 hunk、空行、Unicode、反引号、`${...}` 和 Markdown fence。
 - marker 缺失/重复、marker 外内容、空 patch、未知 header、非法 hunk 前缀和准确 patch 行号。
 - Delete 与 Move 返回明确 unsupported-operation 错误。
-- 空路径、绝对路径、drive/UNC、NUL、`..`、混合分隔符重复路径。
+- 空路径与 NUL 被拒绝；相对、绝对、drive/UNC 和 `..` 路径保持原样并委托给文件 provider。
 
 Planner 覆盖：
 
-- Add 只接受 missing snapshot，Update 只接受 existing snapshot。
-- 严格单次上下文匹配、零匹配、多匹配、乱序 hunk 和 no-op 拒绝。
+- Add 可像 Codex 一样覆盖 existing snapshot，Update 只接受 existing snapshot。
+- 覆盖 Codex 的渐进式宽松匹配、首个命中、顺序 hunk、EOF suffix 与纯追加语义。
 - 多 hunk 顺序应用，输出最终文本、operation 与 hunk count。
 - 一个文件失败时不返回部分 plan，输入 snapshots 不被修改。
 - LF/CRLF 与末尾换行行为由固定样例锁定，防止无关整文件 diff。
@@ -192,20 +191,20 @@ Planner 覆盖：
 
 ## 8. 实施顺序
 
-1. 先实现 `types.ts`、`parser.ts`、`planner.ts` 与纯单元测试，锁定 grammar、路径和严格匹配契约。
+1. 先实现 `types.ts`、`parser.ts`、`planner.ts`、`seek-sequence.ts` 与纯单元测试，锁定 Codex-compatible grammar、路径和匹配契约。
 2. 实现 `executor.ts` 的 read-all → plan-all → write gate，并用 integration tests 证明首次 mutation 边界。
 3. 注册 `plugin.ts`，接入 `src/index.ts`，更新 `src/policy.ts` 的隐藏 binding 指引。
 4. 更新 `docs/architecture.md` 与 README 的当前行为说明，构建并提交对应 `lib/` 产物。
-5. 运行本仓库的 focused tests、`npm run check` 和真实 Prime 组合验证；不执行任何 DSH 发布步骤。
+5. 运行本仓库的 focused tests、`npm run check:all` 和真实 Prime 组合验证；不执行任何 DSH 发布步骤。
 
 ## 9. 验收标准
 
 功能：
 
 - `parsePatch`、`planPatch` 与共享类型按第 2 节接口导出。
-- 一个调用可以 Add/Update 多个仓库相对路径，并返回固定 success shape。
-- 任一 parse、路径、read 或 plan failure 发生在首次 mutation 前，所有目标保持未写入。
-- 上下文只接受严格唯一匹配；不 fuzzy，不容忍路径逃逸或重复目标。
+- 一个调用可以 Add/Update 多个文件 provider 接受的目标路径，并返回固定 success shape。
+- 任一 parse、路径授权、read 或 plan failure 发生在首次 mutation 前，所有目标保持未写入。
+- 上下文定位与 Codex 的渐进匹配及 first-match 行为一致；路径边界由正式文件 provider 执行，重复 source path 按 patch 顺序规划。
 - Delete/Move 使用稳定、可定位的 unsupported-operation failure。
 - 所有文件 mutation 都能在 DSH 工具调用树中观察到正式 `write`；实现没有直接文件 I/O、shell 或外部 patch binary。
 

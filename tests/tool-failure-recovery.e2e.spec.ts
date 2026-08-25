@@ -373,7 +373,7 @@ describe('generation loss recovery through durable checkpoints', () => {
         name: "recovery_checkpoint.json",
         text: JSON.stringify({ processed, nextIndex: 2 }),
       })
-      ;({ bytes: note.bytes, live: processed.length })
+      ;({ confirmation: note, live: processed.length })
     `)
     expect(seeded.result).toMatchObject({ live: 2 })
 

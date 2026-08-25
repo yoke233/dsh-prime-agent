@@ -139,10 +139,7 @@ describe('apply_patch through the Prime Realm', () => {
       agent,
     })
 
-    expect(replValue(result)).toEqual({
-      applied: true,
-      files: [{ path: 'src/a.txt', operation: 'update', hunks: 1 }],
-    })
+    expect(replValue(result)).toBe('Applied patch to 1 file.')
     expect(files.get('src/a.txt')).toBe('new\n')
   })
 })

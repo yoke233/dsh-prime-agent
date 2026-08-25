@@ -10,12 +10,12 @@ export const APPLY_PATCH_TOOL_NAME = 'apply_patch'
 export function registerApplyPatch(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: APPLY_PATCH_TOOL_NAME,
-    description: 'Apply a strict *** Begin Patch file patch after validating every target.',
+    description: 'Apply related Add/Update file changes described by *** Begin Patch text.',
     parameters: {
       patch: {
         type: 'string',
         required: true,
-        description: 'Complete patch text using the *** Begin Patch grammar.',
+        description: 'Patch text beginning with *** Begin Patch.',
       },
     },
     output: {

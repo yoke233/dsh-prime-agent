@@ -3,43 +3,40 @@ import {
   PatchError,
   type ParsedPatch,
   type ParsedUpdateFile,
-  type ParsedUpdateHunk,
   type PatchPlan,
 } from './types.js'
+import { seekSequence } from './seek-sequence.js'
 
-interface TextLayout {
-  lines: string[]
-  newline: '\n' | '\r\n'
-  trailingNewline: boolean
-}
+type Replacement = readonly [start: number, oldLength: number, newLines: readonly string[]]
 
 /** Compute every final file body without performing any mutation. */
 export function planPatch(parsed: ParsedPatch, snapshots: ReadonlyMap<string, string | null>): PatchPlan {
   rejectUnsupportedOperations(parsed)
+  if (parsed.files.length === 0) {
+    throw new PatchError(PATCH_ERROR_CODES.invalidPatch, 'No files were modified.')
+  }
 
   const files: PatchPlan['files'] = []
+  const currentSnapshots = new Map(snapshots)
   for (const file of parsed.files) {
-    if (!snapshots.has(file.path)) {
+    if (!currentSnapshots.has(file.path)) {
       throw new PatchError(
         PATCH_ERROR_CODES.snapshotMissing,
         `No preflight snapshot was provided for '${file.path}'.`,
         { path: file.path },
       )
     }
-    const snapshot = snapshots.get(file.path)
+    const snapshot = currentSnapshots.get(file.path)
 
     if (file.operation === 'add') {
-      if (snapshot !== null) {
-        throw new PatchError(PATCH_ERROR_CODES.targetExists, `Cannot add '${file.path}' because it already exists.`, {
-          path: file.path,
-        })
-      }
+      const content = file.lines.length === 0 ? '' : `${file.lines.join('\n')}\n`
       files.push({
         path: file.path,
         operation: 'add',
-        content: `${file.lines.join('\n')}\n`,
+        content,
         hunks: 1,
       })
+      currentSnapshots.set(file.path, content)
       continue
     }
 
@@ -61,12 +58,14 @@ export function planPatch(parsed: ParsedPatch, snapshots: ReadonlyMap<string, st
       )
     }
 
+    const content = applyUpdate(file, snapshot)
     files.push({
       path: file.path,
       operation: 'update',
-      content: applyUpdate(file, snapshot),
+      content,
       hunks: file.hunks.length,
     })
+    currentSnapshots.set(file.path, content)
   }
   return { files }
 }
@@ -89,130 +88,56 @@ function rejectUnsupportedOperations(parsed: ParsedPatch): void {
 }
 
 function applyUpdate(file: ParsedUpdateFile, snapshot: string): string {
-  const layout = splitText(snapshot)
+  const originalLines = snapshot.split('\n')
+  if (originalLines.at(-1) === '') originalLines.pop()
+  const replacements: Replacement[] = []
   let cursor = 0
 
   for (const hunk of file.hunks) {
-    const anchor = resolveContext(file.path, hunk, layout.lines, cursor)
-    const position = resolveOldLines(file.path, hunk, layout.lines, anchor, cursor)
-    layout.lines.splice(position, hunk.oldLines.length, ...hunk.newLines)
-    cursor = position + hunk.newLines.length
-  }
+    if (hunk.context !== null) {
+      const contextPosition = seekSequence(originalLines, [hunk.context], cursor, false)
+      if (contextPosition === null) {
+        throw hunkError(
+          PATCH_ERROR_CODES.contextNotFound,
+          file.path,
+          `Failed to find context '${hunk.context}' in ${file.path}`,
+        )
+      }
+      cursor = contextPosition + 1
+    }
 
-  return joinText(layout)
-}
+    if (hunk.oldLines.length === 0) {
+      replacements.push([originalLines.length, 0, hunk.newLines])
+      continue
+    }
 
-function resolveContext(
-  path: string,
-  hunk: ParsedUpdateHunk,
-  lines: readonly string[],
-  cursor: number,
-): number {
-  if (hunk.context === null) return cursor
-
-  const remaining = lineOccurrences(lines, hunk.context, cursor)
-  if (remaining.length === 0) {
-    if (lineOccurrences(lines, hunk.context, 0, cursor).length > 0) {
+    let pattern: readonly string[] = hunk.oldLines
+    let newLines: readonly string[] = hunk.newLines
+    let position = seekSequence(originalLines, pattern, cursor, hunk.endOfFile)
+    if (position === null && pattern.at(-1) === '') {
+      pattern = pattern.slice(0, -1)
+      if (newLines.at(-1) === '') newLines = newLines.slice(0, -1)
+      position = seekSequence(originalLines, pattern, cursor, hunk.endOfFile)
+    }
+    if (position === null) {
       throw hunkError(
-        PATCH_ERROR_CODES.hunkOutOfOrder,
-        path,
-        `Context '${hunk.context}' for '${path}' occurs before the preceding hunk.`,
+        PATCH_ERROR_CODES.contextNotFound,
+        file.path,
+        `Failed to find expected lines in ${file.path}:\n${hunk.oldLines.join('\n')}`,
       )
     }
-    throw hunkError(PATCH_ERROR_CODES.contextNotFound, path, `Context '${hunk.context}' was not found in '${path}'.`)
-  }
-  if (remaining.length > 1) {
-    throw hunkError(
-      PATCH_ERROR_CODES.contextAmbiguous,
-      path,
-      `Context '${hunk.context}' is ambiguous in '${path}' (${remaining.length} matches).`,
-    )
-  }
-  const match = remaining[0]
-  if (match === undefined) throw new Error('unreachable context match')
-  return match + 1
-}
-
-function resolveOldLines(
-  path: string,
-  hunk: ParsedUpdateHunk,
-  lines: readonly string[],
-  start: number,
-  cursor: number,
-): number {
-  if (hunk.oldLines.length === 0) return hunk.endOfFile ? lines.length : start
-
-  if (hunk.endOfFile) {
-    const position = lines.length - hunk.oldLines.length
-    if (position >= start && sequenceMatches(lines, hunk.oldLines, position)) return position
-    if (position >= 0 && position < cursor && sequenceMatches(lines, hunk.oldLines, position)) {
-      throw hunkError(PATCH_ERROR_CODES.hunkOutOfOrder, path, `An End of File hunk for '${path}' is out of order.`)
-    }
-    throw hunkError(
-      PATCH_ERROR_CODES.contextNotFound,
-      path,
-      `The expected End of File lines were not found in '${path}'.`,
-    )
+    replacements.push([position, pattern.length, newLines])
+    cursor = position + pattern.length
   }
 
-  const matches = sequenceOccurrences(lines, hunk.oldLines, start)
-  if (matches.length === 0) {
-    if (sequenceOccurrences(lines, hunk.oldLines, 0, cursor).length > 0) {
-      throw hunkError(PATCH_ERROR_CODES.hunkOutOfOrder, path, `A hunk for '${path}' occurs before the preceding hunk.`)
-    }
-    throw hunkError(PATCH_ERROR_CODES.contextNotFound, path, `Expected hunk context was not found in '${path}'.`)
+  replacements.sort((left, right) => left[0] - right[0])
+  for (const [position, oldLength, newLines] of replacements.reverse()) {
+    originalLines.splice(position, oldLength, ...newLines)
   }
-  if (matches.length > 1) {
-    throw hunkError(
-      PATCH_ERROR_CODES.contextAmbiguous,
-      path,
-      `Expected hunk context is ambiguous in '${path}' (${matches.length} matches).`,
-    )
-  }
-  const match = matches[0]
-  if (match === undefined) throw new Error('unreachable hunk match')
-  return match
+  if (originalLines.at(-1) !== '') originalLines.push('')
+  return originalLines.join('\n')
 }
 
-function splitText(content: string): TextLayout {
-  const firstLf = content.indexOf('\n')
-  const newline: '\n' | '\r\n' = firstLf > 0 && content[firstLf - 1] === '\r' ? '\r\n' : '\n'
-  const trailingNewline = content.endsWith('\n')
-  if (content === '') return { lines: [], newline, trailingNewline: false }
-
-  const lines = content.split(/\r\n|\n/)
-  if (trailingNewline) lines.pop()
-  return { lines, newline, trailingNewline }
-}
-
-function joinText(layout: TextLayout): string {
-  if (layout.lines.length === 0) return ''
-  const body = layout.lines.join(layout.newline)
-  return layout.trailingNewline ? body + layout.newline : body
-}
-
-function lineOccurrences(lines: readonly string[], expected: string, start: number, end = lines.length): number[] {
-  const matches: number[] = []
-  for (let index = start; index < end; index += 1) {
-    if (lines[index] === expected) matches.push(index)
-  }
-  return matches
-}
-
-function sequenceOccurrences(lines: readonly string[], expected: readonly string[], start: number, end = lines.length): number[] {
-  const matches: number[] = []
-  const lastStart = Math.min(end, lines.length - expected.length)
-  for (let index = start; index <= lastStart; index += 1) {
-    if (sequenceMatches(lines, expected, index)) matches.push(index)
-  }
-  return matches
-}
-
-function sequenceMatches(lines: readonly string[], expected: readonly string[], start: number): boolean {
-  if (start < 0 || start + expected.length > lines.length) return false
-  return expected.every((line, offset) => lines[start + offset] === line)
-}
-
-function hunkError(code: 'CONTEXT_NOT_FOUND' | 'CONTEXT_AMBIGUOUS' | 'HUNK_OUT_OF_ORDER', path: string, message: string): PatchError {
+function hunkError(code: 'CONTEXT_NOT_FOUND', path: string, message: string): PatchError {
   return new PatchError(code, message, { path })
 }

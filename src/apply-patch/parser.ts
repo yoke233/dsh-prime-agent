@@ -13,37 +13,38 @@ const DELETE_FILE = '*** Delete File: '
 const UPDATE_FILE = '*** Update File: '
 const MOVE_TO = '*** Move to: '
 const END_OF_FILE = '*** End of File'
+const ENVIRONMENT_ID = '*** Environment ID: '
 
 /** Parse the Codex apply-patch grammar without consulting the workspace. */
 export function parsePatch(patch: string): ParsedPatch {
   const lines = patchLines(patch)
-  if (lines[0] !== BEGIN_PATCH) {
+  if (lines[0]?.trim() !== BEGIN_PATCH) {
     throw new PatchError(PATCH_ERROR_CODES.invalidPatch, `The first line must be '${BEGIN_PATCH}'.`, { line: 1 })
   }
-  if (lines.at(-1) !== END_PATCH) {
+  if (lines.at(-1)?.trim() !== END_PATCH) {
     throw new PatchError(PATCH_ERROR_CODES.invalidPatch, `The last line must be '${END_PATCH}'.`, {
       line: lines.length,
     })
   }
 
   const files: ParsedFilePatch[] = []
-  const sourcePaths = new Set<string>()
   let index = 1
   const endIndex = lines.length - 1
+
+  const environmentLine = lines[index]?.trim()
+  if (environmentLine?.startsWith(ENVIRONMENT_ID)) {
+    if (environmentLine.slice(ENVIRONMENT_ID.length).trim() === '') {
+      throw new PatchError(PATCH_ERROR_CODES.invalidPatch, 'apply_patch environment_id cannot be empty', { line: index + 1 })
+    }
+    index += 1
+  }
 
   while (index < endIndex) {
     const header = lines[index]
     if (header === undefined) break
 
-    const parsedHeader = parseFileHeader(header, index + 1)
-    const path = normalizePath(parsedHeader.path, index + 1)
-    if (sourcePaths.has(path)) {
-      throw new PatchError(PATCH_ERROR_CODES.duplicatePath, `Patch contains the path '${path}' more than once.`, {
-        path,
-        line: index + 1,
-      })
-    }
-    sourcePaths.add(path)
+    const parsedHeader = parseFileHeader(header.trim(), index + 1)
+    const path = validatePath(parsedHeader.path, index + 1)
     index += 1
 
     if (parsedHeader.operation === 'add') {
@@ -56,9 +57,6 @@ export function parsePatch(patch: string): ParsedPatch {
         addedLines.push(line.slice(1))
         index += 1
       }
-      if (addedLines.length === 0) {
-        throw invalidHunk('An Add File section must contain at least one added line.', index + 1, path)
-      }
       files.push({ operation: 'add', path, lines: addedLines })
       continue
     }
@@ -69,44 +67,38 @@ export function parsePatch(patch: string): ParsedPatch {
     }
 
     let movePath: string | null = null
-    const moveLine = lines[index]
+    const moveLine = lines[index]?.trimEnd()
     if (moveLine?.startsWith(MOVE_TO)) {
-      movePath = normalizePath(moveLine.slice(MOVE_TO.length), index + 1)
+      movePath = validatePath(moveLine.slice(MOVE_TO.length), index + 1)
       index += 1
     }
 
     const hunks: ParsedUpdateHunk[] = []
     let current: ParsedUpdateHunk | null = null
-    let endedAtEof = false
 
     while (index < endIndex && !isFileHeader(lines[index])) {
       const line = lines[index]
       if (line === undefined) break
+      const updateLine = line.trimEnd()
 
-      if (line === '@@' || line.startsWith('@@ ')) {
+      if (updateLine === '@@' || updateLine.startsWith('@@ ')) {
         ensureHunkHasLines(current, index + 1, path)
-        const context = line === '@@' ? null : line.slice(3)
-        if (context === '') throw invalidHunk('A named @@ context cannot be empty.', index + 1, path)
+        const context = updateLine === '@@' ? null : updateLine.slice(3)
         current = { context, oldLines: [], newLines: [], endOfFile: false }
         hunks.push(current)
-        endedAtEof = false
         index += 1
         continue
       }
 
-      if (line === END_OF_FILE) {
+      if (updateLine === END_OF_FILE) {
         ensureHunkHasLines(current, index + 1, path)
         if (current === null) throw invalidHunk('End of File must follow update lines.', index + 1, path)
         current.endOfFile = true
-        endedAtEof = true
         index += 1
         continue
       }
 
-      if (endedAtEof) {
-        throw invalidHunk('Only another @@ hunk may follow End of File.', index + 1, path)
-      }
-      if (line.startsWith(MOVE_TO)) {
+      if (updateLine.startsWith(MOVE_TO)) {
         throw invalidHunk('Move to must immediately follow the Update File header.', index + 1, path)
       }
 
@@ -115,7 +107,10 @@ export function parsePatch(patch: string): ParsedPatch {
         hunks.push(current)
       }
 
-      if (line.startsWith(' ')) {
+      if (line === '') {
+        current.oldLines.push('')
+        current.newLines.push('')
+      } else if (line.startsWith(' ')) {
         const contextLine = line.slice(1)
         current.oldLines.push(contextLine)
         current.newLines.push(contextLine)
@@ -130,15 +125,12 @@ export function parsePatch(patch: string): ParsedPatch {
     }
 
     ensureHunkHasLines(current, index + 1, path)
-    if (hunks.length === 0 && movePath === null) {
+    if (hunks.length === 0) {
       throw invalidHunk('An Update File section must contain at least one hunk.', index + 1, path)
     }
     files.push({ operation: 'update', path, movePath, hunks })
   }
 
-  if (files.length === 0) {
-    throw new PatchError(PATCH_ERROR_CODES.invalidPatch, 'A patch must contain at least one file section.', { line: 2 })
-  }
   return { files }
 }
 
@@ -149,8 +141,12 @@ function patchLines(patch: string): string[] {
     const line = normalized.slice(0, strayCarriageReturn).split('\n').length
     throw new PatchError(PATCH_ERROR_CODES.invalidPatch, 'Patch lines must use LF or CRLF line endings.', { line })
   }
-  const lines = normalized.split('\n')
-  if (lines.at(-1) === '') lines.pop()
+  let lines = normalized.trim().split('\n')
+  const first = lines[0]
+  const last = lines.at(-1)
+  if ((first === '<<EOF' || first === "<<'EOF'" || first === '<<"EOF"') && last === 'EOF' && lines.length >= 4) {
+    lines = lines.slice(1, -1)
+  }
   return lines
 }
 
@@ -165,21 +161,16 @@ function parseFileHeader(line: string, lineNumber: number): { operation: 'add' |
 }
 
 function isFileHeader(line: string | undefined): boolean {
-  return line?.startsWith(ADD_FILE) === true
-    || line?.startsWith(DELETE_FILE) === true
-    || line?.startsWith(UPDATE_FILE) === true
+  if (line === undefined || line.startsWith(' ') || line.startsWith('+') || line.startsWith('-')) return false
+  const trimmed = line.trim()
+  return trimmed.startsWith(ADD_FILE)
+    || trimmed.startsWith(DELETE_FILE)
+    || trimmed.startsWith(UPDATE_FILE)
 }
 
-function normalizePath(path: string, line: number): string {
+function validatePath(path: string, line: number): string {
   if (path === '' || path.includes('\0')) throw invalidPath(path, line)
-  const portable = path.replaceAll('\\', '/')
-  if (portable.startsWith('/') || /^[A-Za-z]:/.test(portable)) throw invalidPath(path, line)
-
-  const segments = portable.split('/')
-  if (segments.includes('..')) throw invalidPath(path, line)
-  const normalized = segments.filter(segment => segment !== '' && segment !== '.').join('/')
-  if (normalized === '') throw invalidPath(path, line)
-  return normalized
+  return path
 }
 
 function ensureHunkHasLines(hunk: ParsedUpdateHunk | null, line: number, path: string): void {
@@ -191,7 +182,7 @@ function ensureHunkHasLines(hunk: ParsedUpdateHunk | null, line: number, path: s
 function invalidPath(path: string, line: number): PatchError {
   return new PatchError(
     PATCH_ERROR_CODES.invalidPath,
-    `Path '${path}' must be a non-empty workspace-relative path without '..' or NUL.`,
+    `Path '${path}' must be non-empty and must not contain NUL.`,
     { path, line },
   )
 }

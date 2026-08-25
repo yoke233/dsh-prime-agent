@@ -87,7 +87,7 @@ After a synchronization pass:
 2. Update `docs/architecture.md`, README, and tool policy when the public behavior changed.
 3. Review the packaged Prime preset (`agent-presets/prime/`) against the upstream shipped `code` preset and port model-facing changes that still apply; the Prime preset is an independent agent-plane composition, not a full snapshot copy of the shipped preset.
 4. Add a regression test for every adopted or adapted contract.
-5. Run `npm run check`.
+5. Run `npm run check:all`.
 6. Run the real DSH composition test covering repl, Subagent, and Jobs.
 7. Review quotas, authority, cancellation, durability, replay visibility, and failure behavior.
 8. Review the final diff for accidental Prime implementation coupling.

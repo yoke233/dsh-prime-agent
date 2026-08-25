@@ -133,6 +133,27 @@ afterEach(async () => {
 })
 
 describe('apply_patch registry integration', () => {
+  it('passes absolute paths unchanged to the owning read and write tools', async () => {
+    const absolutePath = 'D:/workspace/src/a.txt'
+    const h = await harness({ [absolutePath]: 'old\n' })
+
+    const result = await apply(h, `*** Begin Patch
+*** Update File: ${absolutePath}
+@@
+-old
++new
+*** End Patch`)
+
+    expect(result.isError).toBe(false)
+    expect(h.files.get(absolutePath)).toBe('new\n')
+    expect(h.reads).toHaveLength(1)
+    expect(h.writes).toHaveLength(1)
+    expect(result.isError ? undefined : result.value).toEqual({
+      applied: true,
+      files: [{ path: absolutePath, operation: 'update', hunks: 1 }],
+    })
+  })
+
   it('registers once and re-enters the official catalog with trusted child execution identity', async () => {
     const h = await harness({ 'src/a.txt': 'old\n' })
     const schema = h.ctx.tools.schemas(h.agent).find(item => item.name === 'apply_patch')
@@ -179,6 +200,30 @@ describe('apply_patch registry integration', () => {
     expect(h.reads).toHaveLength(1)
     expect(h.writes).toHaveLength(1)
     expect(h.files.get('src/new.txt')).toBe('hello\n')
+  })
+
+  it('allows Add to overwrite and applies repeated paths sequentially', async () => {
+    const h = await harness({ 'src/existing.txt': 'old\n' })
+    const result = await apply(h, `*** Begin Patch
+*** Add File: src/existing.txt
++first
+*** Update File: src/existing.txt
+@@
+-first
++second
+*** End Patch`)
+
+    expect(result.isError).toBe(false)
+    expect(h.files.get('src/existing.txt')).toBe('second\n')
+    expect(h.reads).toHaveLength(2)
+    expect(h.writes).toHaveLength(2)
+    expect(result.isError ? undefined : result.value).toEqual({
+      applied: true,
+      files: [
+        { path: 'src/existing.txt', operation: 'add', hunks: 1 },
+        { path: 'src/existing.txt', operation: 'update', hunks: 1 },
+      ],
+    })
   })
 
   it('reads every contiguous page and normalizes the line DTO boundary to LF text', async () => {

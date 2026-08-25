@@ -2,14 +2,10 @@ export declare const PATCH_ERROR_CODES: {
     readonly invalidPatch: "INVALID_PATCH";
     readonly invalidHunk: "INVALID_HUNK";
     readonly invalidPath: "INVALID_PATH";
-    readonly duplicatePath: "DUPLICATE_PATH";
     readonly unsupportedOperation: "UNSUPPORTED_OPERATION";
     readonly snapshotMissing: "SNAPSHOT_MISSING";
     readonly fileNotFound: "FILE_NOT_FOUND";
-    readonly targetExists: "TARGET_EXISTS";
     readonly contextNotFound: "CONTEXT_NOT_FOUND";
-    readonly contextAmbiguous: "CONTEXT_AMBIGUOUS";
-    readonly hunkOutOfOrder: "HUNK_OUT_OF_ORDER";
     readonly capabilityUnavailable: "CAPABILITY_UNAVAILABLE";
     readonly snapshotReadFailed: "SNAPSHOT_READ_FAILED";
     readonly mutationFailed: "MUTATION_FAILED";

@@ -32,8 +32,10 @@ import type {
 const CapturedAbortController = AbortController
 const CapturedAbortSignal = AbortSignal
 const CapturedError = Error
+class BindingArgumentProjectionError extends CapturedError {}
 const CapturedMap = Map
 const CapturedSet = Set
+const CapturedWeakMap = WeakMap
 const capturedAsyncLocalStorageGetStore = AsyncLocalStorage.prototype.getStore
 const capturedAsyncLocalStorageRun = AsyncLocalStorage.prototype.run
 const capturedAbortSignalAny = AbortSignal.any
@@ -57,6 +59,8 @@ const capturedObjectGetPrototypeOf = Object.getPrototypeOf
 const capturedObjectHasOwn = Object.hasOwn
 const capturedObjectIs = Object.is
 const capturedObjectPrototype = Object.prototype
+const capturedRegExpSource = Object.getOwnPropertyDescriptor(RegExp.prototype, 'source')?.get
+const capturedRegExpFlags = Object.getOwnPropertyDescriptor(RegExp.prototype, 'flags')?.get
 const capturedPropertyIsEnumerable = Object.prototype.propertyIsEnumerable
 const capturedReflectApply = Reflect.apply
 const capturedReflectDeleteProperty = Reflect.deleteProperty
@@ -70,6 +74,8 @@ const capturedStringCharCodeAt = String.prototype.charCodeAt
 const capturedStringSlice = String.prototype.slice
 const capturedStringStartsWith = String.prototype.startsWith
 const capturedSymbolIterator = Symbol.iterator
+const capturedWeakMapGet = WeakMap.prototype.get
+const capturedWeakMapSet = WeakMap.prototype.set
 
 /** Bounded inspect options, so a pathological value cannot explode the rendering. */
 const INSPECT_OPTIONS = { depth: 4, maxArrayLength: 100, maxStringLength: 10_000 } as const
@@ -555,9 +561,12 @@ function callBinding(handle: NamespaceHandle, name: string, args: unknown): Prom
   const run = active as ActiveRun
   let json: string
   try {
-    json = capturedJsonStringify(snapshotJson(args))
-  } catch {
-    return Promise.reject(bindingFailure(handle, name, 'binding arguments must be lossless JSON'))
+    json = capturedJsonStringify(snapshotJson(args, handle.global === 'tools' && name === 'grep'))
+  } catch (error) {
+    const message = error instanceof BindingArgumentProjectionError
+      ? error.message
+      : 'binding arguments must be lossless JSON'
+    return Promise.reject(bindingFailure(handle, name, message))
   }
   return new Promise<unknown>((resolve, reject) => {
     const id = run.nextCallId++
@@ -814,13 +823,21 @@ function projectKeyEntry(key: string): Record<string, unknown> {
 }
 
 /**
- * Validate and detach one boundary value as lossless JSON. Throws on anything
- * JSON would drop, coerce, or fail to round-trip: non-finite numbers, negative
- * zero, functions, symbols, bigints, exotic prototypes, sparse or
- * extra-propertied arrays, symbol/non-enumerable properties, and cycles.
+ * Validate and detach one boundary value as lossless JSON. For `tools.grep`,
+ * a root `pattern` RegExp is projected to its source before validation.
+ * Everything else that JSON would drop, coerce, or fail to round-trip throws:
+ * non-finite numbers, negative zero, functions, symbols, bigints, exotic
+ * prototypes, sparse or extra-propertied arrays, symbol/non-enumerable
+ * properties, and cycles.
  */
-function snapshotJson(value: unknown): unknown {
-  return snapshotValue(value, new CapturedSet<object>(), newCaptureStats(UNLIMITED, UNLIMITED, UNLIMITED), undefined)
+function snapshotJson(value: unknown, projectRootRegExpPattern = false): unknown {
+  return snapshotValue(
+    value,
+    new CapturedSet<object>(),
+    newCaptureStats(UNLIMITED, UNLIMITED, UNLIMITED),
+    undefined,
+    projectRootRegExpPattern,
+  )
 }
 
 /**
@@ -837,7 +854,13 @@ function snapshotJson(value: unknown): unknown {
  * `bench/results/key-iteration.json`), so the projector samples from the enumeration this walk performs anyway
  * and never runs one of its own.
  */
-function snapshotValue(value: unknown, seen: Set<object>, stats: CaptureStats, slot: ProjectionSlot | undefined): unknown {
+function snapshotValue(
+  value: unknown,
+  seen: Set<object>,
+  stats: CaptureStats,
+  slot: ProjectionSlot | undefined,
+  projectRootRegExpPattern = false,
+): unknown {
   if (stats.aborted) return undefined
   stats.nodes += 1
   if (stats.nodes > stats.nodeLimit) stats.overNodeLimit = true
@@ -955,7 +978,23 @@ function snapshotValue(value: unknown, seen: Set<object>, stats: CaptureStats, s
         entry = projectKeyEntry(key)
         capturedReflectApply(capturedArrayPush, entries, [entry])
       }
-      target[key] = snapshotValue((source as Record<string, unknown>)[key], seen, stats, child)
+      const childValue = (source as Record<string, unknown>)[key]
+      let projectedValue = childValue
+      if (root && projectRootRegExpPattern && key === 'pattern'
+        && typeof childValue === 'object' && childValue !== null
+        && capturedRegExpSource !== undefined && capturedRegExpFlags !== undefined) {
+        try {
+          projectedValue = capturedReflectApply(capturedRegExpSource, childValue, []) as string
+          const flags = capturedReflectApply(capturedRegExpFlags, childValue, []) as string
+          if (flags !== '') {
+            throw new BindingArgumentProjectionError('grep RegExp pattern must not use flags; use grep arguments or inline regex syntax')
+          }
+        } catch (error) {
+          if (error instanceof BindingArgumentProjectionError) throw error
+          projectedValue = childValue
+        }
+      }
+      target[key] = snapshotValue(projectedValue, seen, stats, child)
       if (child && entry && child.node !== undefined) entry.value = child.node
       if (stats.aborted) {
         visited = index + 1
@@ -1068,6 +1107,8 @@ let refusedAccesses = 0
  * them stay independent: each class is charged and evicted on its own.
  */
 const completionSlots: CompletionSlot[] = []
+/** Official tool text keyed by the exact canonical object returned to model code. */
+const completionPresentations = new CapturedWeakMap<object, string>()
 let retainedBytes = 0
 let retainedNodes = 0
 /** Opaque-store totals, kept apart from the JSON store's for the same reason. */
@@ -1734,6 +1775,10 @@ function prepareBoundary(
   remaining: number,
   maxOutputBytes: number,
 ): DoneFragment {
+  if (kind === 'completion' && typeof value === 'object' && value !== null) {
+    const presentation = capturedReflectApply(capturedWeakMapGet, completionPresentations, [value]) as string | undefined
+    if (presentation !== undefined) return prepareCompletion(presentation, remaining, maxOutputBytes)
+  }
   return kind === 'completion'
     ? prepareCompletion(value, remaining, maxOutputBytes)
     : prepareException(value, remaining, maxOutputBytes)
@@ -1975,6 +2020,16 @@ port.on('message', (message: HostToRealm) => {
   } catch {
     entry.reject('binding resolution must be lossless JSON')
     return
+  }
+  if (typeof value === 'object' && value !== null && !capturedArrayIsArray(value)) {
+    const envelope = value as Record<string, unknown>
+    if (envelope.$dshPrimeBinding === 'presentation-v1' && typeof envelope.presentation === 'string'
+      && capturedObjectHasOwn(envelope, 'value')) {
+      value = envelope.value
+      if (typeof value === 'object' && value !== null) {
+        capturedReflectApply(capturedWeakMapSet, completionPresentations, [value, envelope.presentation])
+      }
+    }
   }
   entry.resolve(value)
 })
