@@ -377,7 +377,7 @@ describe('scenario 3: the hard output cap references instead of failing', () => 
     expect(Buffer.byteLength(JSON.stringify(envelope), 'utf8')).toBeLessThanOrEqual(512)
     expect(await spillFiles(spillRoot)).toHaveLength(0)
     const content = textOf(execution.content)
-    expect(content).toContain('[repl result: retained preview]')
+    expect(content).not.toContain('[repl result:')
     expect(content).toContain('remains in this REPL as `$_`')
     expect(content).toContain(`use \`$out(${String(envelope.$out)})\``)
     expect(content).not.toContain('"$out"')

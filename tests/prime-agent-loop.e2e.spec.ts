@@ -127,7 +127,7 @@ describe('Prime realm across deterministic agent-loop turns', () => {
         .flatMap(block => block.content)
         .filter(block => block.type === 'text').map(block => block.text).join('')
       : ''
-    expect(scalar).toBe('[repl result: json]\n424242')
+    expect(scalar).toBe('424242')
     expect(scalar).not.toContain('{"logs"')
     // The DURABLE outer `tool/result` the agent loop committed for the
     // oversized completion is bounded — preview plus locator, never the full
@@ -144,7 +144,7 @@ describe('Prime realm across deterministic agent-loop turns', () => {
     expect(Buffer.byteLength(spilled, 'utf8')).toBeLessThanOrEqual(1024)
     const locator = /Full formatted result stored at: (.+?)\. Use read with/.exec(spilled)?.[1]
     if (locator === undefined) throw new Error(`no spill locator in: ${spilled.slice(-300)}`)
-    expect(await readFile(locator, 'utf8')).toBe(`[repl result: string]\n${body}`)
+    expect(await readFile(locator, 'utf8')).toBe(body)
 
     // No handshake/bootstrap dispatch exists any more: the realm is routed by
     // the plugin's own identity resolution, and nothing probes a bootstrap tool.

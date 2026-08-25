@@ -247,12 +247,13 @@ $out.clear()
 
 ## 6. Notebook 呈现契约
 
+renderer 返回纯文本内容，不添加 `[repl result: ...]`、`[repl logs]`、```` ```text ```` 或其他类型外壳。字符串与结构化值的区别只决定是否执行一次 JSON pretty-print，不形成模型需要理解的第二套协议。
+
 ### 6.1 普通字符串
 
 模型可见文本：
 
 ```text
-[repl result: string]
 D:\yjky\yj-app-backend
 ```
 
@@ -261,7 +262,6 @@ D:\yjky\yj-app-backend
 ### 6.2 普通结构化值
 
 ```text
-[repl result: json]
 {
   "paths": [
     "D:\\yjky\\a.go",
@@ -275,7 +275,6 @@ D:\yjky\yj-app-backend
 ### 6.3 日志
 
 ```text
-[repl logs]
 reading files...
 found 27 matches
 ```
@@ -285,7 +284,6 @@ found 27 matches
 ### 6.4 已保留的大结果
 
 ```text
-[repl result: retained preview]
 The complete value remains in this REPL as `$_`.
 For older access, use `$out(17)`.
 Type: object
@@ -312,7 +310,6 @@ renderer 必须把 `$_` 放在第一入口，把 `$out(17)` 降为历史补充�
 ### 6.5 未保留的大结果
 
 ```text
-[repl result: unretained preview]
 The complete value was not retained: history budget exceeded.
 This preview is not the original value. Recompute it or load it from a durable file.
 Type: object
@@ -326,7 +323,6 @@ Preview:
 ### 6.6 opaque completion
 
 ```text
-[repl result: retained opaque value]
 The value remains in this REPL as `$_`.
 For older access, use `$out(21)`.
 Type: function
@@ -337,13 +333,7 @@ No structural preview is available.
 
 ### 6.7 空结果
 
-无 logs 且 completion 为 `undefined` 时显示：
-
-```text
-[repl completed with no output]
-```
-
-避免空工具结果被模型误认为调用未完成。
+无 logs 且 completion 为 `undefined` 时返回空文本。工具调用已经通过外层 tool-result 生命周期明确结算，不再额外发送成功占位文案。
 
 ## 7. SDK 与提示词
 
@@ -629,7 +619,7 @@ Tests       289 passed | 1 skipped (290)
 
 ### 14.2 真实 TUI 与模型验证
 
-使用 `D:/project/dsh-tui-plugin-OhMyPi/.agents/skills/test-dsh-tui` 的 packaged ConPTY runner，在隔离 `DSH_HOME` 中安装当前 `dsh-prime-agent-0.3.0.tgz`，启用真实 `openai-codex/gpt-5.6-sol`，执行自定义 Prime REPL 场景：
+使用 `D:/project/dsh-tui-plugin-OhMyPi/.agents/skills/test-dsh-tui` 的 packaged ConPTY runner，在隔离 `DSH_HOME` 中安装当前 `dsh-prime-agent-0.4.1.tgz`，启用真实 `openai-codex/gpt-5.6-sol`，执行自定义 Prime REPL 场景：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
@@ -640,18 +630,18 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 通过的可观察断言：
 
-- 大 completion 显示 `[repl result: retained preview]`；
+- 大 completion 显示 retained notice，普通结果没有类型标题或 Markdown fence；
 - notice 首选 `$_`，模型在后续 cell 实际使用 `$_` 取回 marker；
 - 模型依据 generated output shape 使用 `glob` 结果的 `.paths`；
 - 模型验证 `String.raw` Windows 路径包含两个真实反斜杠字符；
 - 模型可见输出不含旧 `{\"logs\":[],\"result\":...}` 外壳或 `\"use\":\"$out(...)\"` envelope；
 - 最终回答包含 `PRIME_REPL_E2E_OK`、`retained-ok`、首个路径和反斜杠计数 `2`；
-- TUI 进程在整个模型 turn 前后保持同一 PID `27348`。
+- TUI 进程在整个模型 turn 前后保持同一 PID `52116`。
 
 保留的验收产物：
 
 ```text
-C:/Users/xyad/AppData/Local/Temp/dsh-tui-live-87512ad0c7fa4798b378217c5cd4ba94/artifacts
+C:/Users/xyad/AppData/Local/Temp/dsh-tui-live-9fa1c1aa5a5642008bef30ffb642446e/artifacts
 ```
 
 其中包含 `report.json`、`pty-output.log` 及 `prime-repl-notebook.{txt,svg,png}`。

@@ -191,13 +191,10 @@ function previewSection(value: JsonValue | undefined): string {
 function renderResult(value: JsonValue | undefined, presentation: ReplPresentation | undefined): string | undefined {
   if (value === undefined) return undefined
   if (presentation === undefined || presentation.kind === 'full') {
-    return typeof value === 'string'
-      ? `[repl result: string]\n${value}`
-      : `[repl result: json]\n${JSON.stringify(value, null, 2)}`
+    return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
   }
   if (presentation.kind === 'retained-preview') {
-    return '[repl result: retained preview]\n'
-      + 'The complete value remains in this REPL as `$_`.\n'
+    return 'The complete value remains in this REPL as `$_`.\n'
       + `For older access, use \`$out(${String(presentation.handle)})\`.\n`
       + `Type: ${presentation.valueType}`
       + (presentation.serializedBytes === undefined ? '' : `\nSerialized size: ${presentation.serializedBytes.toLocaleString('en-US')} bytes`)
@@ -205,15 +202,13 @@ function renderResult(value: JsonValue | undefined, presentation: ReplPresentati
   }
   if (presentation.kind === 'unretained-preview') {
     const reason = presentation.reason ?? 'the completion history budget was exceeded'
-    return '[repl result: unretained preview]\n'
-      + `The complete value was not retained: ${reason}.\n`
+    return `The complete value was not retained: ${reason}.\n`
       + 'This preview is not the original value. Recompute it or load it from a durable file.\n'
       + `Type: ${presentation.valueType}`
       + (presentation.serializedBytes === undefined ? '' : `\nSerialized size: ${presentation.serializedBytes.toLocaleString('en-US')} bytes`)
       + previewSection(value)
   }
-  return '[repl result: retained opaque value]\n'
-    + 'The value remains in this REPL as `$_`.\n'
+  return 'The value remains in this REPL as `$_`.\n'
     + `For older access, use \`$out(${String(presentation.handle)})\`.\n`
     + `Type: ${presentation.valueType}\n`
     + 'No structural preview is available.'
@@ -222,10 +217,10 @@ function renderResult(value: JsonValue | undefined, presentation: ReplPresentati
 /** Render a canonical REPL result as notebook-style model text without changing its programmatic value. */
 export function renderReplResult(value: ReplExecutionResult): string {
   const sections: string[] = []
-  if (value.logs.length > 0) sections.push(`[repl logs]\n${value.logs.join('\n')}`)
+  if (value.logs.length > 0) sections.push(value.logs.join('\n'))
   const result = renderResult(value.result, value.presentation)
   if (result !== undefined) sections.push(result)
-  return sections.length === 0 ? '[repl completed with no output]' : sections.join('\n\n')
+  return sections.join('\n\n')
 }
 
 /** Register the sole model-visible REPL and its hidden host capabilities. */

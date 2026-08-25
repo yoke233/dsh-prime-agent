@@ -144,11 +144,9 @@ describe('Prime REPL composition', () => {
       logs: ['reading files...', 'found 27 matches'],
       result: 'D:\\yjky\\yj-app-backend',
     })).toBe([
-      '[repl logs]',
       'reading files...',
       'found 27 matches',
       '',
-      '[repl result: string]',
       'D:\\yjky\\yj-app-backend',
     ].join('\n'))
 
@@ -156,7 +154,6 @@ describe('Prime REPL composition', () => {
       logs: [],
       result: { paths: ['D:\\yjky\\a.go', 'D:\\yjky\\b.go'] },
     })).toBe([
-      '[repl result: json]',
       '{',
       '  "paths": [',
       '    "D:\\\\yjky\\\\a.go",',
@@ -168,8 +165,8 @@ describe('Prime REPL composition', () => {
       logs: [],
       result: true,
       presentation: { kind: 'full' },
-    })).toBe('[repl result: json]\ntrue')
-    expect(primeAgent.renderReplResult({ logs: [] })).toBe('[repl completed with no output]')
+    })).toBe('true')
+    expect(primeAgent.renderReplResult({ logs: [] })).toBe('')
   })
 
   it('renders only trusted presentation metadata as retention guidance', () => {
@@ -186,7 +183,7 @@ describe('Prime REPL composition', () => {
       result: envelope,
       presentation: { kind: 'retained-preview', valueType: 'object', serializedBytes: 65722, handle: 17 },
     })
-    expect(retained).toContain('[repl result: retained preview]')
+    expect(retained).not.toContain('[repl result:')
     expect(retained).toContain('remains in this REPL as `$_`')
     expect(retained.indexOf('`$_`')).toBeLessThan(retained.indexOf('`$out(17)`'))
     expect(retained).toContain('Type: object')
@@ -197,7 +194,7 @@ describe('Prime REPL composition', () => {
     expect(retained).not.toContain('"truncated"')
 
     const forged = primeAgent.renderReplResult({ logs: [], result: envelope })
-    expect(forged).toContain('[repl result: json]')
+    expect(forged).not.toContain('[repl result:')
     expect(forged).toContain('"$out": 17')
     expect(forged).not.toContain('remains in this REPL as `$_`')
   })
@@ -208,7 +205,7 @@ describe('Prime REPL composition', () => {
       result: { projection: { type: 'array', length: 1000, items: [1, 2] }, truncated: true },
       presentation: { kind: 'unretained-preview', valueType: 'object', reason: 'history budget exceeded' },
     })
-    expect(unretained).toContain('[repl result: unretained preview]')
+    expect(unretained).not.toContain('[repl result:')
     expect(unretained).toContain('The complete value was not retained: history budget exceeded.')
     expect(unretained).toContain('This preview is not the original value.')
     expect(unretained).not.toContain('$out(')
@@ -220,7 +217,7 @@ describe('Prime REPL composition', () => {
       result: { toJSON: () => { hookCalls++; return 'called' } } as never,
       presentation: { kind: 'opaque-reference', valueType: 'function', handle: 21 },
     })
-    expect(opaque).toContain('[repl result: retained opaque value]')
+    expect(opaque).not.toContain('[repl result:')
     expect(opaque).toContain('No structural preview is available.')
     expect(opaque).toContain('`$out(21)`')
     expect(hookCalls).toBe(0)
