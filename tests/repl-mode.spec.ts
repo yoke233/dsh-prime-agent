@@ -77,6 +77,8 @@ describe('Prime REPL composition', () => {
     expect(sdk).toContain('spawn: (args: ToolArgsMap["subagent"]) => Promise<ToolOutputMap["subagent"]>')
     expect(sdk).toContain('declare const jobs')
     expect(sdk).toContain('prefer forward slashes such as `D:/work/project`')
+    expect(sdk).toContain('apply_patch')
+    expect(sdk).toContain('patch: string')
     expect(sdk).toContain('Keep only paths, compact indexes, helper')
     expect(sdk).not.toContain('the body of an async TypeScript function')
     expect(sdk).not.toContain('Emit results with `return`')
@@ -106,6 +108,9 @@ describe('Prime REPL composition', () => {
     expect(policy).toContain('keep only useful locators and summaries live')
     expect(policy).toContain('A failed call is a real outcome')
     expect(policy).toContain('After a restart notice, rebuild from files and verify external state before resuming mutations')
+    expect(policy).toContain('Use edit for one exact in-place replacement')
+    expect(policy).toContain('apply_patch for a cohesive strict Add/Update patch')
+    expect(policy).toContain('multi-file apply_patch is ordered rather than transactional')
     // The stale run_code transport must not leak into the policy text.
     expect(policy).not.toContain('run_code')
   })
@@ -113,7 +118,7 @@ describe('Prime REPL composition', () => {
   it('fails closed on any model-direct call that is not repl', async () => {
     const { agent } = await bootPrime()
 
-    for (const name of ['prime_refine', 'subagent', 'job_output']) {
+    for (const name of ['prime_refine', 'subagent', 'job_output', 'apply_patch']) {
       const denied = await context!.tools.execute({
         callId: CallId(`repl-mode-denied-${++callNumber}`),
         name,

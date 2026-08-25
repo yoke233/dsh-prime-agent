@@ -43,6 +43,7 @@ DSH profile
    └─ dsh-prime-agent
       ├─ 唯一模型可见工具 repl（参数 { code }）
       ├─ cell 内隐藏绑定 tools / agents / jobs
+      ├─ cell 内组合工具 apply_patch（严格 Add/Update）
       ├─ control-plane policy（Persistent REPL guidance）
       └─ refine
 ```
@@ -78,6 +79,14 @@ Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt ass
 Prime 不增加搜索适配层。源码发现直接调用 DSH 原生 `grep`；在 repl 程序内以 TypeScript 正则字面量的 `.source` 生成 `pattern`，Realm bridge 仍只传无损 JSON。
 
 MCP 同样不进入 Realm runtime。profile 显式安装 DSH Host MCP client 后，server tools 注册到统一 `ctx.tools` catalog，repl 单元自动获得对应 `tools.*` 绑定；连接、认证、重连、工具代际、子进程与清理由 Host 插件拥有。本插件不复制上游的 Python kernel-owned MCP 或 ACP MCP program。
+
+### 本地 `apply_patch` 组合能力
+
+`dsh-prime-agent` 在 Agent scope 注册 `apply_patch`，因此它会进入 Realm 自动生成的 `tools.*` SDK，但外层 prompt assembly 仍只暴露 `repl`。该工具不是新的文件系统 provider：parser 与 planner 在本地纯计算层解析严格的 Codex 风格 patch，读取和写入则通过 `ctx.tools.execute(...)` nested dispatch 调用当前 Agent catalog 中正式的 DSH `read` / `write`，并转发 owning Agent、parent token、root call id 与取消信号。DSH 继续拥有 Session cwd、sandbox、approval、observation、日志和单文件原子发布。
+
+第一版只支持 `*** Add File` 与 `*** Update File`；Delete/Move 在 planning 阶段明确失败。所有目标先完整读取并完成严格、唯一的 hunk 匹配，之后才发生第一次 write，因此 parse、路径、读取或 planning 失败没有文件副作用。正式 `read` 的 canonical 行 DTO 不携带原始换行 metadata，executor 会把非空快照规范化为 LF 且保留一个末尾换行；纯 planner 对直接提供的无损 snapshot 仍保留 LF/CRLF 与末尾换行。
+
+多文件写入是按 patch 顺序执行的多个正式 DSH `write` 调用，不是 batch transaction。后续 write 失败时工具返回 `PARTIAL_APPLY` 并列出此前成功路径，不伪装成成功，也不宣称自动回滚或 crash-atomic。当前 DSH 没有受策略保护且可组合的 delete/rename seam，因此本插件不通过 Node `fs`、shell、`git apply` 或空文件写入模拟这些操作。
 
 ## Realm 身份路由
 

@@ -36,6 +36,7 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
 - Realm 内的绑定经跨 run 稳定的 Proxy 与 per-run binding lease 调用:schema、审批、沙箱、日志、并发和取消仍由 DSH 执行,run 结束立即撤销授权。
 - 多个 TUI 进程可共享 Prime 持久状态并同时运行不同 Session；同一 Session 的 live Realm 同时只允许一个进程持有，owner 退出后另一进程以空 namespace 接管。
 - Prime 不封装搜索接口：直接调用 DSH 的 `grep`，并在 repl 程序内把 TypeScript 正则字面量的 `.source` 作为 `pattern`，避免字符串二次转义。
+- Prime 额外注册本地组合能力 `tools.apply_patch({ patch })`：采用严格的 `*** Begin Patch` grammar，一次预检同文件多 hunk 或多文件 Add/Update，再通过 Agent catalog 中正式的 DSH `read`/`write` nested calls 执行；sandbox、approval、observation、日志、取消和 Session cwd 仍归 DSH。当前不支持 Delete/Move，也不承诺多文件事务原子性；正式 `read` 的行 DTO 在组合边界规范化为 LF。
 - Profile 显式安装的 DSH Host MCP client 把 server tools 注册进统一 catalog，repl 单元自动获得对应 `tools.*` 绑定；Prime 不复制 Python kernel-owned MCP runtime。
 - 工具结果已经是 Realm 内的 JavaScript value，不对其再次 `JSON.parse`。notebook 结构化 preview 中的 `\\` 只是 JSON notation；模型自行编写 Windows 路径时优先使用 `D:/work/project` 形式，避免额外转义层。
 - Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值；`repl` 的外层 canonical value 仍是可程序化读取的 lossless JSON（`logs`、可选 `result` 与可信 presentation metadata），但模型只看到无类型外壳的 notebook 文本：logs 和字符串原样显示，结构化值只 pretty-print 一次，空结果返回空文本；renderer 不添加 `[repl result: ...]`、`[repl logs]` 或 Markdown fence。外层 notebook 文本超过展示预算时由 DSH 写入 artifact 并返回 locator；保存失败时保留完整 inline 成功结果并告警，不伪造 locator。

@@ -6,6 +6,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
 import { defineTool, renderToolsSdk, type JsonValue } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import { registerApplyPatch } from './apply-patch/plugin.js'
 import { registerContinual } from './continual/plugin.js'
 import type { HarnessLimits } from './continual/types.js'
 import { registerPolicy } from './policy.js'
@@ -304,6 +305,7 @@ export function apply(ctx: Context, config: Config): void {
     },
   }))
 
+  registerApplyPatch(ctx)
   registerPolicy(ctx, { requireOrchestrationTools: config.requireOrchestrationTools ?? true })
   registerContinual(ctx, { stateDirectory: join(stateDirectory, 'continual'), toolName: refineToolName, allowGlobal: config.allowGlobalRefinement ?? false, limits: continualLimits })
 
