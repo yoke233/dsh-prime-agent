@@ -236,4 +236,4 @@ runtime row 与 Prime preset 的 `stateDirectory` 必须相同，否则身份记
 
 仓库测试覆盖：Realm identity 稳定解析与持久化、多个 host 共享状态、同 Realm 跨进程互斥与接管、Session 隔离、跨 cell binding 连续性、调用顺序、binding lease、host-call 预算、超时/abort/Worker 换代、namespace-loss notice、completion history 预算、输出上限与 Unicode、工具失败恢复、approval escalation、Subagent Job 编排、官方 report 组合边界、preset 落位和 bundle patch 结构。
 
-上游行为映射与同步流程见 [Prime Agent 学习笔记](prime-agent-learnings.md) 和 [上游同步与差异对照手册](upstream-sync.zh.md)。
+Prime REPL 的固定提示、completion metadata 与 notebook renderer 契约见 [Prime REPL Notebook 呈现规格](repl-notebook-presentation.zh.md)；上游行为映射与同步流程见 [Prime Agent 学习笔记](prime-agent-learnings.md) 和 [上游同步与差异对照手册](upstream-sync.zh.md)。
