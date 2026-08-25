@@ -1,6 +1,0 @@
-# dsh-omp-tui already mounts the agent preset service, but dsh-base still omits
-# the Code Runtime that dsh-prime-agent replaces. Compose this prerequisite
-# before dsh-prime-agent; the persisted agent-presets setting selects Prime.
-- insert:
-    - id: code-runtime
-      name: '@deepseek-ai/dsh-code-runtime-worker-thread'

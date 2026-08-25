@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 import { load } from 'js-yaml'
-import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
+import { applyEntryPatches, entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import { isJsExpr } from '@deepseek-ai/cordis-plugin-loader'
 import { describe, expect, it } from 'vitest'
 
@@ -19,6 +19,24 @@ function stateDirectoryExpr(row: Row | undefined): string | undefined {
 }
 
 describe('Prime packaging boundary', () => {
+  it('ships the official one-shot runtime as production dependencies', async () => {
+    const manifest = JSON.parse(await readFile(resolve(import.meta.dirname, '../package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>
+      peerDependencies?: Record<string, string>
+      peerDependenciesMeta?: Record<string, unknown>
+    }
+    const runtimePackages = [
+      '@deepseek-ai/dsh-code-runtime',
+      '@deepseek-ai/dsh-code-runtime-worker-thread',
+    ]
+
+    for (const name of runtimePackages) {
+      expect(manifest.dependencies?.[name]).toBeTypeOf('string')
+      expect(manifest.peerDependencies).not.toHaveProperty(name)
+      expect(manifest.peerDependenciesMeta).not.toHaveProperty(name)
+    }
+  })
+
   it('ships the software-engineer identity in the system preset', async () => {
     const persona = (await loadDialect('../agent-presets/prime/agent.cordis.yml'))
       .find(row => row.id === 'persona')
@@ -57,7 +75,18 @@ describe('Prime packaging boundary', () => {
     // Budgets stay unset so the official schema keeps supplying its defaults
     // for the privately mounted fallback.
     expect(Object.keys(runtime?.config ?? {})).toEqual(['stateDirectory'])
+  })
 
+  it('composes when the host has no public code runtime row', async () => {
+    const patches = await loadDialect('../cordis.patch.yml')
+    const composed = applyEntryPatches([], patches, () => undefined) as Row[]
+
+    expect(composed.find(row => row.id === 'code-runtime')).toBeUndefined()
+    expect(composed.find(row => row.id === 'prime-code-runtime')).toEqual({
+      id: 'prime-code-runtime',
+      name: 'dsh-prime-agent/runtime',
+      config: { stateDirectory: expect.anything() },
+    })
   })
 
   // Prime delegates report scheduling to the 0.1.1-rc.2 base bundle. Pin the

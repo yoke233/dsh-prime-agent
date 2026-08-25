@@ -72,26 +72,31 @@ async function runCode(agent: Agent, code: string): Promise<{ logs: string[], re
   }))
 }
 
-describe('Prime host patch composition', () => {
-  it('replaces the official runtime, authenticates through the real tool, and places the preset', async () => {
-    root = await mkdtemp(join(tmpdir(), 'dsh-prime-compose-'))
-    const home = join(root, 'home')
-    const spillRoot = join(root, 'spill')
-    vi.stubEnv('DSH_HOME', home)
-    const configPath = join(root, 'cordis.yml')
-    const patchPath = join(root, 'cordis.patch.yml')
-    await writeFile(patchPath, (await readFile(PATCH_PATH, 'utf8'))
-      .replace('name: dsh-prime-agent/runtime', `name: ${PRIME_RUNTIME_URL}`))
-    await writeFile(configPath, `
+async function bootPrimeHost(includeOfficialRuntime: boolean): Promise<{
+  hostRoot: string
+  home: string
+  spillRoot: string
+}> {
+  const hostRoot = await mkdtemp(join(tmpdir(), 'dsh-prime-compose-'))
+  root = hostRoot
+  const home = join(hostRoot, 'home')
+  const spillRoot = join(hostRoot, 'spill')
+  vi.stubEnv('DSH_HOME', home)
+  const configPath = join(hostRoot, 'cordis.yml')
+  const patchPath = join(hostRoot, 'cordis.patch.yml')
+  await writeFile(patchPath, (await readFile(PATCH_PATH, 'utf8'))
+    .replace('name: dsh-prime-agent/runtime', `name: ${PRIME_RUNTIME_URL}`))
+  const officialRuntime = includeOfficialRuntime
+    ? "- id: code-runtime\n  name: '@deepseek-ai/dsh-code-runtime-worker-thread'\n"
+    : ''
+  await writeFile(configPath, `
 - id: system-prompt
   name: '@deepseek-ai/dsh-system-prompt'
 - id: tools
   name: '@deepseek-ai/dsh-tools'
   config:
     mode: code
-- id: code-runtime
-  name: '@deepseek-ai/dsh-code-runtime-worker-thread'
-- id: agents
+${officialRuntime}- id: agents
   name: '@deepseek-ai/dsh-agent'
 - id: subagents
   name: '@deepseek-ai/dsh-subagent'
@@ -102,13 +107,19 @@ describe('Prime host patch composition', () => {
     requireOrchestrationTools: false
 `.trimStart())
 
-    ctx = await boot(
-      'prime-compose-e2e',
-      configPath,
-      loadOverlayPatches('prime-compose-e2e', patchPath),
-      undefined,
-      import.meta.url,
-    )
+  ctx = await boot(
+    'prime-compose-e2e',
+    configPath,
+    loadOverlayPatches('prime-compose-e2e', patchPath),
+    undefined,
+    import.meta.url,
+  )
+  return { hostRoot, home, spillRoot }
+}
+
+describe('Prime host patch composition', () => {
+  it('replaces the official runtime, authenticates through the real tool, and places the preset', async () => {
+    const { hostRoot, home, spillRoot } = await bootPrimeHost(true)
 
     // Mount the npm-installed spill chain post-boot so this focused fixture can
     // supply its temporary backend root directly. All DSH modules in this test
@@ -144,8 +155,8 @@ describe('Prime host patch composition', () => {
       disabled: false,
       mounted: true,
     })
-    const alpha = testAgent('compose-alpha', root)
-    const beta = testAgent('compose-beta', root)
+    const alpha = testAgent('compose-alpha', hostRoot)
+    const beta = testAgent('compose-beta', hostRoot)
     const first = await runCode(alpha.agent, 'const answer = 424242; answer')
     expect(first.result).toBe(424242)
 
@@ -188,5 +199,26 @@ describe('Prime host patch composition', () => {
     const locator = /Full formatted result stored at: (.+?)\. Use read with/.exec(bigContent)?.[1]
     if (locator === undefined) throw new Error(`no spill locator in: ${bigContent.slice(-300)}`)
     expect(await readFile(locator, 'utf8')).toContain(body)
+  })
+
+  it('starts when the host has no public official runtime row', async () => {
+    const { hostRoot } = await bootPrimeHost(false)
+    if (ctx === undefined) throw new Error('test context was not booted')
+    const rows = [...ctx.loader.entries()].map(entry => ({
+      id: entry.options.id,
+      name: entry.options.name,
+      mounted: Boolean(entry.fiber),
+    }))
+
+    expect(rows.some(row => row.id === 'code-runtime')).toBe(false)
+    expect(rows).toContainEqual({
+      id: 'prime-code-runtime',
+      name: PRIME_RUNTIME_URL,
+      mounted: true,
+    })
+
+    const { agent } = testAgent('compose-tui', hostRoot)
+    expect((await runCode(agent, 'const retained = 20260825; retained')).result).toBe(20260825)
+    expect((await runCode(agent, 'retained')).result).toBe(20260825)
   })
 })

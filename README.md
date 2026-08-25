@@ -62,19 +62,17 @@ Host runtime 会监控启动它的直接父进程。Windows 父 shell 被强制�
 
 ### TUI 运行
 
-TUI bundle 本身不挂载 Code Runtime 和 agent preset 服务，因此先安装仓库内的 TUI 支持 bundle，再安装 Prime 插件；两者的 bundle 顺序不能颠倒。
+Prime 包直接携带官方 Code Runtime 依赖，并由 hybrid runtime 私有挂载 one-shot fallback；TUI Profile 不需要额外的支持 bundle。若 Profile 已有公开的官方 `code-runtime` row，Prime patch 会先将其停用；TUI 没有该 row 时则直接插入 `prime-code-runtime`，不会补建第二个公开 provider。
 
 ```powershell
-$pluginRoot = (Resolve-Path '.').Path
-$tuiSupportRoot = Join-Path $pluginRoot 'scripts\tui-prime-support'
-
-$tuiSupportLink = 'link:' + ($tuiSupportRoot -replace '\\', '/')
-$pluginLink = 'link:' + ($pluginRoot -replace '\\', '/')
-dsh plugin --profile tui add $tuiSupportLink
-dsh plugin --profile tui add $pluginLink
+npm pack
+$primePackage = Get-ChildItem -Filter 'dsh-prime-agent-*.tgz' |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1 -ExpandProperty FullName
+dsh plugin --profile tui add $primePackage
 ```
 
-如果 Prime 插件此前已经先于支持 bundle 安装，应先运行 `dsh plugin --profile tui remove dsh-prime-agent`，再按上述顺序重新添加。使用 `dsh --profile tui --dump-config` 核验组合结果中存在 `agent-presets`、`prime-code-runtime`、官方 `tool-subagent-report` 和 `tui-runner`，然后运行 `dsh --profile tui`。
+使用 `dsh --profile tui --dump-config` 核验组合结果中存在 `agent-presets`、`prime-code-runtime`、官方 `tool-subagent-report` 和 `tui`，然后运行 `dsh --profile tui`。
 
 ### Headless 运行
 
@@ -241,7 +239,7 @@ Jobs 是独立的后台任务生命周期。后台 shell 或 one-shot background
 
 ## 开发
 
-开发、类型检查和测试统一解析 `package-lock.json` 锁定的 npm 发布包；同级 `../deepseek-harness` checkout 仅用于审阅上游 diff 与 preset 快照，不参与模块解析。DSH peer range 限制在兼容的 `0.1.x` 系列并标记为 optional,避免在已提供这些包的宿主中安装第二套 package graph。
+开发、类型检查和测试统一解析 `package-lock.json` 锁定的 npm 发布包；同级 `../deepseek-harness` checkout 仅用于审阅上游 diff 与 preset 快照，不参与模块解析。宿主提供的 DSH peer range 限制在兼容的 `0.1.x` 系列并标记为 optional，避免重复安装宿主服务；`@deepseek-ai/dsh-code-runtime` 与 Worker Thread backend 是例外，它们由 Prime 包作为生产依赖直接交付，用于私有 one-shot fallback。
 
 ```sh
 npm run typecheck

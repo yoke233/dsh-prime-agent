@@ -1,15 +1,15 @@
 # Applied automatically once `dsh plugin add` lists this package in the
 # profile's bundles. The two operations form one runtime replacement.
 #
-# Retire the official one-shot `code-runtime` row and insert the Prime runtime
-# in its place. The `name` field on the disable is an assertion protecting a
-# swapped-provider row from being disabled — but the two patches are
-# independent, so the insert still lands and boot then fails on the contended
-# `codeRuntime` slot. The Prime runtime's own `apply` turns that contention into
-# a diagnostic naming this patch, since the loader's skip warning is not visible
-# in production logging. Non-Prime requests are delegated to a privately mounted
-# copy of the official runtime, so every other preset keeps official one-shot
-# semantics and budgets.
+# Retire the official one-shot `code-runtime` row when the Profile has one,
+# then insert the Prime runtime. The `name` field on the disable is an assertion
+# protecting a swapped-provider row from being disabled. A TUI Profile has no
+# public `code-runtime` row, so that patch is skipped and the independent insert
+# still lands. This package carries the official runtime dependencies and the
+# Prime runtime mounts its one-shot fallback privately; no TUI support bundle or
+# second public provider is needed. If another provider already owns
+# `codeRuntime`, Prime's `apply` fails with a diagnostic naming this patch.
+# Non-Prime requests retain official one-shot semantics and budgets.
 #
 # Subagent report delivery stays with the DSH 0.1.1-rc.2 base bundle. Its official
 # `tool-subagent-report` defaults to `next-step`: `parent.steer()` lets a running parent

@@ -158,7 +158,7 @@ function fallbackConfig(config: Config): Record<string, number> {
   return passthrough
 }
 
-/** The two modules that exist only when the deployment ships Code Mode. */
+/** Runtime modules loaded lazily so an incomplete install gets one actionable row diagnostic. */
 interface CodeModeModules {
   WorkerThreadCodeRuntime: (typeof import('@deepseek-ai/dsh-code-runtime-worker-thread'))['default']
   PrimeCodeRuntime: (typeof import('./realm/runtime.js'))['PrimeCodeRuntime']
@@ -167,13 +167,11 @@ interface CodeModeModules {
 /**
  * Resolve the Code Mode packages at APPLY time rather than at module load.
  *
- * `@deepseek-ai/dsh-code-runtime` and its worker-thread backend are OPTIONAL
- * peers, so a profile may legitimately be composed without them. A static import
- * would make that profile die during module resolution — before any plugin body
- * runs — taking the whole boot down with a bare `ERR_MODULE_NOT_FOUND` that
- * names a file rather than the decision the operator has to make. Deferring the
- * import turns it into one row failing to load, with a diagnostic that says what
- * to do about it.
+ * `@deepseek-ai/dsh-code-runtime` and its worker-thread backend are production
+ * dependencies of this package. Keep the import deferred so a corrupt or
+ * incomplete installation fails while mounting this row, with an actionable
+ * diagnostic, instead of taking down module resolution with a bare
+ * `ERR_MODULE_NOT_FOUND` before any plugin body runs.
  */
 async function loadCodeMode(): Promise<CodeModeModules> {
   try {
@@ -186,9 +184,9 @@ async function loadCodeMode(): Promise<CodeModeModules> {
     return { WorkerThreadCodeRuntime: worker.default, PrimeCodeRuntime: prime.PrimeCodeRuntime }
   } catch (error: unknown) {
     throw new Error(
-      'dsh-prime-agent: the Prime code runtime needs the harness Code Mode packages '
-      + '(@deepseek-ai/dsh-code-runtime and @deepseek-ai/dsh-code-runtime-worker-thread), '
-      + 'which this profile does not provide; use a profile that includes Code Mode, or remove the prime-code-runtime row',
+      'dsh-prime-agent: the packaged Code Mode dependencies could not be loaded '
+      + '(@deepseek-ai/dsh-code-runtime and @deepseek-ai/dsh-code-runtime-worker-thread); '
+      + 'reinstall dsh-prime-agent and verify that the host uses a compatible DSH 0.1.x release',
       { cause: error },
     )
   }
@@ -321,6 +319,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
 }
 
-// Types only: a value re-export would statically pull the optional Code Mode
-// peers back into this module's graph, defeating the deferred import above.
+// Types only: a value re-export would pull the packaged Code Mode dependencies
+// into this module's static graph, defeating the deferred diagnostic above.
 export type { PrimeCodeRuntime, PrimeCodeRuntimeOptions } from './realm/runtime.js'

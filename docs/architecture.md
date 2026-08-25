@@ -30,7 +30,7 @@
 ```text
 DSH profile
 ├─ cordis.patch.yml
-│  ├─ 官方 code-runtime row（disabled）
+│  ├─ 官方 code-runtime row（存在时 disabled）
 │  ├─ dsh-prime-agent/runtime
 │  │  ├─ Prime request ──→ Realm identity ──→ Realm pool ──→ persistent Worker
 │  │  └─ ordinary request ──────────────────→ 官方 one-shot Worker
@@ -52,7 +52,7 @@ DSH profile
 
 ## 安装与 preset
 
-随包 `cordis.patch.yml` 只执行一组 runtime 替换：停用官方 `code-runtime` row，插入 hybrid runtime。普通请求由 hybrid runtime 内部挂载的官方 Worker Thread Runtime 原样处理。
+随包 `cordis.patch.yml` 只执行一组 runtime 替换：Profile 已有官方 `code-runtime` row 时以名称断言后停用它，无该 row 的 TUI Profile 则跳过停用；两种情况都会插入 hybrid runtime。Prime 包把官方 Code Runtime 与 Worker Thread Runtime 作为生产依赖直接交付，hybrid runtime 在私有 realm 中挂载 one-shot fallback，因此不需要额外的 TUI 支持 bundle，普通请求仍按官方语义处理。
 
 Subagent report 完全复用 DSH 0.1.1-rc.2 base bundle 的官方 `tool-subagent-report`。其默认 `next-step` 调度通过 `parent.steer()` 让运行中的 parent 在最近 step 消费报告，并唤醒空闲 parent；continuation manager 同时负责唤醒记账以及 report 先于后续 settled notice 的 FIFO 顺序。本包不再替换或复制该能力。
 
