@@ -12,6 +12,37 @@
 import type { CodeJsonValue, CodeRunFailure, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
 
 /**
+ * Trusted, content-free metadata describing how a Realm completion should be
+ * presented. It is derived only from a nonce-authenticated worker envelope;
+ * the envelope itself remains the canonical `value`.
+ */
+export type ReplPresentation =
+  | { kind: 'full' }
+  | {
+    kind: 'retained-preview'
+    valueType: string
+    serializedBytes?: number
+    handle: number
+  }
+  | {
+    kind: 'unretained-preview'
+    valueType: string
+    serializedBytes?: number
+    /** Absent on the projector's minimal unretained envelope. */
+    reason?: string
+  }
+  | {
+    kind: 'opaque-reference'
+    valueType: string
+    handle: number
+  }
+
+/** Realm run result plus optional trusted presentation metadata. */
+export interface PrimeRunResult extends CodeRunResult {
+  presentation?: ReplPresentation
+}
+
+/**
  * Smallest output cap that still fits the fixed overflow diagnostic, so the
  * hard cap never has to truncate its own failure message.
  */
@@ -40,11 +71,10 @@ export const LAST_RESULT_GLOBAL = '$_'
  * Both `Bytes` fields and the node budget are ADMISSION APPROXIMATIONS taken
  * when a value was captured, not heap guarantees. The history retains the
  * program's own object, so later in-place mutation drifts the accounting — the
- * Phase 0 benchmark measured drift up to 11.8x upward and down to zero
- * (`docs/plan/phase0-bench-results.zh.md` §3.4), and 16 MiB of legal JSON can
- * correspond to a 341 MiB live object graph (§3.5). The only hard heap boundary
- * is still the worker's `maxOldGenerationSizeMb`, which is why these defaults
- * sit far below it.
+ * Checked-in measurements under `bench/results/` found estimate drift up to
+ * 11.8x upward and down to zero; 16 MiB of legal JSON can correspond to a
+ * 341 MiB live object graph. The only hard heap boundary is still the worker's
+ * `maxOldGenerationSizeMb`, which is why these defaults sit far below it.
  */
 export interface RealmCompletionHistoryLimits {
   /** Retained completions one realm generation may hold at once. */
@@ -58,8 +88,7 @@ export interface RealmCompletionHistoryLimits {
 }
 
 /**
- * Per-realm ceilings on the runtime-owned history of NON-JSON live values
- * (plan `docs/plan/upstream-python-node-gap-remediation.zh.md` §5 WP-C).
+ * Per-realm ceilings on the runtime-owned history of NON-JSON live values.
  *
  * This is an INDEPENDENT budget: a flood of Map/function/bigint/cyclic
  * completions may neither evict lossless-JSON slots nor be evicted by them.
@@ -86,9 +115,8 @@ export interface RealmCompletionOpaqueLimits {
 }
 
 /**
- * The Phase 0 benchmark's decided defaults
- * (`docs/plan/phase0-bench-results.zh.md` §4.1). Restated in `realm-worker.ts`,
- * which cannot import this module at runtime.
+ * Benchmark-backed defaults, restated in `realm-worker.ts`, which cannot import
+ * this module at runtime.
  */
 export const DEFAULT_COMPLETION_HISTORY_LIMITS: RealmCompletionHistoryLimits = {
   maxCompletionHistoryEntries: 16,
@@ -117,7 +145,7 @@ export const DEFAULT_COMPLETION_OPAQUE_LIMITS: RealmCompletionOpaqueLimits = {
  * be self-consistent — a value no larger than a projection gains nothing from
  * being projected — but it would also push every 4-64 KiB result through the
  * projector, and a model that has to re-fetch a mid-sized result it could have
- * read directly makes more tool calls, not fewer (plan §5.2, acceptance #16).
+ * read directly makes more tool calls, not fewer.
  */
 export interface RealmCompletionProjectionLimits {
   /**
@@ -132,17 +160,17 @@ export interface RealmCompletionProjectionLimits {
    *
    * It deliberately does not bound the minimal reference below it. That rung is
    * bounded by the wire budget alone, because a projection ceiling small enough
-   * to reject a 45-byte handle would make the last rung of the chain
+   * to reject the typed minimal reference would make the last rung of the chain
    * unreachable and put an oversized completion back to failing.
    */
   maxCompletionProjectionBytes: number
 }
 
 /**
- * Decided in plan §5.2. `maxCompletionFullBytes` matches upstream IPython's
- * 65,536-character single-stream truncation, which is the prior the model was
- * trained against; the projection ceiling comes from the Phase 0 measurement of
- * real envelopes (rich 265-985 B, minimal reference 86-119 B).
+ * `maxCompletionFullBytes` matches upstream IPython's 65,536-character
+ * single-stream truncation, which is the prior the model was trained against;
+ * the projection ceiling is grounded in the checked-in rich-envelope
+ * measurements under `bench/results/`.
  */
 export const DEFAULT_COMPLETION_PROJECTION_LIMITS: RealmCompletionProjectionLimits = {
   maxCompletionFullBytes: 65_536,
@@ -150,15 +178,14 @@ export const DEFAULT_COMPLETION_PROJECTION_LIMITS: RealmCompletionProjectionLimi
 }
 
 /**
- * Byte ceiling on the smallest envelope the degradation chain can fall back to.
+ * Exact byte ceiling for the largest legal minimal retained envelope.
  *
- * It exists to be checked against the WORST legal configuration rather than the
- * default one: a realm may be configured down to {@link MIN_OUTPUT_BYTES}, which
- * leaves a completion roughly 254 bytes once the empty log array is paid for. A
- * minimal reference has to fit inside that with room to spare, or the last rung
- * of the chain is unreachable and an oversized completion still fails.
+ * The worst case is an opaque `function` at `Number.MAX_SAFE_INTEGER`: the
+ * handle appears twice and the safe completion type and opaque marker remain
+ * present. At 105 bytes it fits comfortably in the completion space left by
+ * {@link MIN_OUTPUT_BYTES}, including the two bytes charged for empty logs.
  */
-export const MINIMAL_ENVELOPE_BYTES = 128
+export const MINIMAL_ENVELOPE_BYTES = 105
 
 /** Reject any ceiling that is not a positive safe integer. */
 function assertPositiveIntegers(limits: Record<string, number>): void {
@@ -225,12 +252,12 @@ export interface RealmCompletionPlan {
 /**
  * The bounded reference a large completion crosses as, instead of its value.
  *
- * Every field is optional except `truncated`, because the chain that produces it
- * degrades: a full envelope carries the handle, the capture size and a bounded
- * projection, and the last rung carries little more than the handle. What the
- * SHAPE never conveys is authenticity — a program can return an object of
+ * The handle, safe completion type and `truncated` marker are always retained
+ * when the chain reaches its minimal rung. Rich envelopes additionally carry
+ * retention state, capture size, a bounded projection, or a refusal reason.
+ * The SHAPE never conveys authenticity — a program can return an object of
  * exactly this form, and it travels as an ordinary completion. The `projected`
- * marker on the terminal message is the only discriminator (§7.2).
+ * marker on the terminal message is the only discriminator.
  */
 export interface RealmCompletionEnvelope {
   /** The handle the value was retained under; absent when it was not retained. */
@@ -238,8 +265,8 @@ export interface RealmCompletionEnvelope {
   /** A copyable expression that reaches the value, e.g. `$out(17)`. */
   use?: string
   retained?: boolean
-  /** `object`, `array`, `string`, `number`, `boolean` or `null`. */
-  type?: string
+  /** Safe completion classification such as `object`, `array` or `function`. */
+  type: string
   /** Exact serialized bytes, present only when the capture walk measured them. */
   serializedBytesAtCapture?: number
   /**
@@ -333,9 +360,9 @@ export type RealmToHost =
      */
     projected?: string
     /**
-     * This run's contribution to the realm's bounded metrics (plan §11). Absent
-     * when the run had nothing to report, and NEVER carrying content: only
-     * counts, sizes and the resulting history levels.
+     * This run's contribution to the realm's bounded metrics. Absent when the run
+     * had nothing to report, and NEVER carrying content: only counts, sizes and
+     * the resulting history levels.
      */
     metrics?: RealmRunMetrics
   }
@@ -413,18 +440,18 @@ export class OutputLedger {
   }
 
   /** Finalize a run that completed without producing a value. */
-  success(logs: string[]): CodeRunResult {
+  success(logs: string[]): PrimeRunResult {
     return { logs }
   }
 
   /** Finalize a completion whose serialized size the worker already measured. */
-  completion(logs: string[], value: CodeJsonValue, serializedBytes: number): CodeRunResult {
+  completion(logs: string[], value: CodeJsonValue, serializedBytes: number): PrimeRunResult {
     if (serializedBytes > this.remaining()) return this.limit(logs)
     return { logs, value }
   }
 
   /** Finalize a failure diagnostic, with output-limit taking precedence when the combined bytes exceed the cap. */
-  failure(logs: string[], error: CodeRunFailure): CodeRunResult {
+  failure(logs: string[], error: CodeRunFailure): PrimeRunResult {
     if (jsonStringBytes(error.message) > this.remaining()) return this.limit(logs)
     return { logs, error }
   }
@@ -435,7 +462,7 @@ export class OutputLedger {
    * kept or dropped whole; the one-shot runtime additionally splits the first
    * oversized entry at a code-point boundary.
    */
-  limit(logs: string[]): CodeRunResult {
+  limit(logs: string[]): PrimeRunResult {
     const message = `outer output exceeded ${this.maxBytes} bytes`
     const logBudget = this.maxBytes - jsonStringBytes(message)
     const retained: string[] = []

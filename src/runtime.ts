@@ -46,9 +46,9 @@ const OFFICIAL_DEFAULTS = {
 } as const
 
 /**
- * Completion-history ceilings, decided by the Phase 0 benchmark
- * (`docs/plan/phase0-bench-results.zh.md` §4.1) and restated here so the schema
- * can publish them. `DEFAULT_COMPLETION_HISTORY_LIMITS` in
+ * Completion-history ceilings are backed by the checked-in measurements under
+ * `bench/results/` and restated here so the schema can publish them.
+ * `DEFAULT_COMPLETION_HISTORY_LIMITS` in
  * `src/realm/protocol.ts` is the single source these must track.
  */
 const COMPLETION_HISTORY_DEFAULTS = {
@@ -67,10 +67,9 @@ const COMPLETION_HISTORY_FIELDS = [
 ] as const
 
 /**
- * Completion projection ceilings, decided in plan §5.2 and restated here on the
- * same terms as the history defaults above.
- * `DEFAULT_COMPLETION_PROJECTION_LIMITS` in `src/realm/protocol.ts` is the
- * single source these must track.
+ * Completion projection ceilings, restated here on the same terms as the
+ * history defaults above. `DEFAULT_COMPLETION_PROJECTION_LIMITS` in
+ * `src/realm/protocol.ts` is the single source these must track.
  */
 const COMPLETION_PROJECTION_DEFAULTS = {
   maxCompletionFullBytes: 65_536,

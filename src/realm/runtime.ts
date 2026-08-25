@@ -17,7 +17,7 @@
 import { join } from 'node:path'
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
-import type { CodeRunFailure, CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
+import type { CodeRunFailure, CodeRunRequest } from '@deepseek-ai/dsh-code-runtime'
 import {
   MIN_OUTPUT_BYTES,
   OutputLedger,
@@ -25,7 +25,12 @@ import {
   resolveCompletionOpaqueLimits,
   resolveCompletionProjectionLimits,
 } from './protocol.js'
-import type { RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits } from './protocol.js'
+import type {
+  PrimeRunResult,
+  RealmCompletionHistoryLimits,
+  RealmCompletionOpaqueLimits,
+  RealmCompletionProjectionLimits,
+} from './protocol.js'
 import { acquireRealmLease, RealmLeaseError } from './realm-lease.js'
 import { addRealmMetrics, emptyRealmMetrics, PersistentRealm } from './realm.js'
 import type { RealmBudgets, RealmMetrics, RealmRunNotice } from './realm.js'
@@ -64,21 +69,20 @@ export interface PrimeRealmRuntimeOptions {
   stateDirectory: string
   /** Per-run ceilings handed to every realm this runtime creates. */
   budgets: RealmBudgets
-  /**
-   * Completion-history ceilings for every realm this runtime creates. Blank
-   * fields take the plan defaults.
+  /** Completion-history ceilings for every realm this runtime creates. Blank
+   * fields take the runtime defaults.
    */
   completionHistory?: Partial<RealmCompletionHistoryLimits>
   /**
    * Opaque (non-JSON) history ceilings for every realm this runtime creates.
-   * Blank fields take the plan defaults; the opaque store is an independent
+   * Blank fields take the runtime defaults; the opaque store is an independent
    * budget from {@link completionHistory}.
    */
   completionOpaque?: Partial<RealmCompletionOpaqueLimits>
   /**
    * Projection ceilings for every realm this runtime creates: the size past
    * which a completion is referenced rather than shown, and how much a reference
-   * may itself cost. Blank fields take the plan defaults.
+   * may itself cost. Blank fields take the runtime defaults.
    */
   completionProjection?: Partial<RealmCompletionProjectionLimits>
   /** Realms that may hold a worker at once; admission past it reclaims or refuses. */
@@ -89,7 +93,7 @@ export interface PrimeRealmRuntimeOptions {
 
 /** One run synchronously enqueued while its pool/lease admission was stable. */
 interface RealmAdmission {
-  result: Promise<CodeRunResult>
+  result: Promise<PrimeRunResult>
 }
 
 /** Render an abort reason the way the shipped one-shot runtime does. */
@@ -111,9 +115,8 @@ function realmOwnershipFailure(error: unknown): string {
 
 /**
  * Render the one lifecycle fact a fresh worker needs to expose. The restart line
- * names the completion history too, because a hard kill takes both with it and
- * the plan deliberately keeps ONE restart mechanism rather than adding a second
- * notice for the history.
+ * names completion history because a hard kill takes it with the bindings; one
+ * notice reports the whole restart rather than splitting the event.
  */
 function namespaceNotice(fresh: boolean, lost: boolean): string | undefined {
   if (lost) return '[prime-realm] live namespace restarted; previous bindings and retained results were lost'
@@ -213,8 +216,7 @@ export class PrimeRealmRuntime extends Service {
   }
 
   /**
-   * Bounded completion counters across every realm this runtime has hosted
-   * (plan §11).
+   * Bounded completion counters across every realm this runtime has hosted.
    *
    * Exposed as a getter and nothing else: the numbers are for tests and for a
    * deployment that wants to check the mechanism is reducing tokens rather than
@@ -235,7 +237,7 @@ export class PrimeRealmRuntime extends Service {
    * @returns the run's outcome per the seam contract; rejects only on caller
    *   misuse (disposed runtime, unusable Realm identity).
    */
-  async run(realmId: string, request: CodeRunRequest): Promise<CodeRunResult> {
+  async run(realmId: string, request: CodeRunRequest): Promise<PrimeRunResult> {
     if (this.disposed) throw new Error('dsh-prime-agent: prime realm runtime run() after disposal')
     if (typeof realmId !== 'string' || realmId.length === 0) {
       throw new Error('dsh-prime-agent: realm id must not be empty')
@@ -249,7 +251,7 @@ export class PrimeRealmRuntime extends Service {
   }
 
   /** Admit the run into its realm and append a fresh-namespace notice when needed. */
-  private async execute(realmId: string, request: CodeRunRequest): Promise<CodeRunResult> {
+  private async execute(realmId: string, request: CodeRunRequest): Promise<PrimeRunResult> {
     // Re-checked after the admission awaits: teardown may have run while the
     // lease claim was in flight, and admitting here would build a realm
     // and a worker that nothing is left to dispose.
@@ -431,18 +433,18 @@ export class PrimeRealmRuntime extends Service {
    * because a pre-worker diagnostic interpolates a message from the host's tool
    * pipeline and must not be the one result that ignores the output cap.
    */
-  private failure(error: CodeRunFailure): CodeRunResult {
+  private failure(error: CodeRunFailure): PrimeRunResult {
     // No realm ran, so no notice is appended and the whole cap is available.
     return new OutputLedger(this.outputBytes).failure([], error)
   }
 
   /** A fail-closed pre-worker outcome; never a rejection of `run()`. */
-  private exception(message: string): CodeRunResult {
+  private exception(message: string): PrimeRunResult {
     return this.failure({ kind: 'exception', message })
   }
 
   /** The abort outcome, matching the shipped one-shot runtime's rendering. */
-  private aborted(signal: AbortSignal): CodeRunResult {
+  private aborted(signal: AbortSignal): PrimeRunResult {
     return this.failure({ kind: 'abort', message: renderReason(signal.reason) })
   }
 }

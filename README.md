@@ -30,15 +30,16 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
   <img src="./assets/readme/architecture.svg" width="100%" alt="repl {code} 经 Agent scope 用可信 exec.agent.id 解析 Realm identity,host primeRealmRuntime 服务准入持久 Realm Worker;官方 code-runtime row 未改动,非 Prime 会话继续官方 one-shot">
 </p>
 
-- 模型 catalog 只含 `repl`。其他 DSH 工具不直接可见:prompt assembly 把 tools 列表过滤到只剩 `repl`,直接调用其他工具会被 guard 拒绝;这些能力作为 cell 内预加载绑定出现——`tools.*` 是原始 typed bindings,`agents.*`(spawn/fork/list/send/interrupt)与 `jobs.*`(list/output/kill)是 continuable child 与后台任务的薄适配。
+- 模型 catalog 只含 `repl`。其他 DSH 工具不直接可见:prompt assembly 把 tools 列表过滤到只剩 `repl`,直接调用其他工具会被 guard 拒绝;这些能力作为 cell 内预加载绑定出现——`tools.*` 是返回已解析 canonical JavaScript value 的 typed bindings,`agents.*`(spawn/fork/list/send/interrupt)与 `jobs.*`(list/output/kill)是 continuable child 与后台任务的薄适配。Agent 固定提示与具体对话、任务、仓库和历史错误无关；当前 catalog 只负责生成真实参数与返回类型声明。
 - 路由信任 Agent 执行上下文。`repl` 要求拥有 Agent 会话:插件用可信 `exec.agent.id` 从共享 `realm-identity` 存储解析该会话稳定的不透明 Realm id,再把程序、本轮租约绑定与取消信号交给 host 侧的 `ctx.primeRealmRuntime.run(...)`。没有握手、没有模型可见的身份工具;缺少可信执行上下文或无法解析 Realm id 时明确失败,绝不降级。
 - Host 服务与官方运行时并存。`cordis.patch.yml` 只是把 `dsh-prime-agent/runtime` 作为新 row 插入,官方 `code-runtime` row 原样保留;非 Prime 会话继续使用官方 one-shot 语义,不存在 fallback。
 - Realm 内的绑定经跨 run 稳定的 Proxy 与 per-run binding lease 调用:schema、审批、沙箱、日志、并发和取消仍由 DSH 执行,run 结束立即撤销授权。
 - 多个 TUI 进程可共享 Prime 持久状态并同时运行不同 Session；同一 Session 的 live Realm 同时只允许一个进程持有，owner 退出后另一进程以空 namespace 接管。
 - Prime 不封装搜索接口：直接调用 DSH 的 `grep`，并在 repl 程序内把 TypeScript 正则字面量的 `.source` 作为 `pattern`，避免字符串二次转义。
 - Profile 显式安装的 DSH Host MCP client 把 server tools 注册进统一 catalog，repl 单元自动获得对应 `tools.*` 绑定；Prime 不复制 Python kernel-owned MCP runtime。
-- Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值；`repl` 的 canonical completion 留在 Realm completion history 中，外层结果超过展示预算时由 DSH 写入 artifact 并返回 locator。保存失败时保留完整 inline 成功结果并告警，不伪造 locator。
-- 完成值由 runtime 自动保留在 generation-local 的 completion history 中:`$_` 取最近一个结果,`$out(N)` 按 handle 取回原值;超预算按 FIFO 淘汰,hard kill 后连同 namespace 一起丢失。
+- 工具结果已经是 Realm 内的 JavaScript value，不对其再次 `JSON.parse`。notebook 结构化 preview 中的 `\\` 只是 JSON notation；模型自行编写 Windows 路径时优先使用 `D:/work/project` 形式，避免额外转义层。
+- Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值；`repl` 的外层 canonical value 仍是可程序化读取的 lossless JSON（`logs`、可选 `result` 与可信 presentation metadata），但模型只看到 notebook 文本：logs 是 plain section，字符串原样显示，结构化值只 pretty-print 一次，空结果有明确完成提示。外层 notebook 文本超过展示预算时由 DSH 写入 artifact 并返回 locator；保存失败时保留完整 inline 成功结果并告警，不伪造 locator。
+- 完成值由 runtime 自动保留在 generation-local 的 completion history 中：`$_` 是最近已保留结果的首选入口，`$out(N)` 只用于较早结果；runtime-authored preview 由 nonce 验证后的 metadata 驱动，已保留 preview 明确教授这两个入口，未保留 preview 不显示 handle，opaque 值不做结构化渲染。用户主动返回旧 envelope 同形 JSON 时仍按普通 JSON 显示。
 - Realm 是 live-only 的：abort、timeout、OOM 会 hard-kill Worker 并丢失 namespace，下一次真正执行时会明确提示之前的 bindings 与保留结果已丢失。跨重启的检查点由程序显式写入持久任务文件。
 
 完整身份路由、namespace 生命周期、Agent 编排与学习层边界见 [当前架构](docs/architecture.md)。

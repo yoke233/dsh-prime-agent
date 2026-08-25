@@ -643,9 +643,9 @@ function revokeLeases(): void {
  * getters, so re-walking would fire their side effects twice and a getter that
  * threw on the second pass would turn an already-successful run into a failure.
  * The same rule covers key enumeration — a dictionary-mode object has no cheap
- * "first N keys" path (`Object.keys().slice` costs 857 ms on a 64 MiB wide
- * object, `docs/plan/phase0-bench-results.zh.md` §3.7), so the sample below is
- * taken from the enumeration the walk performs anyway.
+ * "first N keys" path (`Object.keys().slice` costs 857 ms on the measured
+ * 64 MiB wide object in `bench/results/key-iteration.json`), so the sample below
+ * is taken from the enumeration the walk performs anyway.
  */
 interface CaptureStats {
   /** Every value visited, containers and leaves alike. */
@@ -658,19 +658,18 @@ interface CaptureStats {
    * It is written INLINE rather than derived from a finished snapshot, and that
    * is the only way the answer can be right: `seen` is a path set (deleted on
    * exit below) that refuses cycles without recognizing sharing, so a few KiB of
-   * live DAG expands into tens of millions of nodes at the boundary (§3.8) and a
-   * post-hoc count would be a count of the amplification rather than of the
-   * value.
+   * live DAG expands into tens of millions of boundary nodes. A post-hoc count
+   * would measure that amplification rather than the value.
    *
    * Tripping it does NOT by itself end the walk; `overCaptureCeiling` does, and
    * only once the value has also grown past what could have crossed whole. The
    * distinction is model-visible. A value can blow the node budget while its
    * serialization stays small — the expanding DAG above is exactly that shape —
-   * and for those the full JSON still crosses, unretained, as it did in Phase 1.
-   * Abandoning the walk there would abandon the serialization with it and turn a
-   * successful cell into `invalid-output`, which the plan forbids outright (§9
-   * Phase 2). Guarded by "refuses a shared subgraph whose expansion the walk
-   * counted, without abandoning the walk" in `tests/completion-history.spec.ts`.
+   * and for those the full JSON still crosses, unretained. Abandoning the walk
+   * there would abandon the serialization with it and turn a successful cell
+   * into `invalid-output`. Guarded by "refuses a shared subgraph whose expansion
+   * the walk counted, without abandoning the walk" in
+   * `tests/completion-history.spec.ts`.
    */
   overNodeLimit: boolean
   /**
@@ -688,12 +687,11 @@ interface CaptureStats {
    *
    * Placing the early exit at the ADMISSION ceiling rather than at the
    * projection threshold is what keeps exact accounting exact. A walk that
-   * finishes inside this bound yields a real byte count and a real node count,
-   * which the history needs to charge a slot; a walk that crosses it belongs to
-   * a value that could never have been retained anyway, so there is nothing left
-   * to measure precisely and the projection is built from what the walk already
-   * gathered. The cost of a capture is therefore bounded by a constant that does
-   * not grow with the value (§4.4).
+   * finishes inside this bound yields a real byte count and node count, which
+   * the history needs to charge a slot. A walk that crosses it belongs to a
+   * value that could never have been retained, so the projection uses what the
+   * walk already gathered. Capture cost is therefore bounded independently of
+   * value size.
    */
   byteLimit: number
   /** The size past which a completion is projected rather than sent whole. */
@@ -742,9 +740,10 @@ function chargeCapture(stats: CaptureStats, bytes: number): void {
 }
 
 /**
- * The projector's hard limits, decided by the Phase 0 benchmark (plan §5.2).
- * They bound the projection independently of the value: whatever the walk is
- * looking at, at most this many nodes of it are ever rendered.
+ * The projector's hard limits, grounded in the checked-in projection
+ * measurements under `bench/results/`. They bound the projection independently
+ * of the value: whatever the walk is looking at, at most this many nodes of it
+ * are ever rendered.
  */
 const PROJECTION_DEPTH = 4
 const PROJECTION_ARRAY_SAMPLE = 8
@@ -774,9 +773,8 @@ function newProjectionSlot(stats: CaptureStats): ProjectionSlot | undefined {
 
 /**
  * Cut one string to the projector's character budget without splitting a
- * surrogate pair — an obligation the boundary already carries for the whole
- * completion (§6.2), and one a naive `slice` breaks by leaving a lone high
- * surrogate that no longer names the character it came from.
+ * surrogate pair. A naive `slice` breaks this by leaving a lone high surrogate
+ * that no longer names the character it came from.
  */
 function truncateForProjection(text: string): string {
   let end = PROJECTION_STRING_CHARS
@@ -798,12 +796,11 @@ function projectString(text: string): unknown {
 /**
  * One sampled object key, as its own projection entry.
  *
- * Entries are a LIST rather than an object keyed by name, which the plan's
- * illustrative envelope showed, because §4.4 also requires an over-long key to
- * be truncated like any other string — and two 20,000-character keys sharing
- * their first 256 characters would then collide, at which point
- * `JSON.stringify` silently drops one of the two entries. A list keeps the
- * truncation honest and keeps every sampled key visible.
+ * Entries are a LIST rather than an object keyed by name because over-long keys
+ * are truncated like any other string. Two 20,000-character keys sharing their
+ * first 256 characters would otherwise collide, at which point `JSON.stringify`
+ * silently drops one entry. A list keeps the truncation honest and keeps every
+ * sampled key visible.
  */
 function projectKeyEntry(key: string): Record<string, unknown> {
   const entry = capturedObjectCreate(null) as Record<string, unknown>
@@ -836,8 +833,8 @@ function snapshotJson(value: unknown): unknown {
  * side effects twice and a getter that threw the second time would turn an
  * already-successful run into a failure. The same rule covers key enumeration: a
  * dictionary-mode object has no cheap "first N keys" path (`Object.keys().slice`
- * costs 857 ms on a 64 MiB wide object, `docs/plan/phase0-bench-results.zh.md`
- * §3.7), so the projector samples from the enumeration this walk performs anyway
+ * costs 857 ms on the measured 64 MiB wide object in
+ * `bench/results/key-iteration.json`), so the projector samples from the enumeration this walk performs anyway
  * and never runs one of its own.
  */
 function snapshotValue(value: unknown, seen: Set<object>, stats: CaptureStats, slot: ProjectionSlot | undefined): unknown {
@@ -910,11 +907,10 @@ function snapshotValue(value: unknown, seen: Set<object>, stats: CaptureStats, s
     // a materialized key per ELEMENT — `Reflect.ownKeys` on a 13.4M-element
     // array measured 5.3 s and 1.2 GiB (`bench/results/g1-exit-gate.json`) — so
     // running it up front would make every aborted capture pay O(value) for an
-    // answer it then throws away, which is exactly what the early exit exists to
-    // prevent. A walk that FINISHED is bounded by the ceiling, so the check is
-    // bounded with it. The cost of deferring is that a sparse or
-    // extra-propertied array past the ceiling is no longer rejected — the same
-    // trade §8 already makes for every other kind of validity beyond the walk.
+    // answer it then throws away. A finished walk is bounded by the ceiling, as
+    // is the check. The tradeoff is that sparse or extra-propertied arrays past
+    // the ceiling are projected rather than rejected, consistently with other
+    // validity checks beyond the walk.
     if (!stats.aborted && capturedReflectOwnKeys(items).length !== items.length + 1) {
       throw new CapturedError('value is not lossless JSON')
     }
@@ -966,11 +962,10 @@ function snapshotValue(value: unknown, seen: Set<object>, stats: CaptureStats, s
         break
       }
     }
-    // The walk stopped inside one child, so the siblings after it were never
-    // read. Their names are already in hand from the single enumeration, and
-    // naming them costs nothing; SAMPLING them would mean reading properties
-    // this capture had decided not to touch, firing getters an aborted walk had
-    // no reason to fire (§4.4).
+    // The walk stopped inside one child, so later siblings were never read.
+    // Their names are already in hand from the single enumeration and cost
+    // nothing to report; sampling values would fire getters the aborted walk
+    // deliberately left untouched.
     if (stats.aborted && entries !== undefined) {
       for (let index = visited; index < keys.length && index < PROJECTION_KEY_SAMPLE; index++) {
         const key = keys[index] as string | symbol
@@ -987,9 +982,9 @@ function snapshotValue(value: unknown, seen: Set<object>, stats: CaptureStats, s
 
 /**
  * One retained completion. `value` is the program's ORIGINAL object, not a copy:
- * the Phase 0 benchmark measured the null-prototype snapshot copy at 1.7x-2.8x
- * the heap of the original whenever a user binding holds it too, and 3.1x on the
- * worst legal shape (`docs/plan/phase0-bench-results.zh.md` §3.3, §4.2). Keeping
+ * the checked-in retention measurements under `bench/results/` show the
+ * null-prototype snapshot copy at 1.7x-2.8x the heap of the original whenever a
+ * user binding holds it too, and 3.1x on the worst measured legal shape. Keeping
  * the identity is also what makes `$out.drop(id)` release the history's claim
  * WITHOUT touching a binding the program declared over the same object.
  */
@@ -1004,9 +999,9 @@ interface CompletionSlot {
    * Own key total of a root object. The keys THEMSELVES are never stored: the
    * projection is generated inline during the capture traversal and travels with
    * that run's envelope, so a stored sample would be held by every slot and read
-   * by nobody. It is also deliberately absent from `$out.list()` — the boundary
-   * admits a 20,000-character key, and sixteen of them across sixteen rows would
-   * be a quarter-megabyte answer to a metadata query (§9 Phase 2).
+   * by nobody. It is also deliberately absent from `$out.list()` because sixteen
+   * 20,000-character keys across sixteen rows would make a quarter-megabyte
+   * metadata answer.
    */
   keyCount: number
   /**
@@ -1054,7 +1049,7 @@ let projectionLimits: RealmCompletionProjectionLimits = {
 }
 
 /**
- * This run's contribution to the realm's bounded metrics (plan §11).
+ * This run's contribution to the realm's bounded metrics.
  *
  * Module state read by `startRun` after the boundary call rather than carried
  * back through it: the Inspector bridge revalidates every field of the fragment
@@ -1187,11 +1182,11 @@ function completionFitsAlone(bytes: number, nodes: number): boolean {
  * Admit one successful run's completion into the history.
  *
  * Identity first: an OBJECT already retained keeps its slot, its handle and its
- * FIFO position, and costs nothing. The Phase 0 simulation showed per-slot
- * billing flushing the history in two of three recirculation traces, and failing
- * in the worst possible shape — the object still in the store under a new id
- * while the handle the model was holding had expired
- * (`docs/plan/phase0-bench-results.zh.md` §3.6, §4.3).
+ * FIFO position, and costs nothing. The checked-in recirculation measurements
+ * under `bench/results/` show per-slot billing flushing the history in two of
+ * three traces, and failing in the worst possible shape — the object still in
+ * the store under a new id while the handle the model was holding had expired.
+ * The completion-history tests exercise the retained behavior.
  *
  * Primitives are excluded from that scan on purpose. `Object.is` on two strings
  * compares CONTENT, so two independently computed equal strings are not the same
@@ -1363,9 +1358,9 @@ const completionList = (): unknown[] => {
     row.nodes = slot.nodes
     // The COUNT, never the keys themselves. It is one small integer whatever
     // the value's shape, which is what separates it from the names: sixteen
-    // 20,000-character keys across sixteen rows would be a quarter-megabyte
-    // answer to a metadata query (§9 Phase 2). Opaque values are never walked
-    // for their keys, so their count is always zero.
+    // 20,000-character keys across sixteen rows would make a quarter-megabyte
+    // metadata answer. Opaque values are never walked for their keys, so their
+    // count is always zero.
     row.keyCount = slot.keyCount
     if (slot.opaque) row.opaque = true
     capturedReflectApply(capturedArrayPush, rows, [row])
@@ -1527,11 +1522,10 @@ let projectedCompletion = false
  *
  * The chain is `rich -> minimal -> output-limit`, and both rungs are tested
  * against the SAME two ceilings: the projection budget, which bounds what a
- * completion may cost the conversation, and the wire budget left after the logs,
- * which bounds what the protocol can carry at all. A handle appears only when
- * the value was actually retained — a dead one is worse than none, because the
- * `use` expression is written to be copied and would fail the moment it was
- * (§4.3).
+ * completion may cost the conversation, and the wire budget left after logs,
+ * which bounds what the protocol can carry. A handle appears only for a value
+ * that was retained; a dead handle is worse than none because the `use`
+ * expression is written to be copied and would immediately fail.
  */
 function projectCompletion(
   value: unknown,
@@ -1566,9 +1560,8 @@ function projectCompletion(
   if (id !== undefined) {
     minimal[COMPLETION_HISTORY_GLOBAL] = id
     minimal.use = `${COMPLETION_HISTORY_GLOBAL}(${id})`
-  } else {
-    minimal.type = type
   }
+  minimal.type = type
   minimal.truncated = true
   const minimalJson = capturedJsonStringify(minimal)
   if (capturedBufferByteLength(minimalJson, 'utf8') <= remaining) return { json: minimalJson }
@@ -1617,10 +1610,9 @@ function projectOpaqueCompletion(
   if (id !== undefined) {
     minimal[COMPLETION_HISTORY_GLOBAL] = id
     minimal.use = `${COMPLETION_HISTORY_GLOBAL}(${id})`
-  } else {
-    minimal.type = type
-    minimal.opaque = true
   }
+  minimal.type = type
+  minimal.opaque = true
   minimal.truncated = true
   const minimalJson = capturedJsonStringify(minimal)
   if (capturedBufferByteLength(minimalJson, 'utf8') <= remaining) return { json: minimalJson }
@@ -1636,20 +1628,19 @@ function projectOpaqueCompletion(
  * boundary, so an exception, abort, timeout, cancellation or output overflow
  * never opens a slot.
  *
- * A value the walk refuses is NOT a failed cell (WP-C): it is a live object
- * whose generation-local retention the opaque budgets decide, answered with a
- * fixed envelope. The one walk does double duty — it classifies, and it charges
- * the opaque slot with what it accounted for before refusing — so a second
- * pass that could fire user getters again is never taken.
+ * A value the walk refuses is NOT a failed cell: it is a live object whose
+ * generation-local retention the opaque budgets decide, answered with a fixed
+ * envelope. The one walk does double duty — it classifies, and it charges the
+ * opaque slot with what it accounted for before refusing — so a second pass that
+ * could fire user getters again is never taken.
  *
- * The walk is bounded, which moves one boundary the plan calls out explicitly
- * (§8): validity is now judged over the part that was WALKED. A value whose tail
+ * Validity is judged over the part the bounded walk reached. A value whose tail
  * lies past the capture ceiling is never read, so a bigint hiding there is never
- * found and the run succeeds with a projection rather than failing. That is the
- * price of not serializing 64 MiB to discover it was unusable, and it costs the
- * model nothing real — the history retains the original object, not the
- * snapshot, so a value that was never fully validated is still exactly what
- * $out(id) hands back.
+ * found and the run succeeds with a projection rather than failing. This avoids
+ * serializing 64 MiB merely to discover it was unusable and costs the model
+ * nothing real: the history retains the original object, not the snapshot, so
+ * `$out(id)` still returns the exact value. The completion-projection tests pin
+ * that observable boundary.
  */
 function prepareCompletion(value: unknown, remaining: number, maxOutputBytes: number): DoneFragment {
   if (value === undefined) return {}

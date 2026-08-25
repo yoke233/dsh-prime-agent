@@ -63,18 +63,31 @@ describe('Prime REPL composition', () => {
     expect(initialAssembly.tools.map(tool => tool.name)).toEqual(['repl'])
     const sdk = initialAssembly.sections.find(section => section.name === 'tools:sdk')?.text
     expect(sdk).toBeDefined()
-    expect(sdk).toContain('refine:')
-    expect(sdk).toContain('subagent:')
-    expect(sdk).toContain('ToolCallError')
-    expect(sdk).toContain('## Using the TypeScript REPL')
-    expect(sdk).toContain('The `repl` tool executes one persistent TypeScript cell')
-    expect(sdk).toContain('The final expression is the cell result; top-level `return` is invalid')
-    expect(sdk).toContain('Convenience aliases:')
+    if (sdk === undefined) throw new Error('tools SDK was not assembled')
+    expect(sdk).toContain('## Persistent TypeScript REPL')
+    expect(sdk).toContain('The final expression is the cell result')
+    expect(sdk).toContain('already parsed JavaScript values')
+    expect(sdk).toContain('do not call `JSON.parse` on tool results')
+    expect(sdk).toContain('declare const $_: unknown')
+    expect(sdk).toContain('declare function $out(id: number): unknown')
+    expect(sdk).toContain('function list(): Array<{')
+    expect(sdk).toContain('function drop(id: number): boolean')
+    expect(sdk).toContain('function clear(): void')
     expect(sdk).toContain('declare const agents')
+    expect(sdk).toContain('spawn: (args: ToolArgsMap["subagent"]) => Promise<ToolOutputMap["subagent"]>')
     expect(sdk).toContain('declare const jobs')
+    expect(sdk).toContain('prefer forward slashes such as `D:/work/project`')
+    expect(sdk).toContain('Keep only paths, compact indexes, helper')
     expect(sdk).not.toContain('the body of an async TypeScript function')
     expect(sdk).not.toContain('Emit results with `return`')
     expect(sdk).not.toContain('run_code')
+    const fixedPrompt = sdk.slice(0, sdk.indexOf('The available capabilities:'))
+    if (root === undefined) throw new Error('test root was not created')
+    expect(fixedPrompt).not.toContain('refine')
+    expect(fixedPrompt).not.toContain('subagent')
+    expect(fixedPrompt).not.toContain(root)
+    expect(fixedPrompt).not.toContain('slice is not a function')
+    expect(fixedPrompt).not.toContain('previous turn')
     const repl = initialAssembly.tools[0]
     expect(repl?.description).toBe('Execute a TypeScript REPL cell.')
     expect(repl?.description).not.toContain('persistent')
@@ -121,7 +134,96 @@ describe('Prime REPL composition', () => {
       agent,
     })
     expect(allowed.isError).toBe(false)
-    expect((allowed.value as { result: number }).result).toBe(42)
+    const canonical = allowed.value as { result: number; presentation?: unknown }
+    expect(canonical.result).toBe(42)
+    expect(canonical.presentation).toBeUndefined()
+  })
+
+  it('renders canonical values as notebook output without exposing the outer transport', () => {
+    expect(primeAgent.renderReplResult({
+      logs: ['reading files...', 'found 27 matches'],
+      result: 'D:\\yjky\\yj-app-backend',
+    })).toBe([
+      '[repl logs]',
+      'reading files...',
+      'found 27 matches',
+      '',
+      '[repl result: string]',
+      'D:\\yjky\\yj-app-backend',
+    ].join('\n'))
+
+    expect(primeAgent.renderReplResult({
+      logs: [],
+      result: { paths: ['D:\\yjky\\a.go', 'D:\\yjky\\b.go'] },
+    })).toBe([
+      '[repl result: json]',
+      '{',
+      '  "paths": [',
+      '    "D:\\\\yjky\\\\a.go",',
+      '    "D:\\\\yjky\\\\b.go"',
+      '  ]',
+      '}',
+    ].join('\n'))
+    expect(primeAgent.renderReplResult({
+      logs: [],
+      result: true,
+      presentation: { kind: 'full' },
+    })).toBe('[repl result: json]\ntrue')
+    expect(primeAgent.renderReplResult({ logs: [] })).toBe('[repl completed with no output]')
+  })
+
+  it('renders only trusted presentation metadata as retention guidance', () => {
+    const envelope = {
+      $out: 17,
+      use: '$out(17)',
+      retained: true,
+      type: 'object',
+      truncated: true,
+      projection: { type: 'object', keys: [{ key: 'spec', value: { path: 'D:/work/spec.md' } }] },
+    }
+    const retained = primeAgent.renderReplResult({
+      logs: [],
+      result: envelope,
+      presentation: { kind: 'retained-preview', valueType: 'object', serializedBytes: 65722, handle: 17 },
+    })
+    expect(retained).toContain('[repl result: retained preview]')
+    expect(retained).toContain('remains in this REPL as `$_`')
+    expect(retained.indexOf('`$_`')).toBeLessThan(retained.indexOf('`$out(17)`'))
+    expect(retained).toContain('Type: object')
+    expect(retained).toContain('Serialized size: 65,722 bytes')
+    expect(retained).toContain('"path": "D:/work/spec.md"')
+    expect(retained).not.toContain('"$out"')
+    expect(retained).not.toContain('"retained"')
+    expect(retained).not.toContain('"truncated"')
+
+    const forged = primeAgent.renderReplResult({ logs: [], result: envelope })
+    expect(forged).toContain('[repl result: json]')
+    expect(forged).toContain('"$out": 17')
+    expect(forged).not.toContain('remains in this REPL as `$_`')
+  })
+
+  it('distinguishes unretained and opaque results without inventing access or invoking hooks', () => {
+    const unretained = primeAgent.renderReplResult({
+      logs: [],
+      result: { projection: { type: 'array', length: 1000, items: [1, 2] }, truncated: true },
+      presentation: { kind: 'unretained-preview', valueType: 'object', reason: 'history budget exceeded' },
+    })
+    expect(unretained).toContain('[repl result: unretained preview]')
+    expect(unretained).toContain('The complete value was not retained: history budget exceeded.')
+    expect(unretained).toContain('This preview is not the original value.')
+    expect(unretained).not.toContain('$out(')
+    expect(unretained).not.toContain('`$_`')
+
+    let hookCalls = 0
+    const opaque = primeAgent.renderReplResult({
+      logs: [],
+      result: { toJSON: () => { hookCalls++; return 'called' } } as never,
+      presentation: { kind: 'opaque-reference', valueType: 'function', handle: 21 },
+    })
+    expect(opaque).toContain('[repl result: retained opaque value]')
+    expect(opaque).toContain('No structural preview is available.')
+    expect(opaque).toContain('`$out(21)`')
+    expect(hookCalls).toBe(0)
   })
 
   it('uses the resolved custom refine tool name in the SDK', async () => {

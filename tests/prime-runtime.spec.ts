@@ -117,6 +117,25 @@ describe('prime realm runtime routing', () => {
     expect(notices(second)).toEqual([])
   })
 
+  it('preserves trusted presentation metadata when appending a namespace notice', async () => {
+    await makeRoot('dsh-prime-presentation-notice-')
+    const ctx = await startHost({ maxCompletionFullBytes: 64 })
+
+    const result = await ctx.primeRealmRuntime.run(realmId('presentation-notice'), {
+      program: '"x".repeat(500)',
+      bindings: [],
+    })
+
+    expectFreshNamespaceNotice(result)
+    expect(result.presentation).toMatchObject({
+      kind: 'retained-preview',
+      valueType: 'string',
+      serializedBytes: 502,
+    })
+    if (result.presentation?.kind !== 'retained-preview') throw new Error('expected retained preview metadata')
+    expect(result.presentation.handle).toBeGreaterThan(0)
+  })
+
   it('routes one realm id to one live namespace and keeps separate realm ids isolated', async () => {
     await makeRoot('dsh-prime-sessions-')
     const ctx = await startHost()

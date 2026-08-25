@@ -19,7 +19,7 @@ import { MessageChannel, MessagePort, Worker } from 'node:worker_threads'
 import type { EventLoopUtilization } from 'node:perf_hooks'
 import type { Readable } from 'node:stream'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
-import type { CodeBindingNamespace, CodeJsonValue, CodeRunFailure, CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
+import type { CodeBindingNamespace, CodeJsonValue, CodeRunFailure, CodeRunRequest } from '@deepseek-ai/dsh-code-runtime'
 import {
   COMPLETION_EXPIRED_ERROR,
   COMPLETION_HISTORY_GLOBAL,
@@ -32,13 +32,14 @@ import {
 } from './protocol.js'
 import type {
   HostToRealm,
-  RealmCompletionEnvelope,
+  PrimeRunResult,
   RealmCompletionHistoryLimits,
   RealmCompletionOpaqueLimits,
   RealmCompletionProjectionLimits,
   RealmNamespaceSpec,
   RealmRunMetrics,
   RealmToHost,
+  ReplPresentation,
 } from './protocol.js'
 
 export type {
@@ -48,13 +49,12 @@ export type {
 } from './protocol.js'
 
 /**
- * Bounded counters for one realm's completion traffic (plan §11).
+ * Bounded counters for one realm's completion traffic.
  *
  * Deliberately content-free: sizes, counts and the resulting history levels, and
  * nothing that could identify a value, a path, a credential or a session. The
- * reduction ratio the plan asks for is `projectionBytes / captureBytes` and is
- * left to the reader rather than stored, so the two numbers it comes from stay
- * independently checkable.
+ * reduction ratio `projectionBytes / captureBytes` is left to the reader rather
+ * than stored, so the two numbers it comes from stay independently checkable.
  */
 export interface RealmMetrics {
   /** Completions the model received verbatim. */
@@ -353,19 +353,49 @@ function parseRunMetrics(raw: unknown): RealmRunMetrics {
 }
 
 /**
- * Whether one parsed completion really is the envelope the worker said it was.
- *
- * Checked because the marker makes the host treat a completion as runtime
- * metadata, and a shape that does not match would be counted — and later
- * reported — as something it is not. The marker itself is what proves ORIGIN;
- * this only proves form.
+ * Validate and translate one nonce-authenticated completion envelope into
+ * content-free presentation metadata. Shape alone never reaches this function:
+ * `onDone` first proves that the worker quoted this run's private nonce.
  */
-function isCompletionEnvelope(value: CodeJsonValue): value is RealmCompletionEnvelope & CodeJsonValue {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-  const envelope = value as Record<string, unknown>
-  if (envelope.truncated !== true) return false
-  const handled = typeof envelope.$out === 'number' && typeof envelope.use === 'string'
-  return handled || typeof envelope.type === 'string'
+function parseCompletionPresentation(value: CodeJsonValue): ReplPresentation | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const envelope = value as Record<string, CodeJsonValue>
+  if (envelope.truncated !== true) return undefined
+  if (envelope.retained !== undefined && typeof envelope.retained !== 'boolean') return undefined
+  if (typeof envelope.type !== 'string') return undefined
+  if (envelope.serializedBytesAtCapture !== undefined
+    && (typeof envelope.serializedBytesAtCapture !== 'number'
+      || !Number.isSafeInteger(envelope.serializedBytesAtCapture)
+      || envelope.serializedBytesAtCapture < 0)) return undefined
+  if (envelope.reason !== undefined && typeof envelope.reason !== 'string') return undefined
+  if (envelope.opaque !== undefined && envelope.opaque !== true) return undefined
+
+  const handle = envelope.$out
+  if (handle !== undefined) {
+    if (typeof handle !== 'number' || !Number.isSafeInteger(handle) || handle <= 0) return undefined
+    if (envelope.use !== `$out(${handle})` || envelope.retained === false || envelope.reason !== undefined) return undefined
+    if (envelope.opaque === true) {
+      return { kind: 'opaque-reference', valueType: envelope.type, handle }
+    }
+    return {
+      kind: 'retained-preview',
+      valueType: envelope.type,
+      handle,
+      ...typeof envelope.serializedBytesAtCapture === 'number'
+        ? { serializedBytes: envelope.serializedBytesAtCapture }
+        : {},
+    }
+  }
+
+  if (envelope.use !== undefined || envelope.retained === true) return undefined
+  return {
+    kind: 'unretained-preview',
+    valueType: envelope.type,
+    ...typeof envelope.serializedBytesAtCapture === 'number'
+      ? { serializedBytes: envelope.serializedBytesAtCapture }
+      : {},
+    ...typeof envelope.reason === 'string' ? { reason: envelope.reason } : {},
+  }
 }
 
 function parseWorkerMessage(raw: unknown): RealmToHost | undefined {
@@ -435,7 +465,7 @@ interface RunEntry {
   readonly request: CodeRunRequest
   readonly bindings: Map<string, CodeBindingNamespace>
   readonly onStart: ((notice: RealmRunNotice) => void) | undefined
-  readonly resolve: (result: CodeRunResult) => void
+  readonly resolve: (result: PrimeRunResult) => void
   readonly finished: Promise<void>
   finish: () => void
   settled: boolean
@@ -495,11 +525,11 @@ export class PersistentRealm {
   constructor(options: {
     realmId: string
     budgets: RealmBudgets
-    /** Completion-history ceilings; every field left blank takes its plan default. */
+    /** Completion-history ceilings; every blank field takes its runtime default. */
     completionHistory?: Partial<RealmCompletionHistoryLimits>
-    /** Opaque (non-JSON) history ceilings; every field left blank takes its plan default. */
+    /** Opaque (non-JSON) history ceilings; every blank field takes its runtime default. */
     completionOpaque?: Partial<RealmCompletionOpaqueLimits>
-    /** Projection ceilings; every field left blank takes its plan default. */
+    /** Projection ceilings; every blank field takes its runtime default. */
     completionProjection?: Partial<RealmCompletionProjectionLimits>
   }) {
     if (options.realmId.length === 0) throw new Error('dsh-prime-agent: realm id must not be empty')
@@ -560,7 +590,7 @@ export class PersistentRealm {
    *   actually inherits the new heap.
    * @returns the run's outcome; rejects only on caller misuse.
    */
-  run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<CodeRunResult> {
+  run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<PrimeRunResult> {
     if (this.disposed) return Promise.reject(new Error('dsh-prime-agent: realm run() after disposal'))
     let bindings: Map<string, CodeBindingNamespace>
     try {
@@ -571,8 +601,8 @@ export class PersistentRealm {
     }
     this.lastUsed = Date.now()
 
-    let resolve!: (result: CodeRunResult) => void
-    const settled = new Promise<CodeRunResult>((done) => { resolve = done })
+    let resolve!: (result: PrimeRunResult) => void
+    const settled = new Promise<PrimeRunResult>((done) => { resolve = done })
     let finish!: () => void
     const finished = new Promise<void>((done) => { finish = done })
     const entry: RunEntry = {
@@ -1011,12 +1041,20 @@ export class PersistentRealm {
       return
     }
     const bytes = Buffer.byteLength(message.json, 'utf8')
+    let presentation: ReplPresentation | undefined
     if (message.projected !== undefined) {
       // The marker quotes this run's nonce, which the program cannot read, and
       // names a shape the host is about to account for as runtime metadata. A
       // marker that fails either test is not bookkeeping this worker is entitled
       // to send.
-      if (message.projected !== entry.nonce || !isCompletionEnvelope(value)) {
+      if (message.projected !== entry.nonce) {
+        const session = entry.session
+        /* c8 ignore next -- a run with a terminal message always still owns its session. */
+        if (session) this.hardKill(session, run => run.ledger.failure(run.logs, PROTOCOL_VIOLATION))
+        return
+      }
+      presentation = parseCompletionPresentation(value)
+      if (presentation === undefined) {
         const session = entry.session
         /* c8 ignore next -- a run with a terminal message always still owns its session. */
         if (session) this.hardKill(session, run => run.ledger.failure(run.logs, PROTOCOL_VIOLATION))
@@ -1024,11 +1062,14 @@ export class PersistentRealm {
       }
       this.counters.completionsProjected += 1
       this.counters.projectionBytes += bytes
-      if (value.projection === undefined) this.counters.completionsMinimal += 1
+      if ((value as Record<string, CodeJsonValue>).projection === undefined) this.counters.completionsMinimal += 1
     } else {
       this.counters.completionsFull += 1
     }
-    this.settle(entry, entry.ledger.completion(entry.logs, value, bytes))
+    const result = entry.ledger.completion(entry.logs, value, bytes)
+    this.settle(entry, presentation === undefined || result.error !== undefined
+      ? result
+      : { ...result, presentation })
   }
 
   /** Fold one run's worker-side completion bookkeeping into this realm's counters. */
@@ -1142,7 +1183,7 @@ export class PersistentRealm {
    * ledger. Idempotent, so two triggers in the same tick (a wall timer and an
    * abort, or a kill and the worker's own `exit`) still cost one generation.
    */
-  private hardKill(session: RealmSession, finalize: (entry: RunEntry) => CodeRunResult): void {
+  private hardKill(session: RealmSession, finalize: (entry: RunEntry) => PrimeRunResult): void {
     if (session.dead) return
     session.dead = true
     if (this.session === session) this.session = undefined
@@ -1165,7 +1206,7 @@ export class PersistentRealm {
   }
 
   /** Deliver one run's single outcome and release everything it held. */
-  private settle(entry: RunEntry, result: CodeRunResult): void {
+  private settle(entry: RunEntry, result: PrimeRunResult): void {
     if (entry.settled) return
     entry.settled = true
     // Counted here rather than on the worker terminal: a run can reach

@@ -192,9 +192,9 @@ describe('Prime host patch composition', () => {
         .toBe(await readFile(join(PACKAGED_PRESET, filename), 'utf8'))
     }
 
-    // Plan 1.4 composition acceptance: the loader-composed profile routes a
-    // large outer result through the real spill chain — owner, backend, and
-    // policy wired by the config above, not by hand in the test.
+    // The loader-composed profile routes a large outer result through the real
+    // spill chain, with owner, backend and policy wired by config rather than by
+    // hand in the test.
     const body = 'SPILL-'.repeat(1000)
     const big = await ctx.tools.execute({
       callId: CallId(`prime-compose-${++callNumber}`),

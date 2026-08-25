@@ -1,15 +1,13 @@
 /**
- * WP-C of the upstream-gap plan
- * (`docs/plan/upstream-python-node-gap-remediation.zh.md` §5 WP-C): bounded
- * generation-local completion history for NON-JSON live objects.
+ * Bounded generation-local completion history for NON-JSON live objects.
  *
  * What is exercised here is the opaque half of the completion boundary: which
  * live values enter the opaque store, that `$_`/`$out(id)` hand back the
  * ORIGINAL identity, that the store has its own hard budgets and FIFO
  * eviction, that rendering never consults a program hook (toJSON/toString/
  * inspect/proxy traps), and that a hard kill expires every opaque handle.
- * The lossless-JSON half stays where Phase 1/2 pinned it
- * (`completion-history.spec.ts`, `completion-projection.spec.ts`).
+ * The lossless-JSON half is covered by `completion-history.spec.ts` and
+ * `completion-projection.spec.ts`.
  *
  * Handles are allocated by the HOST, one per dispatched run, from a monotonic
  * process-wide counter, so no test asserts an absolute id.
@@ -69,7 +67,7 @@ interface OpaqueEnvelope {
   $out?: number
   use?: string
   retained?: boolean
-  type?: string
+  type: string
   opaque?: true
   reason?: string
   truncated: true
@@ -109,6 +107,11 @@ describe('opaque completion history: what enters a slot', () => {
     const map = await realm.run({ program: 'new Map([["answer", 42]])', bindings: [] })
     expect(envelopeOf(map)).toMatchObject({ retained: true, type: 'object', opaque: true })
     expect(envelopeOf(map).use).toBe(`$out(${String(envelopeOf(map).$out)})`)
+    expect(map.presentation).toEqual({
+      kind: 'opaque-reference',
+      valueType: 'object',
+      handle: envelopeOf(map).$out,
+    })
     const mapId = map.value as OpaqueEnvelope
     expect((await realm.run({ program: `$out(${String(mapId.$out)}).get("answer")`, bindings: [] })).value).toBe(42)
 
@@ -266,7 +269,7 @@ describe('opaque completion history: adversarial getter and proxy safety', () =>
     expect((await realm.run({ program: `typeof $out(${String(id)})`, bindings: [] })).value).toBe('object')
   })
 
-  it('keeps a throwing getter inside an object out of the model-visible result', async () => {
+  it('keeps a throwing getter inside an object out of the canonical result', async () => {
     const realm = createRealm()
     const result = await realm.run({
       program: `
@@ -406,31 +409,53 @@ describe('opaque completion history: explicit release and generation loss', () =
 })
 
 describe('opaque completion history: wire degradation', () => {
-  it('degrades to a minimal reference when the wire budget cannot hold the fixed envelope', async () => {
-    const realm = createRealm({ budgets: { maxOutputBytes: 256 } })
-    const result = await realm.run({
-      program: 'console.log("x".repeat(200))\nnew Map([["a", 1]])',
+  async function boundaryFixture(): Promise<{
+    realm: PersistentRealm
+    id: number
+    expectedMinimal: OpaqueEnvelope
+    boundaryLogLength: number
+  }> {
+    const maxOutputBytes = 256
+    const realm = createRealm({ budgets: { maxOutputBytes } })
+    const seed = envelopeOf(await realm.run({ program: 'new Map([["a", 1]])', bindings: [] }))
+    const id = seed.$out as number
+    const expectedMinimal: OpaqueEnvelope = {
+      $out: id,
+      use: `$out(${String(id)})`,
+      type: 'object',
+      opaque: true,
+      truncated: true,
+    }
+    const minimalBytes = Buffer.byteLength(JSON.stringify(expectedMinimal), 'utf8')
+    return {
+      realm,
+      id,
+      expectedMinimal,
+      boundaryLogLength: maxOutputBytes - 2 - 2 - minimalBytes,
+    }
+  }
+
+  it('fits the typed minimal reference at its exact wire boundary', async () => {
+    const { realm, id, expectedMinimal, boundaryLogLength } = await boundaryFixture()
+    const atBoundary = await realm.run({
+      program: `console.log("x".repeat(${String(boundaryLogLength)}))\n$out(${String(id)})`,
       bindings: [],
     })
-    expect(result.error).toBeUndefined()
-    const envelope = envelopeOf(result)
-    expect(envelope.projection).toBeUndefined()
-    expect(envelope.use).toBe(`$out(${String(envelope.$out)})`)
-    expect(Buffer.byteLength(JSON.stringify(envelope), 'utf8')).toBeLessThanOrEqual(256)
-    // The reference still reaches the value.
-    expect((await realm.run({ program: `$out(${String(envelope.$out)}).get("a")`, bindings: [] })).value).toBe(1)
+    expect(atBoundary.error).toBeUndefined()
+    expect(atBoundary.logs).toEqual(['x'.repeat(boundaryLogLength)])
+    expect(atBoundary.value).toEqual(expectedMinimal)
+    expect(atBoundary.presentation).toEqual({ kind: 'opaque-reference', valueType: 'object', handle: id })
   })
 
-  it('reports output-limit when even a minimal reference does not fit, without losing the realm', async () => {
-    const realm = createRealm({ budgets: { maxOutputBytes: 256 } })
-    const starved = await realm.run({
-      program: 'console.log("x".repeat(222))\nnew Map([["a", 1]])',
+  it('reports output-limit one byte below the typed minimal boundary without losing the realm', async () => {
+    const { realm, id, boundaryLogLength } = await boundaryFixture()
+    const oneByteShort = await realm.run({
+      program: `console.log("x".repeat(${String(boundaryLogLength + 1)}))\n$out(${String(id)})`,
       bindings: [],
     })
-    expect(starved.error).toEqual({ kind: 'output-limit', message: 'outer output exceeded 256 bytes' })
-    // A completion overflow is answered by a worker that already finished the
-    // program, so the namespace survives.
+    expect(oneByteShort.error).toEqual({ kind: 'output-limit', message: 'outer output exceeded 256 bytes' })
     expect(realm.generation).toBe(1)
+    expect((await realm.run({ program: `$out(${String(id)}).get("a")`, bindings: [] })).value).toBe(1)
   })
 })
 

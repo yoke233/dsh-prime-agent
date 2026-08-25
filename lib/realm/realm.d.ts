@@ -11,17 +11,16 @@
  * violations hard-kill it and start a new generation.
  * @module dsh-prime-agent/realm/realm
  */
-import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
-import type { RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits } from './protocol.js';
+import type { CodeRunRequest } from '@deepseek-ai/dsh-code-runtime';
+import type { PrimeRunResult, RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits } from './protocol.js';
 export type { RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits, } from './protocol.js';
 /**
- * Bounded counters for one realm's completion traffic (plan §11).
+ * Bounded counters for one realm's completion traffic.
  *
  * Deliberately content-free: sizes, counts and the resulting history levels, and
  * nothing that could identify a value, a path, a credential or a session. The
- * reduction ratio the plan asks for is `projectionBytes / captureBytes` and is
- * left to the reader rather than stored, so the two numbers it comes from stay
- * independently checkable.
+ * reduction ratio `projectionBytes / captureBytes` is left to the reader rather
+ * than stored, so the two numbers it comes from stay independently checkable.
  */
 export interface RealmMetrics {
     /** Completions the model received verbatim. */
@@ -124,11 +123,11 @@ export declare class PersistentRealm {
     constructor(options: {
         realmId: string;
         budgets: RealmBudgets;
-        /** Completion-history ceilings; every field left blank takes its plan default. */
+        /** Completion-history ceilings; every blank field takes its runtime default. */
         completionHistory?: Partial<RealmCompletionHistoryLimits>;
-        /** Opaque (non-JSON) history ceilings; every field left blank takes its plan default. */
+        /** Opaque (non-JSON) history ceilings; every blank field takes its runtime default. */
         completionOpaque?: Partial<RealmCompletionOpaqueLimits>;
-        /** Projection ceilings; every field left blank takes its plan default. */
+        /** Projection ceilings; every blank field takes its runtime default. */
         completionProjection?: Partial<RealmCompletionProjectionLimits>;
     });
     /**
@@ -154,7 +153,7 @@ export declare class PersistentRealm {
      *   actually inherits the new heap.
      * @returns the run's outcome; rejects only on caller misuse.
      */
-    run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<CodeRunResult>;
+    run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<PrimeRunResult>;
     /**
      * Stop admission, terminate the worker, and await complete settlement: no
      * worker, timer, or unsettled run outlives this call.

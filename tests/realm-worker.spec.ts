@@ -562,11 +562,8 @@ describe('budgets and completion', () => {
   })
 
   it('references an oversized completion without losing the realm heap', async () => {
-    // REWRITTEN BY PHASE 2 (plan §9 Phase 2, §10 "affected existing
-    // assertions"): a completion too large for the wire is no longer a failure.
-    // The cell succeeds, the model gets a bounded reference to the value, and
-    // the namespace it was declared in is untouched — which is the half of this
-    // case that was always the point.
+    // A completion too large for the wire succeeds with a bounded reference,
+    // while the namespace declared by the program remains untouched.
     const realm = createRealm({ maxOutputBytes: 512 })
     const result = await realm.run({
       program: 'const keptAfterOversizedCompletion = "v1"\n"y".repeat(2000)',
@@ -579,9 +576,8 @@ describe('budgets and completion', () => {
   })
 
   it('retains a non-lossless completion as opaque without losing the cell', async () => {
-    // REWRITTEN BY WP-C: a non-lossless completion no longer fails the cell —
-    // it is retained under the opaque budgets and answered with the fixed
-    // envelope, and the namespace keeps every declaration the program made.
+    // A non-lossless completion is retained under the opaque budgets and
+    // answered with the fixed envelope; the namespace keeps every declaration.
     const realm = createRealm()
     const result = await realm.run({
       program: 'const keptAfterOpaqueCompletion = "v1";\n({ size: NaN })',
@@ -594,9 +590,9 @@ describe('budgets and completion', () => {
   })
 
   it('accepts an undefined completion and retains every other non-lossless completion shape', async () => {
-    // REWRITTEN BY WP-C: only `undefined` completes without a result. Every
-    // other non-lossless shape is retained as opaque and answered with the
-    // fixed envelope; none of them cost the realm its heap.
+    // Only `undefined` completes without a result. Every other non-lossless
+    // shape is retained as opaque and answered with the fixed envelope without
+    // costing the realm its heap.
     const realm = createRealm()
     const completionCases = [
       { program: 'undefined', opaque: false },

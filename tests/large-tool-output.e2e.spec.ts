@@ -1,9 +1,8 @@
 /**
- * Phase 1.3 acceptance for the large tool-output plan
- * (`docs/plan/large-tool-output-optimization.md`), migrated to the sole
- * model-visible `repl` transport: the Prime persistent realm composed with the
- * harness output-governance chain (`ctx.spillStore` + `dsh-spill-policy`),
- * driven through the REAL `repl` tool with no model in the loop.
+ * End-to-end acceptance for large tool output over the sole model-visible
+ * `repl` transport: the Prime persistent realm composed with the harness
+ * output-governance chain (`ctx.spillStore` + `dsh-spill-policy`), driven
+ * through the REAL `repl` tool with no model in the loop.
  *
  * What these tests own is the COMPOSITION, not the spill mechanics: the harness
  * already unit-tests retention, locator naming and every best-effort fallback.
@@ -217,11 +216,10 @@ async function runRepl(agent: Agent, code: string): Promise<ToolExecutionResult>
   })
 }
 
-/** The run's canonical `repl` value (logs plus the optional completion), asserting success. */
-function runValue(result: ToolExecutionResult): { logs: string[]; result?: JsonValue } {
+/** The run's canonical `repl` value (logs plus optional completion and presentation metadata), asserting success. */
+function runValue(result: ToolExecutionResult): primeAgent.ReplExecutionResult {
   if (result.isError) throw new Error(`expected success, got: ${result.error.message}`)
-  const value = result.value as { logs: string[]; result?: JsonValue }
-  return value
+  return result.value as primeAgent.ReplExecutionResult
 }
 
 function textOf(content: readonly ContentBlock[]): string {
@@ -229,9 +227,9 @@ function textOf(content: readonly ContentBlock[]): string {
     .map(block => block.text).join('')
 }
 
-/** The `repl` renderer's own formatting rule, recomputed from the canonical value. */
-function renderRepl(value: { logs: string[]; result?: JsonValue }): string {
-  return JSON.stringify(value)
+/** The `repl` renderer's complete notebook text. */
+function renderRepl(value: primeAgent.ReplExecutionResult): string {
+  return primeAgent.renderReplResult(value)
 }
 
 /** Pull the opaque locator back out of a notice, exactly as a reader would. */
@@ -290,8 +288,8 @@ describe('scenario 1: nested full value, bounded model-facing content, retained 
     expect(content).toContain('Omitted')
     expect(content).not.toContain('row-0150')
 
-    // The artifact is the RENDERER's text, byte for byte — not a DTO re-serialization.
-    const expectedText = JSON.stringify(firstValue)
+    // The artifact is the NOTEBOOK RENDERER's text, byte for byte — not a DTO re-serialization.
+    const expectedText = renderRepl(firstValue)
     const recovered = await readFile(locatorOf(content), 'utf8')
     expect(recovered).toBe(expectedText)
     expect(Buffer.byteLength(recovered, 'utf8')).toBe(Buffer.byteLength(expectedText, 'utf8'))
@@ -342,6 +340,24 @@ describe('scenario 2: oversized outer completion', () => {
     expect(events.map(event => event.type).filter(type => type.startsWith('tool/result'))).toEqual([])
     expect(events.filter(event => event.type === 'tool/code-dispatch')).toEqual([])
   })
+
+  it('spills notebook text without adding a JSON escape layer to Windows paths', async () => {
+    const { spillRoot, agent } = await bootPrime({ backend: 'local' })
+    const windowsPath = 'D:\\work\\project\\src\\index.ts'
+    const body = `${windowsPath}\n`.repeat(300)
+
+    const execution = await runRepl(agent, JSON.stringify(body))
+    const value = runValue(execution)
+    expect(value.result).toBe(body)
+    const content = textOf(execution.content)
+    expect(content).toContain('Full formatted result stored at:')
+
+    const artifact = await readFile(locatorOf(content), 'utf8')
+    expect(artifact).toBe(renderRepl(value))
+    expect(artifact).toContain(windowsPath)
+    expect(artifact).not.toContain('D:\\\\work\\\\project')
+    expect(await spillFiles(spillRoot)).toHaveLength(1)
+  })
 })
 
 describe('scenario 3: the hard output cap references instead of failing', () => {
@@ -351,14 +367,21 @@ describe('scenario 3: the hard output cap references instead of failing', () => 
     const execution = await runRepl(agent, `"Z".repeat(2000)`)
 
     expect(execution.isError).toBe(false)
-    const envelope = runValue(execution).result as Record<string, unknown>
+    const value = runValue(execution)
+    const envelope = value.result as Record<string, unknown>
     expect(envelope).toMatchObject({ retained: true, type: 'string', serializedBytesAtCapture: 2002, truncated: true })
+    expect(value.presentation).toMatchObject({ kind: 'retained-preview', valueType: 'string', serializedBytes: 2002 })
     expect(envelope.use).toBe(`$out(${String(envelope.$out)})`)
-    // The reference is bounded, so it fits the wire whole and nothing was
-    // spilled — the presentation policy never sees a payload worth an artifact.
+    // Canonical execution keeps the internal envelope, while model text teaches
+    // notebook reuse without exposing that transport object.
     expect(Buffer.byteLength(JSON.stringify(envelope), 'utf8')).toBeLessThanOrEqual(512)
     expect(await spillFiles(spillRoot)).toHaveLength(0)
-    expect(textOf(execution.content)).not.toContain('Full formatted result stored at:')
+    const content = textOf(execution.content)
+    expect(content).toContain('[repl result: retained preview]')
+    expect(content).toContain('remains in this REPL as `$_`')
+    expect(content).toContain(`use \`$out(${String(envelope.$out)})\``)
+    expect(content).not.toContain('"$out"')
+    expect(content).not.toContain('Full formatted result stored at:')
 
     // And the value the reference names is still there, in full, for the next cell.
     const recovered = await runRepl(agent, `$out(${String(envelope.$out)}).length`)
@@ -414,13 +437,13 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
       const echoed = await tools.echo_text({ text: 'x'.repeat(500) })
       echoed.text
     `
-    // The renderer's full text for the cell result: JSON of { logs, result }.
-    // The FIRST run of a fresh realm carries the namespace notice in `logs`, so
-    // probe the real composition once and measure the render it actually makes.
+    // The notebook renderer's full text for the cell result. The FIRST run of a
+    // fresh realm carries the namespace notice in `logs`, so probe the real
+    // composition once and measure the render it actually makes.
     const probe = await bootPrime({ backend: 'stub' })
     const probeRun = await runRepl(probe.agent, echoProgram)
     expect(runValue(probeRun).result).toBe(body)
-    const full = JSON.stringify(runValue(probeRun))
+    const full = renderRepl(runValue(probeRun))
     const cap = Buffer.byteLength(stubNotice(Buffer.byteLength(full, 'utf8')), 'utf8')
 
     await ctx?.fiber.dispose()

@@ -71,8 +71,8 @@ Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt ass
 - 支持顶层 `await`。
 - cell 的末尾表达式是结果，顶层 `return` 无效。
 - 普通顶层 binding 留在同一 live namespace，供后续 cell 直接使用。
-- cell 内预加载三个绑定命名空间：`tools.*`（当前 Agent catalog 中除 `repl` 外的全部工具，原始 typed bindings）、`agents.*`（`spawn`/`fork`/`list`/`send`/`interrupt` → `subagent`/`subagent_fork`/`list_agents`/`send_message`/`interrupt_agent`）、`jobs.*`（`list`/`output`/`kill` → `job_list`/`job_output`/`job_kill`）。SDK 声明会出现在模型 prompt 中供编写 cell 使用，但这些能力不可作为工具直接调用。
-- 大结果应在程序内过滤、聚合或抽取，只把当前决策需要的摘要送回模型。
+- cell 内预加载三个绑定命名空间：`tools.*`（当前 Agent catalog 中除 `repl` 外的全部工具，返回已解析 canonical JavaScript value 的 typed bindings）、`agents.*`（`spawn`/`fork`/`list`/`send`/`interrupt` → `subagent`/`subagent_fork`/`list_agents`/`send_message`/`interrupt_agent`）、`jobs.*`（`list`/`output`/`kill` → `job_list`/`job_output`/`job_kill`）。SDK 从当前 catalog 生成真实参数与返回类型，并声明 `$_`、`$out(id)`、`$out.list()/drop(id)/clear()`；这些能力不可作为外层工具直接调用。
+- 固定 Agent 文案只教授 persistent TypeScript、已解析工具值、生成返回类型、completion intrinsics、preview 不可解析、Windows 路径优先 `/` 与紧凑 live 工作集；不拼接用户聊天、具体任务、仓库路径、历史失败或可选工具名。
 - 必须跨 Worker 或 host 重启保存的进度写入工作区文件。
 
 Prime 不增加搜索适配层。源码发现直接调用 DSH 原生 `grep`；在 repl 程序内以 TypeScript 正则字面量的 `.source` 生成 `pattern`，Realm bridge 仍只传无损 JSON。
@@ -119,11 +119,13 @@ DSH compaction 不遍历、序列化或清理 Realm heap，spill 也不会驱逐
 
 ### 完成值、日志与大输出
 
-Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分类：lossless JSON 完成值走序列化 history，Map、Set、函数、BigInt、循环对象和 class instance 等非 JSON 值走 generation-local opaque history。日志与模型可见的完成 envelope 共同受 `maxOutputBytes` 硬上限约束。
+Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分类：lossless JSON 完成值走序列化 history，Map、Set、函数、BigInt、循环对象和 class instance 等非 JSON 值走 generation-local opaque history。日志与 Realm → Host 的 completion value 共同受 `maxOutputBytes` 硬上限约束；这层继续是机器可用的 lossless JSON，不是模型呈现格式。
 
-完成值本身由 runtime 自动保留在 generation-local 的 completion history 中，模型通过 `$_`（最近一个结果）与 `$out(N)`（按 handle 取回原值）访问；`$out.list()/drop(id)/clear()` 是管理面，不写进模型 schema。`maxCompletionFullBytes`（默认 64 KiB）以内的完成值原样返回，超过则改为固定 schema 的有界引用 envelope——cell 仍然成功，原值留在 Realm 内可继续计算，模型只收到 `maxCompletionProjectionBytes`（默认 4096）以内的投影。降级链是 full → rich projection → minimal reference → output-limit，只有连最小引用都放不进剩余预算时才真正失败。捕获遍历带早退：越过 `max(maxCompletionHistoryEntryBytes, maxCompletionFullBytes)` 的值不再被完整走查，因此其超出边界的部分不做 lossless 校验，而 history 保留的是原对象引用、不是快照。handle 由 host 全局单调分配、绝不复用，hard-kill 后旧 handle 明确抛 `CompletionExpiredError`。opaque history 使用独立预算（默认 8 项、估算 8 MiB、262144 nodes）和独立 FIFO，不会挤占 lossless JSON history；`$_`/`$out(N)` 返回原对象 identity，分类过程不调用用户 `toJSON`、`toString` 或 inspect hook。
+完成值本身由 runtime 自动保留在 generation-local 的 completion history 中，模型优先通过 `$_` 读取最近已保留结果，只有访问较早结果时才使用 `$out(N)`；`$out.list()/drop(id)/clear()` 提供管理操作。`maxCompletionFullBytes`（默认 64 KiB）以内的完成值原样返回，超过后 Worker 仍产生固定 schema 的有界内部 envelope。Realm 在验证 terminal nonce 与 envelope shape 后才附加 discriminated `ReplPresentation`：retained preview 携带有效 handle，unretained preview 不携带 handle，opaque reference 不携带结构 projection；用户程序伪造旧 envelope 同形对象没有可信 metadata，仍是普通 JSON。降级链是 full → rich projection → minimal reference → output-limit，只有连最小内部引用都放不进剩余预算时才真正失败。捕获遍历带早退：越过 `max(maxCompletionHistoryEntryBytes, maxCompletionFullBytes)` 的值不再被完整走查，因此其超出边界的部分不做 lossless 校验，而 history 保留的是原对象引用、不是快照。handle 由 host 全局单调分配、绝不复用，hard-kill 后旧 handle 明确抛 `CompletionExpiredError`。opaque history 使用独立预算（默认 8 项、估算 8 MiB、262144 nodes）和独立 FIFO，不会挤占 lossless JSON history；`$_`/`$out(N)` 返回原对象 identity，分类过程不调用用户 `toJSON`、`toString` 或 inspect hook。
 
-工具调用的 canonical value、日志与 spill locator 仍由 DSH 工具层管理。程序可以在 Realm 内使用完整 canonical value 做归约；Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值，外层 `repl` 结果超过展示预算时由 DSH spill artifact 保存并按需读取。store 缺失、保存失败或 notice 无法放进预算时，策略保留完整 inline 成功结果并告警，不伪造 locator。这个预算不限制 Realm heap，也不等于上游 IPython 的 snapshot pruning；Realm 不复制 DSH 的 spill 或工具日志存储。
+外层 `repl` canonical value 保持结构化：`logs`、可选 `result` 和可选可信 `presentation` metadata 仍可由调用方程序化读取。模型 renderer 不再 `JSON.stringify({ logs, result })`：logs 作为 plain section，scalar string 原样显示，full structured value 只 pretty-print 一次；retained preview 首先提示 `$_`、再给历史 `$out(id)`，unretained preview 不显示 handle，opaque reference 不调用用户 hook，无 logs 且无 completion 时显示固定完成 notice。preview 是观察文本而非可解析数据，后续计算必须回到命名变量、`$_` 或 `$out(id)`。
+
+工具调用的 canonical value、日志与 spill locator 仍由 DSH 工具层管理。程序可以在 Realm 内使用完整 canonical value 做归约；Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值，超过预算时 spill artifact 保存完整 notebook renderer 文本并按需读取。store 缺失、保存失败或 notice 无法放进预算时，策略保留完整 inline 成功结果并告警，不伪造 locator。这个预算不限制 Realm heap，也不等于上游 IPython 的 snapshot pruning；Realm 不复制 DSH 的 spill 或工具日志存储。
 
 ### 失败与换代
 
@@ -132,7 +134,7 @@ Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分�
 | 语法错误 | cell 不执行，namespace 不变。 |
 | 普通程序异常或被程序捕获的工具失败 | 当前 cell 失败或由程序处理；Worker generation 保留。异常前已经完成的声明、赋值和外部副作用可能保留，遵循 REPL partial-commit 语义。 |
 | completion 序列化失败 | cell 已执行且 namespace 保留，当前结果以 invalid output 失败；判定范围以有界走查为界，超出捕获天花板的部分不校验。 |
-| completion 过大 | cell 成功，模型收到有界引用 envelope；原值按 history 预算保留，超过准入预算时 envelope 标 `retained: false` 且不给 handle。 |
+| completion 过大 | cell 成功；外层 canonical value 保留有界内部 envelope 与可信 presentation metadata，模型只见 notebook preview。原值按 history 预算保留；未通过准入时不提供 handle，也不暗示 `$_` 可取回原值。 |
 | 排队 cell 在 dispatch 前取消 | 只取消该 cell。 |
 | active abort、compute/wall timeout、输出失控、Worker exit、OOM 或控制协议违规 | hard-kill 当前 Worker；后续 cell 创建新 generation。 |
 | hard kill 后第一次真正 dispatch | 返回 namespace restart notice，明确上一 generation 的 bindings 与保留结果已丢失。 |

@@ -15,8 +15,8 @@
  */
 import { Service } from '@deepseek-ai/cordis';
 import type { Context } from '@deepseek-ai/cordis';
-import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
-import type { RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits } from './protocol.js';
+import type { CodeRunRequest } from '@deepseek-ai/dsh-code-runtime';
+import type { PrimeRunResult, RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits } from './protocol.js';
 import type { RealmBudgets, RealmMetrics } from './realm.js';
 /** Everything the runtime needs that is not a per-run input. */
 export interface PrimeRealmRuntimeOptions {
@@ -29,21 +29,20 @@ export interface PrimeRealmRuntimeOptions {
     stateDirectory: string;
     /** Per-run ceilings handed to every realm this runtime creates. */
     budgets: RealmBudgets;
-    /**
-     * Completion-history ceilings for every realm this runtime creates. Blank
-     * fields take the plan defaults.
+    /** Completion-history ceilings for every realm this runtime creates. Blank
+     * fields take the runtime defaults.
      */
     completionHistory?: Partial<RealmCompletionHistoryLimits>;
     /**
      * Opaque (non-JSON) history ceilings for every realm this runtime creates.
-     * Blank fields take the plan defaults; the opaque store is an independent
+     * Blank fields take the runtime defaults; the opaque store is an independent
      * budget from {@link completionHistory}.
      */
     completionOpaque?: Partial<RealmCompletionOpaqueLimits>;
     /**
      * Projection ceilings for every realm this runtime creates: the size past
      * which a completion is referenced rather than shown, and how much a reference
-     * may itself cost. Blank fields take the plan defaults.
+     * may itself cost. Blank fields take the runtime defaults.
      */
     completionProjection?: Partial<RealmCompletionProjectionLimits>;
     /** Realms that may hold a worker at once; admission past it reclaims or refuses. */
@@ -83,8 +82,7 @@ export declare class PrimeRealmRuntime extends Service {
     private disposed;
     constructor(ctx: Context, options: PrimeRealmRuntimeOptions);
     /**
-     * Bounded completion counters across every realm this runtime has hosted
-     * (plan §11).
+     * Bounded completion counters across every realm this runtime has hosted.
      *
      * Exposed as a getter and nothing else: the numbers are for tests and for a
      * deployment that wants to check the mechanism is reducing tokens rather than
@@ -100,7 +98,7 @@ export declare class PrimeRealmRuntime extends Service {
      * @returns the run's outcome per the seam contract; rejects only on caller
      *   misuse (disposed runtime, unusable Realm identity).
      */
-    run(realmId: string, request: CodeRunRequest): Promise<CodeRunResult>;
+    run(realmId: string, request: CodeRunRequest): Promise<PrimeRunResult>;
     /** Admit the run into its realm and append a fresh-namespace notice when needed. */
     private execute;
     /**

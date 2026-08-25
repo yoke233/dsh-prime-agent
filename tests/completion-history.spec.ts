@@ -1,13 +1,10 @@
 /**
- * Phase 1 of the completion-history plan
- * (`docs/plan/completion-history-output-projection.zh.md` §9 Phase 1, §10
- * "Worker/Realm unit tests").
+ * Completion-history behavior and lifecycle coverage.
  *
  * What is exercised here is the runtime-owned history itself: which completions
  * enter it, which handle they get, when they leave, and who is allowed to touch
- * them. The MODEL-VISIBLE shape of a completion is deliberately not this file's
- * subject — Phase 1 leaves it untouched, and `completion-contracts.spec.ts`
- * remains the place that pins it.
+ * them. The canonical completion shape is pinned by
+ * `completion-contracts.spec.ts`.
  *
  * Two mechanics shape almost every test below and are worth stating once:
  *
@@ -138,15 +135,14 @@ interface CaughtRejection {
 
 describe('completion history: what enters a slot', () => {
   it('retains a completion the program never bound and hands it back through its handle', async () => {
-    // Plan §10 "a large unnamed tool result stays reachable through $out(id)":
-    // this is the gap Phase 1 exists to close, and it closes it without the
-    // program naming anything.
+    // A large unnamed tool result remains reachable through `$out(id)` without
+    // the program naming anything.
     const realm = createRealm()
     const produced = await realm.run({
       program: 'await globalThis.tools.rows({})',
       bindings: [tools({ rows: async () => ({ rows: [{ n: 1 }, { n: 2 }, { n: 3 }] }) })],
     })
-    // The model-visible shape is unchanged: no envelope, no handle, no metadata.
+    // The canonical shape is unchanged: no envelope, no handle, no metadata.
     expect(produced.error).toBeUndefined()
     expect(produced.value).toEqual({ rows: [{ n: 1 }, { n: 2 }, { n: 3 }] })
 
@@ -164,8 +160,8 @@ describe('completion history: what enters a slot', () => {
   })
 
   it('retains every falsy completion rather than treating it as absent', async () => {
-    // Plan §10: `0/false/null/''` are values. `undefined` is the only completion
-    // that produces no result at all, and therefore no slot.
+    // `0/false/null/''` are values. `undefined` is the only completion that
+    // produces no result at all, and therefore no slot.
     const realm = createRealm()
     for (const program of ['0', 'false', 'null', '""']) {
       expect((await realm.run({ program, bindings: [] })).error).toBeUndefined()
@@ -186,8 +182,8 @@ describe('completion history: what enters a slot', () => {
   })
 
   it('answers an empty history with undefined rather than with an error', async () => {
-    // Plan §5.3: an empty history is a normal state for `$_` and `list()`, but a
-    // handle that names nothing is still an explicit expiry.
+    // An empty history is normal for `$_` and `list()`, while a handle that names
+    // nothing is still an explicit expiry.
     const realm = createRealm()
     const empty = await realm.run({
       program: '({ entries: $out.list().length, last: typeof $_ })',
@@ -201,23 +197,20 @@ describe('completion history: what enters a slot', () => {
   })
 
   it('opens no slot for an exception, and retains every successful completion', async () => {
-    // Plan §7.1: only the SUCCESS arm of the boundary retains. `startRun`'s
-    // `finally` releases the object group on every path, so a slot opened there
-    // would also capture values from runs that failed.
+    // Only the SUCCESS arm of the boundary retains. `startRun`'s `finally`
+    // releases the object group on every path, so a slot opened there would also
+    // capture values from failed runs. A non-lossless successful completion is
+    // retained as opaque under its own budget.
     const realm = createRealm()
     expect((await realm.run({ program: 'throw new Error("boom")', bindings: [] })).error?.kind).toBe('exception')
-    // REWRITTEN BY WP-C: a non-lossless completion is no longer a failure — it
-    // is an opaque retention under its own budget.
     const opaque = await realm.run({ program: '({ fn: () => 1 })', bindings: [] })
     expect(opaque.error).toBeUndefined()
     expect(opaque.value).toMatchObject({ retained: true, opaque: true, truncated: true })
     const rows = await history(realm)
     expect(rows).toHaveLength(1)
     expect(rows[0]?.opaque).toBe(true)
-    // REWRITTEN BY PHASE 2 (plan §9 Phase 2): the oversized completion used to
-    // belong on the failure list. It is now a success that retains — which is
-    // the whole point of the phase, and which this suite covers where the
-    // projection lives rather than here.
+    // An oversized completion also succeeds and retains; projection changes only
+    // the model-visible representation.
     const projected = await realm.run({ program: '"y".repeat(70000)', bindings: [] })
     expect(projected.error).toBeUndefined()
     expect(await history(realm)).toHaveLength(2)
@@ -250,9 +243,9 @@ describe('completion history: what enters a slot', () => {
 
 describe('completion history: identity', () => {
   it('retains the program\'s own object, so a later in-place change is visible through the handle', async () => {
-    // Plan §5.1/§5.2: the history holds the ORIGINAL reference, not a copy. That
-    // is what keeps a user binding and the history from doubling the heap, and
-    // it is why `serializedBytesAtCapture` is named for the moment it was taken.
+    // The history holds the ORIGINAL reference, not a copy. This keeps a user
+    // binding and the history from doubling the heap and explains why
+    // `serializedBytesAtCapture` names the moment it was taken.
     const realm = createRealm()
     await realm.run({ program: 'const shared = { rows: [1, 2] }\nshared', bindings: [] })
     const [row] = await history(realm)
@@ -269,10 +262,10 @@ describe('completion history: identity', () => {
   })
 
   it('reuses the slot, the handle and the FIFO position when the same object completes again', async () => {
-    // Plan §5.2 / benchmark §3.6, §4.3: per-slot billing flushed the history in
-    // two of three recirculation traces, and did it in the worst possible shape
-    // — the object still in the store under a new id while the handle the model
-    // held had expired. Two entries of budget make that failure observable.
+    // Checked-in recirculation measurements under `bench/results/` show per-slot
+    // billing flushing the history in two of three traces, in the worst shape:
+    // the object remains stored under a new id while the handle the model held
+    // has expired. Two entries of budget make that failure observable.
     const realm = createRealm({ completionHistory: { maxCompletionHistoryEntries: 2 } })
     await realm.run({ program: 'const alpha = { tag: "alpha" }\nalpha', bindings: [] })
     await realm.run({ program: 'const beta = { tag: "beta" }\nbeta', bindings: [] })
@@ -313,8 +306,8 @@ describe('completion history: identity', () => {
   })
 
   it('keeps a user binding and the history from owning each other', async () => {
-    // Plan §3 principle 6 and §5.1: dropping the history's claim must not reach
-    // the program's own declaration, in either direction.
+    // Dropping the history's claim must not reach the program's own declaration,
+    // in either direction.
     const realm = createRealm()
     await realm.run({ program: 'const owned = { n: 1 }\nowned', bindings: [] })
     const [row] = await history(realm)
@@ -330,12 +323,10 @@ describe('completion history: identity', () => {
   })
 
   it('keeps the retained object addressable after the program makes it non-serializable', async () => {
-    // Plan §10: mutating a retained value into something non-JSON must not
-    // corrupt the history. REWRITTEN BY WP-C: returning the spoiled value again
-    // is no longer a failure — it is a SECOND retention, under the opaque
-    // budgets, of the same object the JSON slot already holds. Both handles
-    // answer with the same identity, and the cell keeps the bindings it
-    // committed.
+    // Mutating a retained value into something non-JSON must not corrupt the
+    // history. Returning it again creates a SECOND retention under the opaque
+    // budgets for the same object the JSON slot already holds. Both handles
+    // answer with the same identity, and the cell keeps committed bindings.
     const realm = createRealm()
     await realm.run({ program: 'const spoiled = { n: 1 }\nspoiled', bindings: [] })
     const [row] = await history(realm)
@@ -380,10 +371,9 @@ describe('completion history: budgets and eviction', () => {
   })
 
   it('refuses an oversized completion instead of clearing the history for it', async () => {
-    // Plan §5.3: a single completion over the per-slot ceiling is simply not
-    // retained. Phase 1 has no projection, so the cell's model-visible result is
-    // unchanged; what must not happen is the model losing every earlier handle
-    // to make room for one value that cannot fit anyway.
+    // A completion over the per-slot ceiling is not retained. Its canonical
+    // result is unchanged, and earlier handles are not sacrificed to make room
+    // for a value that cannot fit anyway.
     const realm = createRealm({ completionHistory: { maxCompletionHistoryEntryBytes: 128 } })
     await realm.run({ program: '({ small: true })', bindings: [] })
     const before = await history(realm)
@@ -398,10 +388,10 @@ describe('completion history: budgets and eviction', () => {
   })
 
   it('refuses a shared subgraph whose expansion the walk counted, without abandoning the walk', async () => {
-    // Benchmark §3.8: `seen` is a PATH set, so a DAG whose live graph is a few
-    // KiB expands into millions of nodes at the boundary. The node budget is
-    // judged while the walk runs — but Phase 1 does NOT stop walking when it
-    // trips, because the full serialization is still this phase's wire contract.
+    // The checked-in node-density measurements under `bench/results/` cover a
+    // DAG whose small live graph expands into millions of boundary nodes. The
+    // node budget is judged while the walk runs, but tripping it does not stop
+    // the serialization needed for the current wire contract.
     //
     // This case guards two invariants stated on `CaptureStats.overNodeLimit`.
     // The completion still crossing intact is what would break if the walk ever
@@ -455,12 +445,10 @@ describe('completion history: budgets and eviction', () => {
   })
 
   it('publishes the key COUNT but never the keys themselves', async () => {
-    // REWRITTEN BY PHASE 4 (plan §9 Phase 2, §7.4): the count is one small
-    // integer whatever the value's shape, and it answers the question a model
-    // actually asks of a handle — how big is this. The NAMES stay out, and that
-    // is the part this test exists to hold: the boundary admits a
-    // 20,000-character key, so sixteen of them in a row would be a
-    // quarter-megabyte answer to a metadata query.
+    // The count is one small integer whatever the value's shape and answers how
+    // large the handle is. Names remain absent: the boundary admits a
+    // 20,000-character key, so sixteen of them in a row would make a
+    // quarter-megabyte metadata answer.
     const realm = createRealm()
     await realm.run({
       program: 'const wide = {}\nfor (let i = 0; i < 40; i++) wide["k".repeat(500) + i] = i\nwide',
@@ -482,7 +470,7 @@ describe('completion history: budgets and eviction', () => {
         completionHistory: { maxCompletionHistoryEntries: invalid },
       })).toThrow('maxCompletionHistoryEntries must be a positive safe integer')
     }
-    // Blank fields take the plan's decided defaults rather than disabling the history.
+    // Blank fields take the runtime defaults rather than disabling the history.
     const realm = createRealm({ completionHistory: { maxCompletionHistoryNodes: 4_096 } })
     await realm.run({ program: '({ defaulted: true })', bindings: [] })
     expect(await history(realm)).toHaveLength(1)
@@ -539,9 +527,8 @@ describe('completion history: explicit release', () => {
 
 describe('completion history: generation fencing', () => {
   it('expires every handle a hard kill destroyed and never reissues its id', async () => {
-    // Plan §4.1 and acceptance #11: after a restart an old handle must be
-    // ABSENT, never a hit on some other value. Host-side allocation is what
-    // guarantees it — the counter outlives the worker.
+    // After a restart an old handle is ABSENT, never a hit on some other value.
+    // Host-side allocation guarantees it because the counter outlives the worker.
     const realm = createRealm({ budgets: { maxWallMs: 400 } })
     await realm.run({ program: '({ beforeKill: true })', bindings: [] })
     const before = await history(realm)
@@ -611,11 +598,10 @@ describe('completion history: generation fencing', () => {
   })
 
   it('retains a value the walk ran out of stack on, as opaque', async () => {
-    // Phase 0 §3.8 put the recursion ceiling around 7,800 frames and found it
-    // moves with stack state, so only the BEHAVIOUR is asserted: the RangeError
-    // REWRITTEN BY WP-C is the classification walk's verdict that the value is
-    // not lossless JSON, so the value is retained as opaque and the cell
-    // succeeds — the realm keeps its heap and the history gains one opaque slot.
+    // Checked-in deep-retention measurements under `bench/results/` show the
+    // recursion ceiling moves with stack state, so only behavior is asserted:
+    // the classification walk treats the RangeError as a non-lossless value,
+    // retains it as opaque, and lets the cell succeed without losing the heap.
     const realm = createRealm()
     await realm.run({ program: '({ retained: true })', bindings: [] })
     const before = await history(realm)
@@ -692,8 +678,8 @@ describe('completion history: generation fencing', () => {
   })
 
   it('refuses the history to a continuation that outlived its own run', async () => {
-    // Plan §8 and acceptance #13: the history takes the same run fencing a
-    // leased binding does, and the binding's own revocation order is unchanged.
+    // History access uses the same run fencing as leased bindings, without
+    // changing the binding's revocation order.
     const realm = createRealm()
     const armed = await realm.run({
       program: `
@@ -876,8 +862,8 @@ describe('completion history: the intrinsic names', () => {
   })
 
   it('leaves `_` to the program, lodash style and all', async () => {
-    // Plan §4.1: `_` is deliberately NOT claimed — its strongest prior in JS is
-    // lodash, and it is the most common throwaway name there is.
+    // `_` is deliberately NOT claimed: its strongest JavaScript prior is lodash,
+    // and it is a common throwaway name.
     const realm = createRealm()
     const lodashish = await realm.run({
       program: `
@@ -998,14 +984,11 @@ describe('completion history: the deployment path', () => {
   })
 
   it('releases the history when an idle realm is reclaimed, and says nothing extra about it', async () => {
-    // Reclamation destroys the worker, so the history goes with it — but unlike
-    // a hard kill this is not a namespace LOSS the model should be warned about:
-    // the session simply starts a fresh namespace, and the run that inherits it
-    // gets the ordinary "started empty" line. The decision (plan §5.3) is that
-    // the fresh path says nothing about retained results; a model still holding
-    // a handle learns it from `CompletionExpiredError`, whose message carries the
-    // recovery instruction. Warning on every fresh namespace would spend tokens
-    // on every session start to pre-empt a case the error already handles.
+    // Reclamation destroys the worker and its history, but unlike a hard kill it
+    // is not a namespace LOSS requiring a warning. The next run gets the ordinary
+    // "started empty" line. A model holding a stale handle learns this from
+    // `CompletionExpiredError`, whose message carries the recovery instruction;
+    // warning on every fresh namespace would spend tokens on every session start.
     const ctx = await startHost({ maxIdleMs: 150 })
     const realm = realmId('session-reclaimed')
 
@@ -1028,10 +1011,9 @@ describe('completion history: the deployment path', () => {
   })
 
   it('leaves the ordinary one-shot runtime without a completion history', async () => {
-    // Plan §7.3 and §12: the history exists only on the Prime path. The
-    // trusted seam is a separate service mounted BESIDE the official one-shot
-    // runtime, which keeps its shipped semantics and knows nothing about any
-    // of this.
+    // History exists only on the Prime path. The trusted seam is a separate
+    // service mounted beside the official one-shot runtime, whose shipped
+    // semantics remain unchanged.
     root = await mkdtemp(join(tmpdir(), 'dsh-prime-history-'))
     const ctx = new Context()
     contexts.push(ctx)

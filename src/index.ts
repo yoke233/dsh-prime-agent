@@ -4,12 +4,13 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
-import { defineTool, renderToolsSdk } from '@deepseek-ai/dsh-tools'
+import { defineTool, renderToolsSdk, type JsonValue } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { registerContinual } from './continual/plugin.js'
 import type { HarnessLimits } from './continual/types.js'
 import { registerPolicy } from './policy.js'
 import { RealmIdentityStore } from './realm/identity.js'
+import type { ReplPresentation } from './realm/protocol.js'
 import type {} from './realm/runtime.js'
 import { createReplBindings, REPL_TOOL_NAME } from './repl/bridge.js'
 
@@ -78,6 +79,60 @@ function positiveLimits<T extends object>(defaults: T, partial: Partial<T> | und
   return limits
 }
 
+const REPL_AGENT_PROMPT = `## Persistent TypeScript REPL
+
+Use \`repl\` to execute TypeScript cells. Top-level \`await\` works. Variables,
+functions, and objects remain available in later cells while the
+current REPL generation is alive. The final expression is the cell result;
+top-level \`return\` is invalid.
+
+Call the generated capabilities through \`tools.*\`, \`agents.*\`, and \`jobs.*\`.
+Their results are already parsed JavaScript values. Use the generated return
+types directly; do not call \`JSON.parse\` on tool results and do not guess their
+fields. Assign values that you will use again. If a value's shape is uncertain,
+inspect it with \`Array.isArray(value)\` and \`Object.keys(value)\`.
+
+The latest retained cell result is available as \`$_\`. Retrieve an older retained
+result with \`$out(id)\`. \`$out\` is a function, so call \`$out(id)\`; do not use
+\`$out.property\` or \`$out[id]\`.
+
+Displayed cell output may be a shortened preview. Continue computation from
+your variables, \`$_\`, or \`$out(id)\` instead of parsing or copying the displayed
+text. Backslashes shown inside a JSON preview are JSON notation, not additional
+characters in the underlying string. When writing Windows paths yourself,
+prefer forward slashes such as \`D:/work/project\`.
+
+Keep large source material in files. Keep only paths, compact indexes, helper
+functions, and task-relevant summaries in the live REPL.`
+
+const COMPLETION_INTRINSICS = `declare const $_: unknown
+
+declare function $out(id: number): unknown
+
+declare namespace $out {
+  function list(): Array<{
+    id: number
+    type: string
+    bytes?: number
+    nodes?: number
+    opaque?: boolean
+  }>
+  function drop(id: number): boolean
+  function clear(): void
+}`
+
+interface CapabilityAlias {
+  member: string
+  target: string
+}
+
+function namespaceDeclaration(global: string, aliases: CapabilityAlias[]): string | undefined {
+  if (aliases.length === 0) return undefined
+  const members = aliases.map(({ member, target }) =>
+    `  ${member}: (args: ToolArgsMap[${JSON.stringify(target)}]) => Promise<ToolOutputMap[${JSON.stringify(target)}]>;`)
+  return `declare const ${global}: {\n${members.join('\n')}\n}`
+}
+
 function sdkText(ctx: Context, agent: Agent): string {
   const schemas = ctx.tools.schemas(agent)
     .filter(schema => schema.name !== REPL_TOOL_NAME)
@@ -86,14 +141,91 @@ function sdkText(ctx: Context, agent: Agent): string {
       if (definition === undefined) throw new Error(`dsh-prime-agent: capability disappeared during prompt assembly: ${schema.name}`)
       return { ...schema, output: definition.output.schema }
     })
-  return renderToolsSdk(schemas)
-    .replace('## Writing code for run_code', '## Using the TypeScript REPL')
-    .replace('`run_code` takes two required arguments: `code` — the body of an async TypeScript function (erasable syntax only — no `enum` or namespaces; type annotations are advisory, the code runs type-stripped) — and `description`, a short summary of what the program does. Inside the program:', 'The `repl` tool executes one persistent TypeScript cell. Top-level `await` works. Erasable TypeScript syntax is supported (no `enum` or namespaces; type annotations are advisory and run type-stripped). Inside the cell:')
-    .replace('the body of an async TypeScript function', 'one persistent TypeScript REPL cell')
-    .replace('- Emit results with `return` and/or `console.log(...)`. Only what you print or return is program output.', '- The final expression is the cell result; top-level `return` is invalid. `console.log(...)` still emits logs.')
-    + '\n\nConvenience aliases:\n'
-    + 'declare const agents: { spawn(args: unknown): Promise<unknown>; fork(args: unknown): Promise<unknown>; list(args: unknown): Promise<unknown>; send(args: unknown): Promise<unknown>; interrupt(args: unknown): Promise<unknown> };\n'
-    + 'declare const jobs: { list(args: unknown): Promise<unknown>; output(args: unknown): Promise<unknown>; kill(args: unknown): Promise<unknown> };'
+  const available = new Set(schemas.map(schema => schema.name))
+  const agents = [
+    available.has('subagent')
+      ? { member: 'spawn', target: 'subagent' }
+      : available.has('subagent_fork') ? { member: 'spawn', target: 'subagent_fork' } : undefined,
+    available.has('subagent_fork') ? { member: 'fork', target: 'subagent_fork' } : undefined,
+    available.has('list_agents') ? { member: 'list', target: 'list_agents' } : undefined,
+    available.has('send_message') ? { member: 'send', target: 'send_message' } : undefined,
+    available.has('interrupt_agent') ? { member: 'interrupt', target: 'interrupt_agent' } : undefined,
+  ].filter((alias): alias is CapabilityAlias => alias !== undefined)
+  const jobs = [
+    available.has('job_list') ? { member: 'list', target: 'job_list' } : undefined,
+    available.has('job_output') ? { member: 'output', target: 'job_output' } : undefined,
+    available.has('job_kill') ? { member: 'kill', target: 'job_kill' } : undefined,
+  ].filter((alias): alias is CapabilityAlias => alias !== undefined)
+  const rendered = renderToolsSdk(schemas)
+  const declarationStart = rendered.indexOf('```ts\n')
+  const declarationEnd = rendered.lastIndexOf('\n```')
+  if (declarationStart < 0 || declarationEnd < declarationStart) {
+    throw new Error('dsh-prime-agent: generated tools SDK has an unsupported shape')
+  }
+  const declarations = [
+    rendered.slice(declarationStart + '```ts\n'.length, declarationEnd),
+    COMPLETION_INTRINSICS,
+    namespaceDeclaration('agents', agents),
+    namespaceDeclaration('jobs', jobs),
+  ].filter((section): section is string => section !== undefined)
+  return `${REPL_AGENT_PROMPT}\n\nThe available capabilities:\n\n\`\`\`ts\n${declarations.join('\n\n')}\n\`\`\``
+}
+
+export interface ReplExecutionResult {
+  logs: string[]
+  result?: JsonValue
+  presentation?: ReplPresentation
+}
+
+
+function projectionFrom(value: JsonValue | undefined): JsonValue | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || !('projection' in value)) return undefined
+  return value.projection
+}
+
+function previewSection(value: JsonValue | undefined): string {
+  const projection = projectionFrom(value)
+  return projection === undefined ? '' : `\n\nPreview:\n${JSON.stringify(projection, null, 2)}`
+}
+
+function renderResult(value: JsonValue | undefined, presentation: ReplPresentation | undefined): string | undefined {
+  if (value === undefined) return undefined
+  if (presentation === undefined || presentation.kind === 'full') {
+    return typeof value === 'string'
+      ? `[repl result: string]\n${value}`
+      : `[repl result: json]\n${JSON.stringify(value, null, 2)}`
+  }
+  if (presentation.kind === 'retained-preview') {
+    return '[repl result: retained preview]\n'
+      + 'The complete value remains in this REPL as `$_`.\n'
+      + `For older access, use \`$out(${String(presentation.handle)})\`.\n`
+      + `Type: ${presentation.valueType}`
+      + (presentation.serializedBytes === undefined ? '' : `\nSerialized size: ${presentation.serializedBytes.toLocaleString('en-US')} bytes`)
+      + previewSection(value)
+  }
+  if (presentation.kind === 'unretained-preview') {
+    const reason = presentation.reason ?? 'the completion history budget was exceeded'
+    return '[repl result: unretained preview]\n'
+      + `The complete value was not retained: ${reason}.\n`
+      + 'This preview is not the original value. Recompute it or load it from a durable file.\n'
+      + `Type: ${presentation.valueType}`
+      + (presentation.serializedBytes === undefined ? '' : `\nSerialized size: ${presentation.serializedBytes.toLocaleString('en-US')} bytes`)
+      + previewSection(value)
+  }
+  return '[repl result: retained opaque value]\n'
+    + 'The value remains in this REPL as `$_`.\n'
+    + `For older access, use \`$out(${String(presentation.handle)})\`.\n`
+    + `Type: ${presentation.valueType}\n`
+    + 'No structural preview is available.'
+}
+
+/** Render a canonical REPL result as notebook-style model text without changing its programmatic value. */
+export function renderReplResult(value: ReplExecutionResult): string {
+  const sections: string[] = []
+  if (value.logs.length > 0) sections.push(`[repl logs]\n${value.logs.join('\n')}`)
+  const result = renderResult(value.result, value.presentation)
+  if (result !== undefined) sections.push(result)
+  return sections.length === 0 ? '[repl completed with no output]' : sections.join('\n\n')
 }
 
 /** Register the sole model-visible REPL and its hidden host capabilities. */
@@ -109,8 +241,53 @@ export function apply(ctx: Context, config: Config): void {
     description: 'Execute a TypeScript REPL cell.',
     parameters: { code: { type: 'string', required: true, description: 'TypeScript source code for this cell.' } },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { logs: { type: 'array', required: true, items: { type: 'string' } }, result: { type: 'json' } } },
-      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          logs: { type: 'array', required: true, items: { type: 'string' } },
+          result: { type: 'json' },
+          presentation: {
+            oneOf: [
+              {
+                type: 'object',
+                additionalProperties: false,
+                properties: { kind: { type: 'string', const: 'full', required: true } },
+              },
+              {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  kind: { type: 'string', const: 'retained-preview', required: true },
+                  valueType: { type: 'string', required: true },
+                  serializedBytes: { type: 'integer' },
+                  handle: { type: 'integer', required: true },
+                },
+              },
+              {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  kind: { type: 'string', const: 'unretained-preview', required: true },
+                  valueType: { type: 'string', required: true },
+                  serializedBytes: { type: 'integer' },
+                  reason: { type: 'string' },
+                },
+              },
+              {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  kind: { type: 'string', const: 'opaque-reference', required: true },
+                  valueType: { type: 'string', required: true },
+                  handle: { type: 'integer', required: true },
+                },
+              },
+            ],
+          },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderReplResult(value as ReplExecutionResult) }],
     },
     async execute(args, exec) {
       if (exec.agent === undefined) throw new Error('repl requires an owning agent session')
@@ -123,7 +300,11 @@ export function apply(ctx: Context, config: Config): void {
           const logs = outcome.logs.length === 0 ? '' : `\n${outcome.logs.join('\n')}`
           throw new Error(`repl cell failed (${outcome.error.kind}): ${outcome.error.message}${logs}`)
         }
-        return { logs: outcome.logs, ...(outcome.value === undefined ? {} : { result: outcome.value }) }
+        return {
+          logs: outcome.logs,
+          ...(outcome.value === undefined ? {} : { result: outcome.value }),
+          ...(outcome.presentation === undefined ? {} : { presentation: outcome.presentation }),
+        }
       } finally { await leased.finish() }
     },
   }))

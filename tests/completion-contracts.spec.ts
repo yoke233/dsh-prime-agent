@@ -1,14 +1,9 @@
 /**
- * Phase 0 contract pinning for the completion-history plan
- * (`docs/plan/completion-history-output-projection.zh.md` §9 Phase 0, §10).
+ * Completion-boundary contract pinning for the Realm history implementation.
  *
- * Assertions marked `CURRENT CONTRACT` describe behaviour no phase has changed
- * yet. The later phases rewrite them explicitly, one plan section at a time,
- * rather than routing around them: a test here that starts failing is the signal
- * that a phase changed a model-visible contract, and the change has to be argued
- * for in the plan before the expectation moves. An assertion a phase HAS moved
- * is marked `REWRITTEN BY PHASE n` and names the plan section that justified it,
- * so the diff from the Phase 0 baseline stays readable in one file.
+ * Each test states the behavior it currently defends. A failure here means the
+ * Realm's canonical completion contract changed and the expectation must move
+ * only with an intentional contract change.
  *
  * Ownership boundary with the neighbouring suites: `realm-worker.spec.ts` owns
  * REPL/lease/substrate semantics, `prime-runtime.spec.ts` owns routing and pool
@@ -102,8 +97,7 @@ function notices(result: CodeRunResult): string[] {
 /**
  * Everything one result puts on the wire, in the ledger's own units: the
  * serialized log array plus the serialized completion or diagnostic. This is the
- * number `maxOutputBytes` bounds, and Phase 2's degradation chain has to keep it
- * bounded whichever rung it ends on.
+ * number `maxOutputBytes` bounds whichever rung the degradation chain ends on.
  */
 function wireBytes(result: CodeRunResult): number {
   const logs = Buffer.byteLength(JSON.stringify(result.logs), 'utf8')
@@ -111,12 +105,12 @@ function wireBytes(result: CodeRunResult): number {
   return logs + (Object.hasOwn(result, 'value') ? Buffer.byteLength(JSON.stringify(result.value), 'utf8') : 0)
 }
 
-/** One projected completion, as the worker's envelope reaches the model. */
+/** One projected completion, as the worker's envelope reaches the trusted host. */
 interface Envelope {
   $out?: number
   use?: string
   retained?: boolean
-  type?: string
+  type: string
   serializedBytesAtCapture?: number
   projection?: Record<string, unknown>
   reason?: string
@@ -133,9 +127,7 @@ function envelopeOf(result: CodeRunResult): Envelope {
 
 describe('completion contract: values that cross the boundary unchanged', () => {
   it('returns a small lossless completion in its original shape', async () => {
-    // CURRENT CONTRACT (plan §4.2, §8 "small legal completion"): a small value is
-    // returned verbatim, with no envelope, no handle and no metadata. Phase 1
-    // must keep this shape byte for byte; only Phase 2 may wrap LARGE values.
+    // A small value is returned verbatim, with no envelope, handle or metadata.
     const realm = createRealm()
     const result = await realm.run({
       program: '({ matches: [{ path: "a.ts", line: 1 }], total: 1, nested: { deep: { ok: true } } })',
@@ -147,9 +139,8 @@ describe('completion contract: values that cross the boundary unchanged', () => 
   })
 
   it('returns every falsy lossless completion rather than treating it as absent', async () => {
-    // CURRENT CONTRACT (plan §10 "falsy completion 0/false/null/'' also enters the slot"):
-    // falsy is a value, not a missing result. The `undefined` case is the ONLY
-    // one that omits `value` from the result object.
+    // Falsy is a value, not a missing result. `undefined` is the ONLY case that
+    // omits `value` from the result object.
     const realm = createRealm()
     const falsy = [
       { program: '0', value: 0 },
@@ -171,16 +162,15 @@ describe('completion contract: values that cross the boundary unchanged', () => 
     // Not merely `undefined`: the key is absent, which is how a caller tells a
     // valueless run from one that completed with `null`.
     expect(Object.hasOwn(absent, 'value')).toBe(false)
+    expect(absent.presentation).toBeUndefined()
     expect(realm.generation).toBe(1)
   })
 
   it('accepts a null-prototype object and retains every other exotic prototype as opaque', async () => {
-    // REWRITTEN BY WP-C (plan §5 "non-JSON live objects"): the boundary still
-    // judges the PROTOTYPE, not the JSON round trip. `Object.create(null)` is
-    // admitted and crosses whole; `Date` is still refused the wire — but the
-    // refusal no longer fails the cell. The value is retained under the opaque
-    // budgets and answered with the fixed envelope, and `toJSON` is never
-    // consulted on the way.
+    // The boundary judges the PROTOTYPE, not the JSON round trip.
+    // `Object.create(null)` is admitted and crosses whole; `Date` is refused the
+    // wire without failing the cell. It is retained under the opaque budgets and
+    // answered with the fixed envelope, and `toJSON` is never consulted.
     const realm = createRealm()
     const nullPrototype = await realm.run({
       program: 'Object.assign(Object.create(null), { adopted: true })',
@@ -198,14 +188,12 @@ describe('completion contract: values that cross the boundary unchanged', () => 
   })
 })
 
-describe('completion contract: opaque retention (WP-C)', () => {
+describe('completion contract: opaque retention', () => {
   it('retains every non-lossless completion with one fixed opaque envelope', async () => {
-    // REWRITTEN BY WP-C (plan §5 "non-JSON live objects", acceptance "a
-    // successful cell must not fake-fail because wire projection failed"): these
-    // values no longer fail the cell with a diagnostic. Each is retained under
-    // the opaque budgets and answered with the SAME fixed envelope — a handle,
-    // the safe typeof-grade type and the opaque marker — and the original value
-    // stays reachable through $out(id) in a later cell.
+    // Non-lossless values do not fail the cell with a diagnostic. Each is
+    // retained under the opaque budgets and answered with the SAME fixed
+    // envelope — a handle, the safe typeof-grade type and the opaque marker —
+    // while the original value remains reachable through `$out(id)`.
     const realm = createRealm()
     const retained = [
       { why: 'function', program: '(() => 42)' },
@@ -240,11 +228,10 @@ describe('completion contract: opaque retention (WP-C)', () => {
   })
 
   it('keeps a throwing getter as an opaque retention rather than as a program exception', async () => {
-    // REWRITTEN BY WP-C: the boundary walk runs AFTER the program completed, so a
-    // getter that throws during classification is charged to the completion, not
-    // to the cell — and its own message never reaches the model. The value is
-    // retained as opaque and the cell SUCCEEDS, which is what separates this
-    // contract from the old invalid-output diagnostic.
+    // The boundary walk runs AFTER the program completed, so a getter that
+    // throws during classification is charged to the completion, not to the
+    // cell, and its message never enters trusted presentation metadata. The
+    // value is retained as opaque and the cell succeeds.
     const realm = createRealm()
     const result = await realm.run({
       program: `
@@ -261,10 +248,8 @@ describe('completion contract: opaque retention (WP-C)', () => {
   })
 
   it('keeps bindings beside a non-lossless completion, which now succeeds', async () => {
-    // REWRITTEN BY WP-C: the completion is judged after the program body ran, so
-    // declarations that completed are retained — and the cell is no longer a
-    // failure at all, so the old "partial commit" half of this contract is now
-    // just ordinary persistence next to a successful opaque retention.
+    // The completion is judged after the program body ran, so completed
+    // declarations persist beside a successful opaque retention.
     const realm = createRealm()
     const cases = [
       { name: 'keptBesideBigint', completion: '10n' },
@@ -289,13 +274,10 @@ describe('completion contract: opaque retention (WP-C)', () => {
 
 describe('completion contract: output-limit byte boundaries', () => {
   it('admits a completion that exactly fills the cap and references the next byte', async () => {
-    // REWRITTEN BY PHASE 2 (plan §4.3, §6.1, §9 Phase 2). The ledger still opens
-    // at 2 bytes for the empty logs array, so a bare completion may still use
-    // `maxOutputBytes - 2` VERBATIM — that half of the Phase 0 contract is
-    // unchanged and pinned as tightly as before. What moved is the byte after
-    // it: a completion the wire cannot carry whole is no longer a failure, it is
-    // a successful bounded reference, and the cap is what the reference is
-    // measured against rather than what the value is refused by.
+    // The ledger opens at 2 bytes for the empty logs array, so a bare completion
+    // may use `maxOutputBytes - 2` verbatim. The next byte produces a successful
+    // bounded reference measured against the same cap rather than failing the
+    // completion.
     const realm = createRealm({ maxOutputBytes: MIN_OUTPUT_BYTES })
     const fits = MIN_OUTPUT_BYTES - 2 - 2 // minus the empty-array bytes, minus the JSON quotes
 
@@ -307,10 +289,15 @@ describe('completion contract: output-limit byte boundaries', () => {
     const envelope = envelopeOf(overCap)
     // At this cap the rich envelope cannot fit either — it would carry a 253
     // character string that is under the projector's own truncation threshold —
-    // so the chain lands on the minimal reference, which is the rung the plan
-    // sizes against exactly this configuration.
+    // so the chain lands on the minimal reference.
     expect(envelope.projection).toBeUndefined()
     expect(envelope.use).toBe(`$out(${envelope.$out ?? 0})`)
+    expect(envelope.type).toBe('string')
+    expect(overCap.presentation).toEqual({
+      kind: 'retained-preview',
+      valueType: 'string',
+      handle: envelope.$out,
+    })
     expect(wireBytes(overCap)).toBeLessThanOrEqual(MIN_OUTPUT_BYTES)
     // Still not a heap failure: the namespace survives, as it did when this was
     // reported as an overflow.
@@ -318,10 +305,9 @@ describe('completion contract: output-limit byte boundaries', () => {
   })
 
   it('charges the cap in UTF-8 bytes rather than in characters', async () => {
-    // CURRENT CONTRACT: a 3-byte code point costs three times an ASCII one. The
-    // Phase 2 projector counts the same way — the last assertion here is what
-    // catches a projector that switched to characters, because a character-
-    // counting boundary would have let this value cross whole.
+    // A 3-byte code point costs three times an ASCII one. The last assertion
+    // catches a projector that switched to characters, which would let this
+    // value cross whole.
     const realm = createRealm({ maxOutputBytes: MIN_OUTPUT_BYTES })
     const fitting = Math.floor((MIN_OUTPUT_BYTES - 4) / 3)
 
@@ -339,12 +325,9 @@ describe('completion contract: output-limit byte boundaries', () => {
   })
 
   it('spends one shared budget on logs and the completion together', async () => {
-    // CURRENT CONTRACT (plan §6.1 "model projection budget"): logs are admitted
-    // first and shrink what the completion may use. One merged wire cap is the
-    // settled shape, so this arithmetic holds regardless of how logs are ever
-    // collected. Phase 2 rewrote only what happens once the completion no longer
-    // fits what the logs left: it is referenced rather than refused, and the logs
-    // it was competing with are all still there.
+    // Logs are admitted first and shrink what the completion may use. Once the
+    // completion no longer fits what the logs left, it is referenced rather than
+    // refused, and the logs it was competing with remain present.
     const realm = createRealm({ maxOutputBytes: MIN_OUTPUT_BYTES })
     const logged = 'x'.repeat(100)
     const remaining = MIN_OUTPUT_BYTES - 2 - jsonStringBytes(logged)
@@ -364,14 +347,12 @@ describe('completion contract: output-limit byte boundaries', () => {
   })
 
   it('still reports output-limit when even a minimal reference does not fit', async () => {
-    // REWRITTEN BY PHASE 2 (plan §6.1, §7.2, acceptance #12). The last rung of
-    // the chain is a real one: when the logs have eaten the budget down past what
-    // a bare `$out(N)` reference costs, the run reports `output-limit` rather
-    // than sending a truncated envelope. This is the case the plan requires the
-    // log accounting to be re-reconciled for — the diagnostic wins, and the logs
-    // are cut to whole entries to pay for it.
+    // When logs leave less room than the typed minimal reference costs, the run
+    // reports `output-limit` rather than sending a truncated envelope. The
+    // diagnostic wins, and logs are cut only at whole-entry boundaries to pay
+    // for it.
     const realm = createRealm({ maxOutputBytes: MIN_OUTPUT_BYTES })
-    const logged = 'x'.repeat(222) // leaves 28 bytes, under the ~43-byte minimal reference
+    const logged = 'x'.repeat(222)
 
     const starved = await realm.run({
       program: `console.log("x".repeat(222))\n({ rows: [1, 2, 3] })`,
@@ -387,15 +368,10 @@ describe('completion contract: output-limit byte boundaries', () => {
   })
 
   it('separates a completion overflow from a log overflow by whether the realm survives', async () => {
-    // CURRENT CONTRACT: the asymmetry is load-bearing and easy to lose. A
-    // completion too big for the wire is handled by a worker that already
-    // finished the program, so the namespace is intact; a log that overflows is
-    // reported mid-run and costs the generation, dropping every line. Both halves
-    // are SETTLED CONTRACT, not provisional behaviour awaiting a later phase:
-    // changing either one means rewriting this case first and arguing for the new
-    // asymmetry on its own merits. Phase 2 changed only how the completion half
-    // REPORTS — a reference instead of a refusal — and the survival contract this
-    // case exists to pin is unchanged.
+    // The asymmetry is load-bearing: a completion too large for the wire is
+    // handled after the program finishes, so the namespace survives; a log
+    // overflow is reported mid-run, costs the generation and drops every line.
+    // This test pins both halves of that contract.
     const realm = createRealm({ maxOutputBytes: MIN_OUTPUT_BYTES })
 
     const completionOverflow = await realm.run({
@@ -412,14 +388,14 @@ describe('completion contract: output-limit byte boundaries', () => {
     })
     expect(logOverflow.error?.kind).toBe('output-limit')
     expect(logOverflow.logs).toEqual([])
+    expect(logOverflow.presentation).toBeUndefined()
     expect(realm.generation).toBe(2)
     expect((await realm.run({ program: 'typeof lostToLogOverflow', bindings: [] })).value).toBe('undefined')
   })
 
   it('refuses a realm budget below the fixed diagnostic floor', async () => {
-    // CURRENT CONTRACT (`MIN_OUTPUT_BYTES`): the cap can never be small enough to
-    // force the overflow diagnostic itself to be truncated. Phase 2's minimum
-    // reference envelope constant has to be defined against this same floor.
+    // The cap cannot be small enough to truncate the overflow diagnostic. The
+    // minimum reference-envelope constant is defined against the same floor.
     expect(() => new PersistentRealm({
       realmId: 'below-floor',
       budgets: { ...BUDGETS, maxOutputBytes: MIN_OUTPUT_BYTES - 1 },
@@ -438,10 +414,9 @@ describe('completion contract: output-limit byte boundaries', () => {
 
 describe('completion contract: adversarial value shapes', () => {
   it('carries surrogate pairs and lone surrogates through unchanged', async () => {
-    // CURRENT CONTRACT (plan §6.2 "truncation must not split a surrogate pair"):
-    // today nothing truncates a completion, so the baseline is exact round trip
-    // — including a lone surrogate, which well-formed `JSON.stringify` escapes
-    // and `JSON.parse` restores. Phase 2's projector inherits this obligation.
+    // The lossless completion round-trip is exact, including a lone surrogate
+    // that well-formed `JSON.stringify` escapes and `JSON.parse` restores. The
+    // projector separately preserves surrogate pairs when truncating.
     const realm = createRealm()
     const result = await realm.run({
       program: `({ emoji: '\u{1f600}\u{1f469}‍\u{1f4bb}', mixed: 'aé中\u{1f600}', lone: '\\uD800', pair: '\\uD83D\\uDE00' })`,
@@ -458,9 +433,8 @@ describe('completion contract: adversarial value shapes', () => {
   })
 
   it('accepts an extremely long key, empty containers and null in every position', async () => {
-    // CURRENT CONTRACT: the boundary has no key-length, node-count or depth
-    // limit today. Phase 1's admission budget and Phase 2's projector both add
-    // limits here, so this test records what "no limit" looked like.
+    // Values inside the full-value threshold cross unchanged, including long
+    // keys, empty containers and null at any position.
     const realm = createRealm()
     const result = await realm.run({
       program: `
@@ -487,9 +461,8 @@ describe('completion contract: adversarial value shapes', () => {
   })
 
   it('carries a deeply nested value across the boundary without a depth ceiling', async () => {
-    // CURRENT CONTRACT: the snapshot walk is recursive and unbounded. Phase 2
-    // introduces a hard maximum depth, which will make this exact program
-    // produce a bounded projection instead of the whole chain.
+    // A deeply nested value inside the full-value threshold crosses whole; the
+    // projector's depth limit applies only when projection is needed.
     const realm = createRealm()
     const depth = 200
     const result = await realm.run({
@@ -513,14 +486,11 @@ describe('completion contract: adversarial value shapes', () => {
   })
 
   it('leaves `_` to the program while owning `$out` and `$_`', async () => {
-    // REWRITTEN BY PHASE 1 (plan §4.1, §9 Phase 1, §10 "naming conflict").
-    // Previously all three names were undeclared. Phase 1 installs `$out` and
-    // `$_` as non-enumerable, CONFIGURABLE accessors — configurable because a
-    // non-configurable own global makes a top-level `const $out` fail the whole
-    // cell — and deliberately leaves `_` alone, whose strongest prior in JS is
-    // lodash. The `_` half of this contract is therefore UNCHANGED; only the
-    // `$out`/`$_` half moved, and `completion-history.spec.ts` owns the detailed
-    // shadow, assignment and deletion cases.
+    // `$out` and `$_` are non-enumerable, CONFIGURABLE accessors; configurable
+    // because a non-configurable own global would make top-level `const $out`
+    // fail the whole cell. `_` remains unclaimed because its strongest JavaScript
+    // prior is lodash. `completion-history.spec.ts` owns detailed shadow,
+    // assignment and deletion coverage.
     const realm = createRealm()
     const ambient = await realm.run({
       program: `({
@@ -559,11 +529,9 @@ describe('completion contract: adversarial value shapes', () => {
   })
 
   it('retains a completion the program did not bind itself', async () => {
-    // REWRITTEN BY PHASE 1 (plan §1, §4.1, §9 Phase 1). The old contract pinned
-    // the GAP: an unnamed result was unreachable once the cell settled, which is
-    // exactly what this phase closes. The value is now addressable through a
-    // runtime-owned handle without the program having named anything, while the
-    // model-visible result of the producing cell is unchanged.
+    // An unnamed result is addressable through a runtime-owned handle without
+    // the program naming it, while the producing cell's canonical result stays
+    // unchanged.
     const realm = createRealm()
     const produced = await realm.run({ program: '({ rows: [1, 2, 3] })', bindings: [] })
     expect(produced.error).toBeUndefined()
@@ -584,10 +552,8 @@ describe('completion contract: adversarial value shapes', () => {
 
 describe('completion contract: host-level notices and the notice reserve', () => {
   it('pins the exact namespace notice wording on a fresh and on a restarted realm', async () => {
-    // CURRENT CONTRACT (plan §5.3, §10 "affected existing assertions"): there is
-    // exactly ONE restart mechanism, and Phase 1 must extend these two lines
-    // rather than add a second notice. The neighbouring suite only asserts that
-    // the lines CONTAIN 'namespace'/'lost'; the literal text is pinned here.
+    // There is one restart mechanism and one notice line. The neighbouring suite
+    // checks only for 'namespace'/'lost'; this test pins the literal wording.
     await makeRoot('dsh-prime-contract-notice-')
     const ctx = await startHost({ maxWallMs: 400 })
 
@@ -603,9 +569,8 @@ describe('completion contract: host-level notices and the notice reserve', () =>
       bindings: [],
     })
     expect(restarted.value).toBeNull()
-    // REWRITTEN BY PHASE 1 (plan §5.3, §10): a hard kill takes the completion
-    // history with the bindings, and the plan keeps ONE restart mechanism, so
-    // the fact is added to this line rather than to a second notice.
+    // A hard kill takes retained results with bindings, so the single restart
+    // notice reports both losses.
     expect(notices(restarted)).toEqual(['[prime-realm] live namespace restarted; previous bindings and retained results were lost'])
 
     const settled = await ctx.primeRealmRuntime.run(realmId('session-notice'), { program: '1', bindings: [] })
@@ -613,11 +578,9 @@ describe('completion contract: host-level notices and the notice reserve', () =>
   })
 
   it('gives the realm the deployment cap minus the fixed notice reserve', async () => {
-    // CURRENT CONTRACT: the realm never sees the last 512 bytes of the
-    // deployment's `maxOutputBytes`. Phase 2 rewrote only what the realm DOES at
-    // that reduced cap — a value past it is referenced rather than refused — and
-    // the reserve's own guarantee is asserted here against the envelope instead
-    // of against the diagnostic that used to take its place.
+    // The realm never sees the last 512 bytes of deployment `maxOutputBytes`.
+    // A value past the reduced cap is referenced, and this test checks the
+    // reserve against that envelope.
     await makeRoot('dsh-prime-contract-reserve-')
     const maxOutputBytes = 2_048
     const realmBytes = maxOutputBytes - NOTICE_RESERVE_BYTES
@@ -647,13 +610,9 @@ describe('completion contract: host-level notices and the notice reserve', () =>
   })
 
   it('fits a minimal reference beside the notice reserve at the smallest legal cap', async () => {
-    // REWRITTEN BY PHASE 2 (plan §6.1, §10 "the minimal envelope constant is
-    // verified together with the notice reserve"). The 128-byte constant is
-    // sized against the WORST legal deployment, not the default one: at the
-    // configured floor the realm sees 256 bytes and the completion has about 254
-    // of them. If the constant were budgeted against a comfortable cap, this is
-    // the configuration where the last rung of the chain would quietly stop
-    // being reachable and every large completion would fail instead.
+    // The reference-envelope constant is sized against the smallest legal
+    // deployment, where the realm receives 256 bytes and the completion has
+    // about 254. This keeps the last rung reachable even at the floor.
     await makeRoot('dsh-prime-contract-minimal-')
     const maxOutputBytes = MIN_OUTPUT_BYTES + NOTICE_RESERVE_BYTES
     const ctx = await startHost({ maxOutputBytes })
@@ -681,8 +640,7 @@ describe('completion contract: host-level notices and the notice reserve', () =>
   })
 
   it('refuses a deployment cap that cannot pay for both the reserve and the floor', async () => {
-    // CURRENT CONTRACT: the configured floor is `MIN_OUTPUT_BYTES + 512`, checked
-    // at plugin load rather than on first run.
+    // The configured floor is `MIN_OUTPUT_BYTES + 512`, checked at plugin load.
     await makeRoot('dsh-prime-contract-floor-')
     const floor = MIN_OUTPUT_BYTES + NOTICE_RESERVE_BYTES
 
