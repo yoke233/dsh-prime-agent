@@ -1,49 +1,21 @@
-# The `prime` agent preset: the shipped `code` preset with Prime identity and realm changes.
+# The `prime` agent preset: the native DSH coding agent with one persistent `repl` transport.
 #
-# Everything from the next line down copies the harness's own
-# `apps/cli/config/agent-presets/code/agent.cordis.yml`, with these Prime changes:
-# the software-engineer persona, the `prime-agent` row under "prime realm", and
-# bounded Prime projections near the end. DSH has no preset inheritance and no preset-level
-# patch layer — a preset is one whole composition file — so the only way to ship
-# these changes is to maintain the whole snapshot as the harness moves.
-#
-# Provenance of this snapshot:
-#   deepseek-harness    b150a551b8d465e31e418e1b2eaf5e79bbb7d28e (dsh-v0.1.1-rc.2, 2026-08-21)
-#     source file last changed in b2178ade8028597e7565db77dfe3ef4ecd68b99d
-#   reviewed Prime Agent baseline
-#                       aacf04b4678fd02cf46b69ab0bdcbc5d29baab45
-#     (docs/upstream-baseline.json)
-#
-# EVERY upstream sync must diff this file line by line against the shipped
-# `code` preset and port the changes across before advancing the baseline —
-# that is step 3 of the required verification in `docs/upstream-sync.md`
-# (`docs/upstream-sync.zh.md`). A copy left behind silently gives Prime
-# sessions an older capability set than every other preset in the roster.
-# The `code` agent preset: the standard coding agent, presented as Code Mode.
-#
-# Everything in `standard` is here unchanged. What is added is the `tool-presentation`
-# row: instead of one tool call per action, the model writes a TypeScript
-# program against a generated SDK and `run_code` executes it, so a sequence
-# that would be five round trips becomes one.
-#
-# The registry itself stays on the host plane — the agent loop's scheduler and
-# the API proxy's presenters are its consumers — so what this preset owns is
-# the PRESENTATION of that registry for this agent alone. Native sessions run
-# beside this one in the same process, each seeing its own catalog.
-#
-# This file is an AGENT-PLANE composition. It is mounted under one agent's
-# scope context, so every tool and prompt section it registers belongs to that
-# session alone. The host composition (`base.cordis.yml` + `web.cordis.yml`)
-# keeps everything a preset must not own: the registries themselves, the
-# sandbox and approval stack, persistence, and the model route.
+# This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
+# standing scope; every session naming it joins by scope parentage, so the
+# tools and prompt sections registered here cover each joined agent while a
+# session's own state stays keyed per Session/Agent inside the plugins. The
+# host composition (`base.cordis.yml` + `web.cordis.yml`) keeps everything a
+# preset must not own: the registries themselves, the sandbox and approval
+# stack, persistence, and the model route.
 #
 # A service row here MUST sit inside a group carrying an `isolate` realm.
-# Without one it publishes into the root realm, where it is process-global
-# rather than per-session and the second session mounting this preset collides
-# with the first; `dsh-agent-presets` rejects that at mount. `true` means an
-# entry-local realm — one private instance per mounted session, which is the
-# default this deployment wants. A shared label would instead pool one instance
-# across every session naming it.
+# Without one it publishes into the root realm, where it is process-global —
+# another preset publishing the same name collides, and a host reader would
+# resolve one preset's instance for every session; `dsh-agent-presets` rejects
+# that at mount. `true` means an entry-local realm: this standing mount's own
+# private instance, apart from every other preset's. (A shared label does NOT
+# pool instances — `provide()` throws on the second registration under the
+# same realm symbol; labels join REALMS, and are not what this file needs.)
 
 # ── identity ────────────────────────────────────────────────────────────────
 
@@ -59,6 +31,15 @@
   name: '@deepseek-ai/dsh-agent-instructions'
   config:
     maxBytes: 65536
+
+# ── persistent REPL ─────────────────────────────────────────────────────────
+
+# Registers the sole model-visible `repl` tool. All other rows remain host-callable
+# capabilities and are available only through bindings inside the persistent cell.
+- id: prime-agent
+  name: dsh-prime-agent
+  config:
+    stateDirectory: !!js dshHomePath('prime-agent')
 
 # ── shell ───────────────────────────────────────────────────────────────────
 
@@ -193,6 +174,12 @@
 # `workflows` is different — nothing outside an agent reads it — so every row
 # that reaches it shares one entry-local realm here, and a consumer left
 # outside would resolve a host registry this preset does not populate.
+#
+# `tool-subagent-report` is host-plane for the same reason as the registry,
+# not because a preset may not want it: it registers a CONTINUABLE SETUP on
+# that singleton rather than a tool this agent calls, and the setup list is
+# not scope-aware — one copy per mounted preset means every child gets
+# `report` registered once per live session, which throws on the second.
 - id: delegation
   name: cordis:group
   group: true
@@ -273,42 +260,8 @@
     fetch: false
     searchTimeoutMs: 60000
 
-# ── prime realm ─────────────────────────────────────────────────────────────
-
-# The plugin's model-facing rows for this agent alone: the `prime_refine`
-# learning layer and the fixed `prime_realm_identity` bootstrap binding the
-# host `PrimeCodeRuntime` probes to
-# decide whether this request belongs to a persistent TypeScript realm. It needs
-# no `isolate` realm because it publishes no service — every store it opens is
-# keyed by the owning agent — and it sits before `tool-presentation` only for
-# reading order; row order does not affect what the model sees.
-#
-# `stateDirectory` MUST evaluate to the same absolute path as the
-# `prime-code-runtime` row in this package's `cordis.patch.yml`: the tool side
-# and the host runtime each open `<stateDirectory>/realm-identity/hmac.key`
-# through their own store, and a mismatch fails every handshake closed. The
-# expression is the harness's own `dshHomePath`, provided to Loader config
-# expressions by app-boot, so both files can spell the path identically.
-- id: prime-agent
-  name: dsh-prime-agent
-  config:
-    stateDirectory: !!js dshHomePath('prime-agent')
-
-# ── presentation ────────────────────────────────────────────────────────────
-
-# Complete canonical values remain inside the Node Realm. Apply a best-effort
-# bound to the model-facing projection and durable code-dispatch log; successful
-# spills are recoverable through the locator, while storage failures remain inline.
-# Agent scope leaves other presets alone.
+# Prime keeps large nested tool projections bounded without changing canonical values.
 - id: prime-spill-policy
   name: '@deepseek-ai/dsh-spill-policy'
   config:
     maxInlineBytes: 12000
-
-# Code Mode for this agent alone. The row waits for the host's `codeRuntime`
-# rather than assuming it: a deployment that composes no TypeScript runtime
-# fails this preset at mount, naming this id, instead of at the first request.
-- id: tool-presentation
-  name: '@deepseek-ai/dsh-agent-tool-presentation'
-  config:
-    mode: code

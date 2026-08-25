@@ -17,13 +17,13 @@
  * which values cross it, which are refused, and where every byte boundary sits.
  */
 
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { CodeBindingFunction, CodeBindingNamespace, CodeJsonValue, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
-import { decodeChallenge, RealmIdentityStore } from '../src/realm/identity.js'
+import type { CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
 import { PersistentRealm } from '../src/realm/realm.js'
 import type { RealmBudgets } from '../src/realm/realm.js'
 import * as primeRuntime from '../src/runtime.js'
@@ -47,12 +47,6 @@ const MIN_OUTPUT_BYTES = 256
  */
 const NOTICE_RESERVE_BYTES = 512
 
-/** The single message the boundary uses for every non-lossless completion. */
-const INVALID_COMPLETION: CodeRunResult['error'] = {
-  kind: 'invalid-output',
-  message: 'program completion must be lossless JSON',
-}
-
 const realms: PersistentRealm[] = []
 const contexts: Context[] = []
 let root: string | undefined
@@ -75,9 +69,6 @@ function jsonStringBytes(text: string): number {
   return Buffer.byteLength(JSON.stringify(text), 'utf8')
 }
 
-/* eslint-disable @typescript-eslint/no-explicit-any -- test bindings receive already-validated JSON */
-type Binding = (args: any) => Promise<CodeJsonValue>
-
 function stateDirectory(): string {
   if (root === undefined) throw new Error('test root was not created')
   return join(root, 'state')
@@ -95,23 +86,12 @@ async function startHost(config: Record<string, unknown> = {}): Promise<Context>
   return context
 }
 
-/** The `prime_realm_identity` stand-in, issuing over the key the runtime verifies against. */
-function issuer(sessionOwner: string): Binding {
-  return async (args: any) => {
-    const challenge = decodeChallenge(args?.challenge)
-    if (challenge === undefined) throw new Error('handshake challenge was not 32 bytes')
-    const { token, proof } = await new RealmIdentityStore({ directory: join(stateDirectory(), 'realm-identity') })
-      .issue(sessionOwner, challenge)
-    return { protocol: 1, token, proof }
-  }
-}
-
-/** Bindings that make the request a Prime request for `sessionOwner`. */
-function primeFor(sessionOwner: string): CodeBindingNamespace[] {
-  return [{
-    global: 'tools',
-    functions: { prime_realm_identity: issuer(sessionOwner) } as unknown as Record<string, CodeBindingFunction>,
-  }]
+/**
+ * Deterministic 43-char unpadded base64url Realm identity for one test seed,
+ * the exact shape the trusted seam accepts and the lease directory verifies.
+ */
+function realmId(seed: string): string {
+  return createHash('sha256').update(seed).digest('base64url')
 }
 
 /** The runtime's own namespace notices, separate from program output. */
@@ -194,11 +174,13 @@ describe('completion contract: values that cross the boundary unchanged', () => 
     expect(realm.generation).toBe(1)
   })
 
-  it('accepts a null-prototype object but refuses every other exotic prototype', async () => {
-    // CURRENT CONTRACT (plan §5 "non-lossless JSON"): the boundary judges the
-    // PROTOTYPE, not the JSON round trip. `Object.create(null)` is admitted;
-    // `Date` is refused even though `JSON.stringify` would happily render it,
-    // because `toJSON` is never consulted.
+  it('accepts a null-prototype object and retains every other exotic prototype as opaque', async () => {
+    // REWRITTEN BY WP-C (plan §5 "non-JSON live objects"): the boundary still
+    // judges the PROTOTYPE, not the JSON round trip. `Object.create(null)` is
+    // admitted and crosses whole; `Date` is still refused the wire — but the
+    // refusal no longer fails the cell. The value is retained under the opaque
+    // budgets and answered with the fixed envelope, and `toJSON` is never
+    // consulted on the way.
     const realm = createRealm()
     const nullPrototype = await realm.run({
       program: 'Object.assign(Object.create(null), { adopted: true })',
@@ -208,20 +190,24 @@ describe('completion contract: values that cross the boundary unchanged', () => 
     expect(nullPrototype.value).toEqual({ adopted: true })
 
     for (const program of ['new Date(0)', 'Object.create({ inherited: true })', 'class Row { constructor() { this.id = 1 } }\nnew Row()']) {
-      expect((await realm.run({ program, bindings: [] })).error).toEqual(INVALID_COMPLETION)
+      const result = await realm.run({ program, bindings: [] })
+      expect(result.error, program).toBeUndefined()
+      expect(result.value, program).toMatchObject({ retained: true, opaque: true, truncated: true })
     }
     expect(realm.generation).toBe(1)
   })
 })
 
-describe('completion contract: invalid-output', () => {
-  it('refuses every non-lossless completion with one fixed diagnostic', async () => {
-    // CURRENT CONTRACT (plan §3 principle 5, §8 "non-lossless JSON completion"):
-    // Phase 1 deliberately does NOT widen this set — these values must keep
-    // failing, and they must keep failing with this exact message, which carries
-    // no detail about WHICH part of the value was refused.
+describe('completion contract: opaque retention (WP-C)', () => {
+  it('retains every non-lossless completion with one fixed opaque envelope', async () => {
+    // REWRITTEN BY WP-C (plan §5 "non-JSON live objects", acceptance "a
+    // successful cell must not fake-fail because wire projection failed"): these
+    // values no longer fail the cell with a diagnostic. Each is retained under
+    // the opaque budgets and answered with the SAME fixed envelope — a handle,
+    // the safe typeof-grade type and the opaque marker — and the original value
+    // stays reachable through $out(id) in a later cell.
     const realm = createRealm()
-    const refused = [
+    const retained = [
       { why: 'function', program: '(() => 42)' },
       { why: 'bigint', program: '10n' },
       { why: 'symbol', program: 'Symbol("completion")' },
@@ -240,22 +226,25 @@ describe('completion contract: invalid-output', () => {
       { why: 'undefined inside an array', program: '[1, undefined]' },
     ] as const
 
-    for (const completion of refused) {
+    for (const completion of retained) {
       const result = await realm.run({ program: completion.program, bindings: [] })
-      expect(result.error, completion.why).toEqual(INVALID_COMPLETION)
-      expect(result.value, completion.why).toBeUndefined()
+      expect(result.error, completion.why).toBeUndefined()
+      const envelope = result.value as Record<string, unknown>
+      expect(envelope, completion.why).toMatchObject({ retained: true, opaque: true, truncated: true })
+      expect(typeof envelope.$out, completion.why).toBe('number')
+      expect(envelope.use, completion.why).toBe(`$out(${String(envelope.$out)})`)
     }
-    // None of these cost the realm its heap: they are program-shaped failures,
-    // not substrate failures.
+    // None of these cost the realm its heap: they are retained values, not
+    // substrate failures.
     expect(realm.generation).toBe(1)
   })
 
-  it('reports a throwing getter as invalid-output rather than as a program exception', async () => {
-    // CURRENT CONTRACT: the boundary walk runs AFTER the program completed, so a
-    // getter that throws during snapshotting is charged to the completion, not
-    // to the cell, and its own message never reaches the model. Phase 1's
-    // capture walk has to preserve this — a projector that lets the getter's
-    // error escape would reclassify the run.
+  it('keeps a throwing getter as an opaque retention rather than as a program exception', async () => {
+    // REWRITTEN BY WP-C: the boundary walk runs AFTER the program completed, so a
+    // getter that throws during classification is charged to the completion, not
+    // to the cell — and its own message never reaches the model. The value is
+    // retained as opaque and the cell SUCCEEDS, which is what separates this
+    // contract from the old invalid-output diagnostic.
     const realm = createRealm()
     const result = await realm.run({
       program: `
@@ -265,16 +254,17 @@ describe('completion contract: invalid-output', () => {
       `,
       bindings: [],
     })
-    expect(result.error).toEqual(INVALID_COMPLETION)
-    expect(result.error?.message).not.toContain('getter exploded')
+    expect(result.error).toBeUndefined()
+    expect(JSON.stringify(result.value)).not.toContain('getter exploded')
+    expect(result.value).toMatchObject({ retained: true, opaque: true, truncated: true })
     expect(realm.generation).toBe(1)
   })
 
-  it('keeps bindings a failing cell already committed', async () => {
-    // CURRENT CONTRACT (plan §8 "partial commit"): the completion is judged after
-    // the program body ran, so declarations that completed are retained even
-    // though the run reports a failure. Phase 1 must not move capture ahead of
-    // the point where this is already true.
+  it('keeps bindings beside a non-lossless completion, which now succeeds', async () => {
+    // REWRITTEN BY WP-C: the completion is judged after the program body ran, so
+    // declarations that completed are retained — and the cell is no longer a
+    // failure at all, so the old "partial commit" half of this contract is now
+    // just ordinary persistence next to a successful opaque retention.
     const realm = createRealm()
     const cases = [
       { name: 'keptBesideBigint', completion: '10n' },
@@ -285,11 +275,12 @@ describe('completion contract: invalid-output', () => {
     ] as const
 
     for (const partial of cases) {
-      const failed = await realm.run({
+      const succeeded = await realm.run({
         program: `const ${partial.name} = { kept: true }\n;(${partial.completion})`,
         bindings: [],
       })
-      expect(failed.error, partial.name).toEqual(INVALID_COMPLETION)
+      expect(succeeded.error, partial.name).toBeUndefined()
+      expect(succeeded.value, partial.name).toMatchObject({ retained: true, opaque: true, truncated: true })
       expect((await realm.run({ program: partial.name, bindings: [] })).value, partial.name).toEqual({ kept: true })
     }
     expect(realm.generation).toBe(1)
@@ -600,16 +591,16 @@ describe('completion contract: host-level notices and the notice reserve', () =>
     await makeRoot('dsh-prime-contract-notice-')
     const ctx = await startHost({ maxWallMs: 400 })
 
-    const fresh = await ctx.codeRuntime.run({ program: 'const kept = "v1"\nkept', bindings: primeFor('session-notice') })
+    const fresh = await ctx.primeRealmRuntime.run(realmId('session-notice'), { program: 'const kept = "v1"\nkept', bindings: [] })
     expect(notices(fresh)).toEqual(['[prime-realm] live namespace started empty'])
 
-    const killed = await ctx.codeRuntime.run({ program: 'for (;;) {}', bindings: primeFor('session-notice') })
+    const killed = await ctx.primeRealmRuntime.run(realmId('session-notice'), { program: 'for (;;) {}', bindings: [] })
     expect(killed.error?.kind).toBe('timeout')
     expect(notices(killed)).toEqual([])
 
-    const restarted = await ctx.codeRuntime.run({
+    const restarted = await ctx.primeRealmRuntime.run(realmId('session-notice'), {
       program: 'typeof kept === "undefined" ? null : kept',
-      bindings: primeFor('session-notice'),
+      bindings: [],
     })
     expect(restarted.value).toBeNull()
     // REWRITTEN BY PHASE 1 (plan §5.3, §10): a hard kill takes the completion
@@ -617,7 +608,7 @@ describe('completion contract: host-level notices and the notice reserve', () =>
     // the fact is added to this line rather than to a second notice.
     expect(notices(restarted)).toEqual(['[prime-realm] live namespace restarted; previous bindings and retained results were lost'])
 
-    const settled = await ctx.codeRuntime.run({ program: '1', bindings: primeFor('session-notice') })
+    const settled = await ctx.primeRealmRuntime.run(realmId('session-notice'), { program: '1', bindings: [] })
     expect(notices(settled)).toEqual([])
   })
 
@@ -632,9 +623,9 @@ describe('completion contract: host-level notices and the notice reserve', () =>
     const realmBytes = maxOutputBytes - NOTICE_RESERVE_BYTES
     const ctx = await startHost({ maxOutputBytes })
 
-    const overflowed = await ctx.codeRuntime.run({
+    const overflowed = await ctx.primeRealmRuntime.run(realmId('session-reserve'), {
       program: `"Z".repeat(${realmBytes})`,
-      bindings: primeFor('session-reserve'),
+      bindings: [],
     })
     const envelope = envelopeOf(overflowed)
     expect(envelope.type).toBe('string')
@@ -647,9 +638,9 @@ describe('completion contract: host-level notices and the notice reserve', () =>
 
     // One byte under the reduced cap still crosses, so the reserve is a clean
     // subtraction rather than an approximate margin.
-    const fits = await ctx.codeRuntime.run({
+    const fits = await ctx.primeRealmRuntime.run(realmId('session-reserve'), {
       program: `"Z".repeat(${realmBytes - 4})`,
-      bindings: primeFor('session-reserve'),
+      bindings: [],
     })
     expect(fits.error).toBeUndefined()
     expect(jsonStringBytes(fits.value as string)).toBe(realmBytes - 2)
@@ -667,9 +658,9 @@ describe('completion contract: host-level notices and the notice reserve', () =>
     const maxOutputBytes = MIN_OUTPUT_BYTES + NOTICE_RESERVE_BYTES
     const ctx = await startHost({ maxOutputBytes })
 
-    const referenced = await ctx.codeRuntime.run({
+    const referenced = await ctx.primeRealmRuntime.run(realmId('session-minimal'), {
       program: `"Z".repeat(4000)`,
-      bindings: primeFor('session-minimal'),
+      bindings: [],
     })
     const envelope = envelopeOf(referenced)
     expect(envelope.use).toBe(`$out(${envelope.$out ?? 0})`)
@@ -682,9 +673,9 @@ describe('completion contract: host-level notices and the notice reserve', () =>
 
     // And the reference works: the value it names survived the cap that could
     // not carry it.
-    const recovered = await ctx.codeRuntime.run({
+    const recovered = await ctx.primeRealmRuntime.run(realmId('session-minimal'), {
       program: `$out(${envelope.$out ?? 0}).length`,
-      bindings: primeFor('session-minimal'),
+      bindings: [],
     })
     expect(recovered.value).toBe(4000)
   })
@@ -699,7 +690,7 @@ describe('completion contract: host-level notices and the notice reserve', () =>
       .rejects.toThrow(`maxOutputBytes must be a safe integer of at least ${floor}`)
 
     const ctx = await startHost({ maxOutputBytes: floor })
-    const result = await ctx.codeRuntime.run({ program: '21 * 2', bindings: primeFor('session-floor') })
+    const result = await ctx.primeRealmRuntime.run(realmId('session-floor'), { program: '21 * 2', bindings: [] })
     expect(result.value).toBe(42)
     expect(notices(result)).toEqual(['[prime-realm] live namespace started empty'])
   })

@@ -1,17 +1,18 @@
 /**
  * Phase 1.3 acceptance for the large tool-output plan
- * (`docs/plan/large-tool-output-optimization.md`): the Prime persistent realm
- * composed with the harness output-governance chain (`ctx.spillStore` +
- * `dsh-spill-policy`), driven through the REAL `run_code` transport with no
- * model in the loop.
+ * (`docs/plan/large-tool-output-optimization.md`), migrated to the sole
+ * model-visible `repl` transport: the Prime persistent realm composed with the
+ * harness output-governance chain (`ctx.spillStore` + `dsh-spill-policy`),
+ * driven through the REAL `repl` tool with no model in the loop.
  *
  * What these tests own is the COMPOSITION, not the spill mechanics: the harness
  * already unit-tests retention, locator naming and every best-effort fallback.
  * Here we prove the five properties that only appear once a persistent realm
- * sits behind the bridge — the program keeps the whole canonical value while the
- * durable log shrinks, the recovered artifact is the renderer's own text, the
- * realm survives a spill with its live bindings intact, and neither the hard
- * `maxOutputBytes` failure nor a refusing backend is papered over.
+ * sits behind the bridge — the program keeps the whole canonical value while
+ * the model-facing content shrinks, the recovered artifact is the renderer's
+ * own text, the realm survives a spill with its live bindings intact, and
+ * neither the hard `maxOutputBytes` failure nor a refusing backend is papered
+ * over.
  */
 
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
@@ -25,13 +26,13 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineTool, RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { SpillLocator, SpillStore } from '@deepseek-ai/dsh-spill'
 import type { SaveTextSpill, SpillRef } from '@deepseek-ai/dsh-spill'
 import LocalSpillStore from '@deepseek-ai/dsh-spill-local'
 import * as SpillPolicy from '@deepseek-ai/dsh-spill-policy'
-import { registerRealmIdentity } from '../src/realm/identity-tool.js'
+import * as primeAgent from '../src/index.js'
 import * as primeRuntime from '../src/runtime.js'
 
 const signal = new AbortController().signal
@@ -173,14 +174,14 @@ interface Booted {
   agent: Agent
 }
 
-/** Boot the real composition: system prompt, code-mode tools, a spill backend, the policy, Prime. */
+/** Boot the real composition: system prompt, native tools, a spill backend, the policy, Prime. */
 async function bootPrime(options: BootOptions): Promise<Booted> {
   root = await mkdtemp(join(tmpdir(), 'dsh-prime-large-output-'))
   const stateDirectory = join(root, 'state')
   const spillRoot = join(root, 'spill')
   const context = new Context()
   await context.plugin(SystemPrompt)
-  await context.plugin(ToolRuntime, { mode: 'code' })
+  await context.plugin(ToolRuntime)
 
   let store: StubSpillStore | undefined
   if (options.backend === 'local') {
@@ -196,7 +197,7 @@ async function bootPrime(options: BootOptions): Promise<Booted> {
     stateDirectory,
     ...options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {},
   })
-  registerRealmIdentity(context, { stateDirectory })
+  await context.plugin(primeAgent, { stateDirectory })
   context.tools.register(bigReportTool)
   context.tools.register(echoTextTool)
 
@@ -205,18 +206,18 @@ async function bootPrime(options: BootOptions): Promise<Booted> {
   return { context, store, spillRoot, events, agent: testAgent('prime-large-output', root, events) }
 }
 
-async function runCode(agent: Agent, code: string): Promise<ToolExecutionResult> {
+async function runRepl(agent: Agent, code: string): Promise<ToolExecutionResult> {
   if (ctx === undefined) throw new Error('test context was not created')
   return await ctx.tools.execute({
     callId: CallId(`prime-large-output-${++callNumber}`),
-    name: RUN_CODE_NAME,
-    arguments: { code, description: 'Execute the Prime large-output program' },
+    name: 'repl',
+    arguments: { code },
     signal,
     agent,
   })
 }
 
-/** The run's canonical `run_code` value (logs plus the optional completion), asserting success. */
+/** The run's canonical `repl` value (logs plus the optional completion), asserting success. */
 function runValue(result: ToolExecutionResult): { logs: string[]; result?: JsonValue } {
   if (result.isError) throw new Error(`expected success, got: ${result.error.message}`)
   const value = result.value as { logs: string[]; result?: JsonValue }
@@ -228,29 +229,9 @@ function textOf(content: readonly ContentBlock[]): string {
     .map(block => block.text).join('')
 }
 
-/** The `run_code` renderer's own formatting rule, recomputed from the canonical value. */
-function renderRunCode(value: { logs: string[]; result?: JsonValue }): string {
-  const rendered = value.result === undefined ? '' : typeof value.result === 'string' ? value.result : ''
-  if (rendered === '' && value.result !== undefined) throw new Error('this oracle only formats string completions')
-  return [value.logs.join('\n'), rendered].filter(part => part.length > 0).join('\n')
-}
-
-/**
- * Every settled `tool/code-dispatch` projection for one sub-call name, in
- * order. Filtering by name matters: Prime's identity handshake is itself a
- * nested dispatch, so the first event is never the tool under test.
- */
-function dispatchTexts(events: LoggedEvent[], name: string): string[] {
-  return events
-    .filter(event => event.type === 'tool/code-dispatch' && (event.data as { name: string }).name === name)
-    .map(event => textOf((event.data as { content: ContentBlock[] }).content))
-}
-
-/** The bounded projection recorded for one sub-call's settled `tool/code-dispatch`. */
-function dispatchLogText(events: LoggedEvent[], name: string): string {
-  const texts = dispatchTexts(events, name)
-  if (texts.length === 0) throw new Error(`no tool/code-dispatch event for ${name} was appended`)
-  return texts[0]
+/** The `repl` renderer's own formatting rule, recomputed from the canonical value. */
+function renderRepl(value: { logs: string[]; result?: JsonValue }): string {
+  return JSON.stringify(value)
 }
 
 /** Pull the opaque locator back out of a notice, exactly as a reader would. */
@@ -275,13 +256,13 @@ async function spillFiles(spillRoot: string): Promise<string[]> {
   return files
 }
 
-describe('scenario 1: nested full value, bounded dispatch log, retained live binding', () => {
-  it('gives the program the whole canonical value while the durable log keeps only a preview and locator', async () => {
+describe('scenario 1: nested full value, bounded model-facing content, retained live binding', () => {
+  it('gives the program the whole canonical value while the model-facing content keeps only a preview and locator', async () => {
     const { spillRoot, events, agent } = await bootPrime({ backend: 'local' })
     const expectedRows = reportRows(300, false)
     const expectedChars = expectedRows.reduce((total, row) => total + row.length, 0)
 
-    const first = await runCode(agent, `
+    const first = await runRepl(agent, `
       const report = await tools.big_report({ rows: 300, marker: 'ALPHA' })
       const summary = {
         rows: report.rows.length,
@@ -289,24 +270,29 @@ describe('scenario 1: nested full value, bounded dispatch log, retained live bin
         first: report.rows[0],
         last: report.rows[report.rows.length - 1],
       }
-      ;({ rows: summary.rows, chars: summary.chars })
+      ;({ ...summary, text: report.rows.join('\\n') })
     `)
 
     // The program computed over the COMPLETE structured value: a truncated or
     // locator-substituted binding could not reproduce these two numbers.
     const firstValue = runValue(first)
-    expect(firstValue.result).toEqual({ rows: 300, chars: expectedChars })
+    expect(firstValue.result).toMatchObject({
+      rows: 300,
+      chars: expectedChars,
+      first: expectedRows[0],
+      last: expectedRows[299],
+    })
 
-    // The durable dispatch copy is bounded, carries the locator, and drops the body.
-    const logged = dispatchLogText(events, 'big_report')
-    expect(Buffer.byteLength(logged, 'utf8')).toBeLessThanOrEqual(MAX_INLINE_BYTES)
-    expect(logged).toContain('Full formatted result stored at:')
-    expect(logged).toContain('Omitted')
-    expect(logged).not.toContain('row-0150')
+    // The model-facing copy is bounded, carries the locator, and drops the body.
+    const content = textOf(first.content)
+    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(MAX_INLINE_BYTES)
+    expect(content).toContain('Full formatted result stored at:')
+    expect(content).toContain('Omitted')
+    expect(content).not.toContain('row-0150')
 
     // The artifact is the RENDERER's text, byte for byte — not a DTO re-serialization.
-    const expectedText = renderReport({ marker: 'ALPHA', rows: expectedRows })
-    const recovered = await readFile(locatorOf(logged), 'utf8')
+    const expectedText = JSON.stringify(firstValue)
+    const recovered = await readFile(locatorOf(content), 'utf8')
     expect(recovered).toBe(expectedText)
     expect(Buffer.byteLength(recovered, 'utf8')).toBe(Buffer.byteLength(expectedText, 'utf8'))
 
@@ -314,7 +300,7 @@ describe('scenario 1: nested full value, bounded dispatch log, retained live bin
     expect(await spillFiles(spillRoot)).toHaveLength(1)
 
     // The realm survived the spill: the reduced live binding is readable next run.
-    const second = await runCode(agent, 'summary')
+    const second = await runRepl(agent, 'summary')
     const secondValue = runValue(second)
     expect(secondValue.result).toEqual({
       rows: 300,
@@ -322,6 +308,9 @@ describe('scenario 1: nested full value, bounded dispatch log, retained live bin
       first: expectedRows[0],
       last: expectedRows[299],
     })
+
+    // No handshake/bootstrap or code-dispatch projection reached the session log.
+    expect(events).toEqual([])
   })
 })
 
@@ -330,7 +319,7 @@ describe('scenario 2: oversized outer completion', () => {
     const { spillRoot, events, agent } = await bootPrime({ backend: 'local' })
     const body = 'OUTER-'.repeat(1000)
 
-    const execution = await runCode(agent, `"OUTER-".repeat(1000)`)
+    const execution = await runRepl(agent, `"OUTER-".repeat(1000)`)
     const value = runValue(execution)
 
     // Execution-local canonical value: complete, untouched by the presentation policy.
@@ -339,31 +328,27 @@ describe('scenario 2: oversized outer completion', () => {
     // Model-facing content: bounded preview plus locator.
     const content = textOf(execution.content)
     expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(MAX_INLINE_BYTES)
-    expect(content).not.toBe(body)
+    expect(content).not.toBe(renderRepl(value))
     expect(content).toContain('Full formatted result stored at:')
 
-    // The locator recovers the run_code renderer's complete formatted text.
+    // The locator recovers the repl renderer's complete formatted text.
     const recovered = await readFile(locatorOf(content), 'utf8')
-    expect(recovered).toBe(renderRunCode(value))
+    expect(recovered).toBe(renderRepl(value))
     expect(recovered).toContain(body)
     expect(await spillFiles(spillRoot)).toHaveLength(1)
 
     // This fixture has no agent loop, so it must not pretend a durable outer
-    // `tool/result` was committed; only the code-dispatch pair may be logged.
+    // `tool/result` was committed; the bridge appends no dispatch projections.
     expect(events.map(event => event.type).filter(type => type.startsWith('tool/result'))).toEqual([])
+    expect(events.filter(event => event.type === 'tool/code-dispatch')).toEqual([])
   })
 })
 
 describe('scenario 3: the hard output cap references instead of failing', () => {
   it('answers a completion past maxOutputBytes with a bounded reference, and spills no artifact', async () => {
-    // REWRITTEN BY PHASE 2 (plan §9 Phase 2, §10 "affected existing
-    // assertions"). 1024 − the 512-byte trailing-notice reserve leaves the realm
-    // 512 bytes, and 2000 characters do not fit in them. What used to be the
-    // hard cap's failure is now its reference: the cap is still exactly where it
-    // was, but a legal value no longer dies against it.
     const { spillRoot, agent } = await bootPrime({ backend: 'local', maxOutputBytes: 1024 })
 
-    const execution = await runCode(agent, `"Z".repeat(2000)`)
+    const execution = await runRepl(agent, `"Z".repeat(2000)`)
 
     expect(execution.isError).toBe(false)
     const envelope = runValue(execution).result as Record<string, unknown>
@@ -376,65 +361,82 @@ describe('scenario 3: the hard output cap references instead of failing', () => 
     expect(textOf(execution.content)).not.toContain('Full formatted result stored at:')
 
     // And the value the reference names is still there, in full, for the next cell.
-    const recovered = await runCode(agent, `$out(${String(envelope.$out)}).length`)
+    const recovered = await runRepl(agent, `$out(${String(envelope.$out)}).length`)
     expect(runValue(recovered).result).toBe(2000)
   })
 })
 
 describe('scenario 4: UTF-8 and cap boundaries', () => {
   it('carries 2/3/4-byte text through the realm intact and cuts the preview on code points', async () => {
-    const { events, agent } = await bootPrime({ backend: 'local' })
+    const { agent } = await bootPrime({ backend: 'local' })
     const expectedRows = reportRows(60, true)
-    const expectedText = renderReport({ marker: 'UNI', rows: expectedRows })
 
-    const execution = await runCode(agent, `
+    const execution = await runRepl(agent, `
       const report = await tools.big_report({ rows: 60, marker: 'UNI', unicode: true })
       const joined = report.rows.join('')
-      ;({ rows: report.rows.length, units: joined.length, points: [...joined].length })
+      ;({ rows: report.rows.length, units: joined.length, points: [...joined].length, text: joined })
     `)
 
     const joined = expectedRows.join('')
-    expect(runValue(execution).result).toEqual({
+    const value = runValue(execution)
+    expect(value.result).toMatchObject({
       rows: 60,
       units: joined.length,
       points: [...joined].length,
     })
+    expect((value.result as { text: string }).text).toBe(joined)
 
-    const logged = dispatchLogText(events, 'big_report')
-    expect(Buffer.byteLength(logged, 'utf8')).toBeLessThanOrEqual(MAX_INLINE_BYTES)
+    const fullText = renderRepl(value)
+    const content = textOf(execution.content)
+    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(MAX_INLINE_BYTES)
+    expect(content).toContain('Full formatted result stored at:')
     // No replacement character was introduced by either cut.
-    expect(logged).not.toContain('�')
+    expect(content).not.toContain('�')
 
-    const preview = logged.slice(0, logged.lastIndexOf('\n\n(Omitted'))
+    const preview = content.slice(0, content.lastIndexOf('\n\n(Omitted'))
     expect(preview.length).toBeGreaterThan(40)
-    expect(expectedText.startsWith(preview.slice(0, 20))).toBe(true)
-    expect(expectedText.endsWith(preview.slice(-20))).toBe(true)
+    expect(fullText.startsWith(preview.slice(0, 20))).toBe(true)
+    expect(fullText.endsWith(preview.slice(-20))).toBe(true)
 
-    // The artifact still holds every byte the renderer produced.
-    expect(await readFile(locatorOf(logged), 'utf8')).toBe(expectedText)
+    // The artifact still holds every byte the renderer produced, and none of
+    // the multi-byte sequences were damaged in the round trip.
+    const artifact = await readFile(locatorOf(content), 'utf8')
+    expect(artifact).toBe(fullText)
+    expect(artifact).not.toContain('�')
   })
 
-  // Cap-boundary checks run through the NESTED dispatch path: under
-  // `mode: 'code'` a model-direct native call is denied before the policy
-  // pipeline, and the dispatch-log arm shares `spillReplacement` verbatim with
-  // the model-facing arm, so the boundary behavior is byte-identical.
+  // Cap-boundary checks run through the OUTER repl content: the nested echo
+  // returns a full canonical value to the program, and only the model-facing
+  // render of the cell result is governed by the policy cap.
   it('emits a replacement exactly equal to the cap, and keeps the text inline one byte below it', async () => {
     const body = 'x'.repeat(500)
     const echoProgram = `
       const echoed = await tools.echo_text({ text: 'x'.repeat(500) })
-      echoed.text.length
+      echoed.text
     `
-    const cap = Buffer.byteLength(stubNotice(500), 'utf8')
-    const exact = await bootPrime({ backend: 'stub', maxInlineBytes: cap })
+    // The renderer's full text for the cell result: JSON of { logs, result }.
+    // The FIRST run of a fresh realm carries the namespace notice in `logs`, so
+    // probe the real composition once and measure the render it actually makes.
+    const probe = await bootPrime({ backend: 'stub' })
+    const probeRun = await runRepl(probe.agent, echoProgram)
+    expect(runValue(probeRun).result).toBe(body)
+    const full = JSON.stringify(runValue(probeRun))
+    const cap = Buffer.byteLength(stubNotice(Buffer.byteLength(full, 'utf8')), 'utf8')
+
+    await ctx?.fiber.dispose()
+    ctx = undefined
+    await rm(root as string, { recursive: true, force: true })
+    root = undefined
 
     // Reserving the notice leaves a zero-byte preview budget, so the whole body
     // is omitted and the replacement IS the notice — exactly maxInlineBytes.
-    const atCap = await runCode(exact.agent, echoProgram)
-    expect(runValue(atCap).result).toBe(500)
-    const replaced = dispatchLogText(exact.events, 'echo_text')
-    expect(replaced).toBe(stubNotice(500))
+    const exact = await bootPrime({ backend: 'stub', maxInlineBytes: cap })
+    const atCap = await runRepl(exact.agent, echoProgram)
+    expect(runValue(atCap).result).toBe(body)
+    const replaced = textOf(atCap.content)
+    expect(replaced).toBe(stubNotice(Buffer.byteLength(full, 'utf8')))
     expect(Buffer.byteLength(replaced, 'utf8')).toBe(cap)
-    expect(exact.store?.saves.map(save => save.content)).toEqual([body])
+    expect(exact.store?.saves.map(save => save.content)).toEqual([full])
 
     await ctx?.fiber.dispose()
     ctx = undefined
@@ -445,11 +447,11 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
     // the inline text rather than emit content over the advertised cap.
     const tight = await bootPrime({ backend: 'stub', maxInlineBytes: cap - 1 })
     const warn = vi.spyOn(tight.context.logger, 'warn').mockImplementation(() => {})
-    const inline = await runCode(tight.agent, echoProgram)
-    expect(runValue(inline).result).toBe(500)
-    expect(dispatchLogText(tight.events, 'echo_text')).toBe(body)
+    const inline = await runRepl(tight.agent, echoProgram)
+    expect(runValue(inline).result).toBe(body)
+    expect(textOf(inline.content)).toBe(full)
     // The save happens before the cap check, so the file is a documented
-    // harmless orphan — what matters is that no locator reached the log.
+    // harmless orphan — what matters is that no locator reached the content.
     expect(tight.store?.saves).toHaveLength(1)
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('exceeds maxInlineBytes'))
   })
@@ -457,26 +459,28 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
   it('creates no artifact for empty text or for text exactly at the cap', async () => {
     const { store, events, agent } = await bootPrime({ backend: 'stub', maxInlineBytes: 100 })
 
-    const empty = await runCode(agent, `
+    const empty = await runRepl(agent, `
       const echoed = await tools.echo_text({ text: '' })
       echoed.text.length
     `)
     expect(runValue(empty).result).toBe(0)
 
-    const atCap = await runCode(agent, `
+    // The outer render stays under the cap, so nothing is ever spilled for it.
+    const atCap = await runRepl(agent, `
       const echoed = await tools.echo_text({ text: 'y'.repeat(100) })
       echoed.text.length
     `)
     expect(runValue(atCap).result).toBe(100)
-    expect(dispatchTexts(events, 'echo_text')).toEqual(['', 'y'.repeat(100)])
+    expect(events).toEqual([])
     expect(store?.saves).toEqual([])
 
-    // One byte past the cap is the first size that spills: the boundary is `>`.
-    const overCap = await runCode(agent, `
+    // A result whose RENDER exceeds the cap by one byte is the first size that
+    // spills: the boundary is `>` on the model-facing text.
+    const overCap = await runRepl(agent, `
       const echoed = await tools.echo_text({ text: 'y'.repeat(101) })
-      echoed.text.length
+      echoed.text
     `)
-    expect(runValue(overCap).result).toBe(101)
+    expect(runValue(overCap).result).toBe('y'.repeat(101))
     expect(store?.saves).toHaveLength(1)
   })
 })
@@ -485,21 +489,24 @@ describe('scenario 5: a refusing spill backend', () => {
   it('keeps the tool successful with inline content, an observable warning, and no fake locator', async () => {
     const { context, store, events, agent } = await bootPrime({ backend: 'failing' })
     const warn = vi.spyOn(context.logger, 'warn').mockImplementation(() => {})
-    const expectedText = renderReport({ marker: 'ALPHA', rows: reportRows(300, false) })
+    const expectedRows = reportRows(300, false)
 
-    const execution = await runCode(agent, `
+    const execution = await runRepl(agent, `
       const report = await tools.big_report({ rows: 300, marker: 'ALPHA' })
-      report.rows.length
+      report.rows.join('')
     `)
 
     // A storage failure must never turn a successful call into an error, nor hide content.
     expect(execution.isError).toBe(false)
-    expect(runValue(execution).result).toBe(300)
-    expect(dispatchLogText(events, 'big_report')).toBe(expectedText)
-    expect(dispatchLogText(events, 'big_report')).not.toContain('Full formatted result stored at:')
-    expect(textOf(execution.content)).not.toContain('Full formatted result stored at:')
+    const value = runValue(execution)
+    expect(value.result).toBe(expectedRows.join(''))
+    const content = textOf(execution.content)
+    expect(content).toBe(renderRepl(value))
+    expect(content).toContain('row-0150')
+    expect(content).not.toContain('Full formatted result stored at:')
     // The degradation is distinguishable from a successful spill.
     expect(warn).toHaveBeenCalled()
     expect(store?.saves).toEqual([])
+    expect(events).toEqual([])
   })
 })

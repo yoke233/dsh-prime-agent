@@ -8,48 +8,42 @@ export interface PolicyConfig {
   requireOrchestrationTools: boolean
 }
 
-function orchestrationPolicy(ctx: Context, agent: Agent | undefined, requireTools: boolean): string {
-  const subagentNames = ['subagent', 'subagent_fork'].filter(name => ctx.tools.get(name, agent) !== undefined)
-  const childControlNames = ['list_agents', 'send_message', 'interrupt_agent'].filter(name => ctx.tools.get(name, agent) !== undefined)
-  const jobNames = ['job_output', 'job_list', 'job_kill'].filter(name => ctx.tools.get(name, agent) !== undefined)
-  if (requireTools && agent !== undefined && (subagentNames.length === 0 || !jobNames.includes('job_output'))) {
-    const missing = [subagentNames.length === 0 ? 'subagent or subagent_fork' : '', !jobNames.includes('job_output') ? 'job_output' : '']
-      .filter(Boolean).join(', ')
-    throw new Error(`dsh-prime-agent: RLM orchestration requires visible ${missing}; use a DSH preset that composes delegation and jobs`)
+function missingOrchestrationCapabilities(ctx: Context, agent: Agent): string[] {
+  const missing: string[] = []
+  if (ctx.tools.get('subagent', agent) === undefined && ctx.tools.get('subagent_fork', agent) === undefined) {
+    missing.push('subagent or subagent_fork')
   }
-  const subagents = subagentNames.join(', ') || '(not composed)'
-  const childControls = childControlNames.join(', ') || '(not composed)'
-  const jobs = jobNames.join(', ') || '(not composed)'
-  const rootProgressPolicy = agent !== undefined && ctx.get('agents')?.roots().includes(agent) === true
-    ? '\n- For planned, multi-turn, or multi-child work, give concise user-facing progress at meaningful milestones and before ending a turn while work remains. Lead with outcomes, blockers, and next actions; do not repeat unchanged status or interrupt short work.'
-    : ''
-  return `Prime control-plane policy:
-- Use Code Mode as the control plane. Compose independent reads and tool/subagent calls in one program.
-- Parallelism has three shapes: bare Promise.all only for an atomic group where every result is required; best-effort probes with a per-call catch or Promise.allSettled; side-effecting mutations sequentially, one at a time.
-- For slow or independently completing work, use a managed continuable child or Job: start it, record its id or output location, then continue only independent useful work or end the turn. Do not keep a cell or turn open with setTimeout or shell sleep polling, and do not replace polling with a long blocking await; inspect after a report, completion notice, or later turn.${rootProgressPolicy}
-- Use clear technical prose in the user's language. Prefer short concrete statements and lists, preserve exact names, code, paths, and uncertainty, and follow the user's requested format and tone.
-- Call grep with a TypeScript RegExp literal's .source, for example tools.grep({ pattern: /constructor\\(/.source }).
-- Each run_code call is the next cell in the same live session; ordinary top-level bindings remain available until the Realm restarts.
-- A cell's result is its final expression; do not use a top-level return.
-- Keep large source and result data in durable task files or existing spill artifacts; retain paths, compact indices, and summaries in the Realm, and read only the needed span from a spill locator.
-- The live namespace is not durable. Checkpoint anything that must survive a restart — progress ledgers, collected results — to durable task files at phase boundaries.
-- A failed tool call is a fact, not a transient condition: capture it, report which operation failed and whether a side effect already happened, and do not blindly repeat it. Side effects stand until you undo them explicitly.
-- On a sandbox denial, ask once for the minimum permission covering the same operation, unchanged. If that is refused, stop and report; never switch commands or tools to route around a denial, guard, or approval rejection.
-- After a namespace-restart notice, previous bindings are gone: rebuild from durable checkpoints and the task's own files, and check real external state before compensating for a side effect that may already have happened.
-- Visible delegation tools: ${subagents}. Visible continuable-child controls: ${childControls}. Visible job controls: ${jobs}.
-- For admission-first work, start a continuable child in the background, retain its returned subagent id, and continue useful parent work. Use list_agents for the roster, send_message for a later turn, interrupt_agent to stop only the current child turn, and receive selected conclusions through report or settlement notices. A continuable child is not a Job; never pass its id to job_output.
-- Continual refinement is secondary: update it only for repeated failures, user corrections, or stable reusable routing lessons.
-
-Cross-agent handoff by file:
-- Material travels by file, instructions travel in the prompt. Serialize what the child needs as JSON into one workspace handoff file, converting what JSON cannot carry (functions, Map/Set, class instances) explicitly before you write. A handoff file is not edited after it is written; new data means a new file.
-- The spawn prompt reaches the child verbatim and has no length ceiling: carry the task statement, the handoff file path, and a catalog of that file — one line per key with a summary and its rough size. How to do the work, the constraints, and what to report belong in the prompt; never bury task instructions in a data file.
-- A handoff file is a snapshot of the moment it was written. Later changes on your side do not reach a running child, and the child must not wait for a value to update; write a new file and tell the child its path.
-- Unless explicitly overridden, a child inherits your working directory and composes the parent preset; child-level tool restrictions may narrow that catalog. It reads from the file only the keys its current decision needs. Its own output goes to a result file.
-- The return trip is symmetric: the child's report is a conclusion summary plus the result file path. A foreground subagent's tool result is truncated past 8192 characters while report bodies and workspace files are not, so large material must travel by file and the report must carry only conclusions and paths.
-- Handoff and result files are ordinary workspace files: clean them up once no child needs them.`
+  for (const name of ['list_agents', 'send_message', 'interrupt_agent', 'job_output', 'job_list', 'job_kill']) {
+    if (ctx.tools.get(name, agent) === undefined) missing.push(name)
+  }
+  return missing
 }
 
-/** Register the Prime control-plane policy prompt section. */
+function orchestrationPolicy(ctx: Context, agent: Agent | undefined, requireTools: boolean): string {
+  if (requireTools && agent !== undefined) {
+    const missing = missingOrchestrationCapabilities(ctx, agent)
+    if (missing.length > 0) {
+      throw new Error(`dsh-prime-agent: REPL orchestration requires host capabilities: ${missing.join(', ')}`)
+    }
+  }
+
+  const rootProgressPolicy = agent !== undefined && ctx.get('agents')?.roots().includes(agent) === true
+    ? '\n- For planned, multi-turn, or multi-agent work, give concise progress updates at meaningful milestones and before ending a turn while work remains.'
+    : ''
+
+  return `Orchestration guidance:
+- Use the preloaded tools, agents, and jobs APIs described by the generated declarations. Keep a simple action simple; introduce loops, helpers, parallelism, agents, or jobs only when the task benefits.
+- Assign intermediate results you will reuse.
+- Parallelize independent read-only work. Run dependent steps in order, and serialize side-effecting mutations unless the underlying operation explicitly supports safe concurrency.
+- For slow or independently completing work, start an agent or job, retain its handle, continue only independent useful work, and inspect it after a report, completion notice, or later turn. Do not sleep or busy-poll.
+- Agent handles and job ids are different. Use agents for continuable conversations and jobs for one-shot background work.
+- Small, self-contained agent context belongs directly in its prompt. Use files for large material, structured snapshots, binary data, or information that must survive a restart.
+- The live session is not durable. Checkpoint irreplaceable progress and large source data to files, then keep only useful locators and summaries live.
+- A failed call is a real outcome: determine whether a side effect happened before retrying or compensating. Never route around a denial or approval rejection.
+- After a restart notice, rebuild from files and verify external state before resuming mutations.${rootProgressPolicy}`
+}
+
+/** Register concise guidance for the persistent REPL. */
 export function registerPolicy(ctx: Context, config: PolicyConfig): void {
   ctx.systemPrompt.section({
     name: 'prime-agent:rlm-policy',

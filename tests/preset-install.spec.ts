@@ -125,7 +125,7 @@ describe('installPrimePreset', () => {
 })
 
 describe('packaged Prime preset composition', () => {
-  it('parses in the loader entry-list dialect and carries the Prime and Code Mode rows', async () => {
+  it('parses in the loader entry-list dialect and carries the Prime REPL row', async () => {
     const text = await readFile(join(packaged, 'agent.cordis.yml'), 'utf8')
     // The dialect discovery itself uses: `!!js` scalars survive as expression
     // nodes rather than failing the parse.
@@ -143,11 +143,11 @@ describe('packaged Prime preset composition', () => {
     const prime = rows.find(row => row.id === 'prime-agent')
     expect(prime?.name).toBe('dsh-prime-agent')
 
-    // The preset must still present itself as Code Mode: the plugin's
-    // `requireCodeMode` invariant fails assembly for any other presentation.
-    const presentation = rows.find(row => row.id === 'tool-presentation')
-    expect(presentation?.name).toBe('@deepseek-ai/dsh-agent-tool-presentation')
-    expect(presentation?.config?.mode).toBe('code')
+    // The sole model-visible transport is the plugin's own `repl`: the preset
+    // must not carry the old Code Mode presentation row, and the bounded
+    // projection policy row stays in the composition.
+    expect(rows.find(row => row.id === 'tool-presentation')).toBeUndefined()
+    expect(rows.find(row => row.id === 'prime-spill-policy')?.name).toBe('@deepseek-ai/dsh-spill-policy')
   })
 
   it('derives stateDirectory from a `!!js` harness-home expression', async () => {

@@ -3,6 +3,6 @@ import type { Context } from '@deepseek-ai/cordis';
 export interface PolicyConfig {
     requireOrchestrationTools: boolean;
 }
-/** Register the Prime control-plane policy prompt section. */
+/** Register concise guidance for the persistent REPL. */
 export declare function registerPolicy(ctx: Context, config: PolicyConfig): void;
 //# sourceMappingURL=policy.d.ts.map

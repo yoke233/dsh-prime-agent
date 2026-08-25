@@ -10,12 +10,6 @@
  */
 import type { CodeJsonValue, CodeRunFailure, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
 /**
- * Binding member hidden from every program lease, whatever namespace declares
- * it. The realm handshake tool is a runtime bootstrap call, never a member the
- * model's program may reach through a persistent `tools` proxy.
- */
-export declare const HIDDEN_BINDING_MEMBER = "prime_realm_identity";
-/**
  * Smallest output cap that still fits the fixed overflow diagnostic, so the
  * hard cap never has to truncate its own failure message.
  */
@@ -58,11 +52,45 @@ export interface RealmCompletionHistoryLimits {
     maxCompletionHistoryEntryBytes: number;
 }
 /**
+ * Per-realm ceilings on the runtime-owned history of NON-JSON live values
+ * (plan `docs/plan/upstream-python-node-gap-remediation.zh.md` §5 WP-C).
+ *
+ * This is an INDEPENDENT budget: a flood of Map/function/bigint/cyclic
+ * completions may neither evict lossless-JSON slots nor be evicted by them.
+ * Each class is charged against its own entries/nodes/bytes ceilings and
+ * evicted FIFO within the class.
+ */
+export interface RealmCompletionOpaqueLimits {
+    /** Retained NON-JSON completions one realm generation may hold at once. */
+    maxCompletionOpaqueEntries: number;
+    /**
+     * Combined capture-walk charge across every retained opaque completion.
+     *
+     * An opaque value is never serialized and its graph is deliberately never
+     * walked for measurement (walking fires user getters), so the charge is what
+     * the CLASSIFICATION walk accounted for before it threw: a lower bound on
+     * the explored part of the value, bounded by the capture ceiling. Like the
+     * JSON-side byte accounting it is an admission approximation, not a heap
+     * guarantee; the worker's maxOldGenerationSizeMb stays the only hard
+     * heap boundary.
+     */
+    maxCompletionOpaqueEstimatedBytes: number;
+    /** Combined capture-walk node charge across every retained opaque completion. */
+    maxCompletionOpaqueNodes: number;
+}
+/**
  * The Phase 0 benchmark's decided defaults
  * (`docs/plan/phase0-bench-results.zh.md` §4.1). Restated in `realm-worker.ts`,
  * which cannot import this module at runtime.
  */
 export declare const DEFAULT_COMPLETION_HISTORY_LIMITS: RealmCompletionHistoryLimits;
+/**
+ * The opaque store's decided defaults: a quarter of the JSON store's totals,
+ * because opaque charges are classification-walk lower bounds and the same
+ * absolute numbers would be a looser guarantee for values whose graphs are
+ * never measured.
+ */
+export declare const DEFAULT_COMPLETION_OPAQUE_LIMITS: RealmCompletionOpaqueLimits;
 /**
  * Per-realm ceilings on what a completion may put in FRONT OF THE MODEL, which
  * is a different budget from what the realm may retain.
@@ -118,6 +146,8 @@ export declare function resolveCompletionHistoryLimits(overrides: Partial<RealmC
  * completion projected is free to set the first below the second.
  */
 export declare function resolveCompletionProjectionLimits(overrides: Partial<RealmCompletionProjectionLimits> | undefined): RealmCompletionProjectionLimits;
+/** Fill in whatever a caller left blank, then reject anything unusable. */
+export declare function resolveCompletionOpaqueLimits(overrides: Partial<RealmCompletionOpaqueLimits> | undefined): RealmCompletionOpaqueLimits;
 /**
  * What one run may spend on the completion history.
  *
@@ -135,6 +165,7 @@ export interface RealmCompletionPlan {
     id: number;
     limits: RealmCompletionHistoryLimits;
     projection: RealmCompletionProjectionLimits;
+    opaque: RealmCompletionOpaqueLimits;
 }
 /**
  * The bounded reference a large completion crosses as, instead of its value.
@@ -156,6 +187,13 @@ export interface RealmCompletionEnvelope {
     type?: string;
     /** Exact serialized bytes, present only when the capture walk measured them. */
     serializedBytesAtCapture?: number;
+    /**
+     * Set only on the fixed envelope of a NON-JSON completion: the value never
+     * crossed the wire in any form, `$out(id)` is the only way back to it, and
+     * nothing about its contents was read to render the envelope. Never set on
+     * a projection of a lossless-JSON value.
+     */
+    opaque?: true;
     /** The bounded projection of the value; absent on a minimal reference. */
     projection?: CodeJsonValue;
     /** Why the value was not retained, present only alongside `retained: false`. */
@@ -283,6 +321,10 @@ export interface RealmRunMetrics {
     rejected?: boolean;
     /** Slots evicted to make room for this run's completion. */
     evicted?: number;
+    /** Opaque slots the history held when the run settled, a level not a delta. */
+    historyOpaqueEntries?: number;
+    /** Opaque capture-bytes charge the history held when the run settled, a level. */
+    historyOpaqueBytes?: number;
     /** Handles this run asked for and did not get, because they had expired. */
     expired?: number;
     /** History accesses refused for running outside their own cell. */

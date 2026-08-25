@@ -9,13 +9,12 @@ export interface Config {
     stateDirectory: string;
     refineToolName?: string;
     allowGlobalRefinement?: boolean;
-    requireCodeMode?: boolean;
     requireOrchestrationTools?: boolean;
     continual?: Partial<HarnessLimits>;
 }
 /** Schemastery configuration for the control plane and secondary learning layer. */
 export declare const Config: z<Config>;
-/** Register the control-plane policy, learning layer, and strict Code Mode assembly invariant. */
+/** Register the sole model-visible REPL and its hidden host capabilities. */
 export declare function apply(ctx: Context, config: Config): void;
 export { HarnessStore, renderHarnessState } from './continual/store.js';
 export type { HarnessChange, HarnessEdit, HarnessEntry, HarnessEntryKind, HarnessReference, HarnessScope, HarnessState, HarnessTransaction, } from './continual/types.js';

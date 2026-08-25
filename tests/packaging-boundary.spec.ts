@@ -25,10 +25,7 @@ describe('Prime packaging boundary', () => {
       peerDependencies?: Record<string, string>
       peerDependenciesMeta?: Record<string, unknown>
     }
-    const runtimePackages = [
-      '@deepseek-ai/dsh-code-runtime',
-      '@deepseek-ai/dsh-code-runtime-worker-thread',
-    ]
+    const runtimePackages = ['@deepseek-ai/dsh-code-runtime']
 
     for (const name of runtimePackages) {
       expect(manifest.dependencies?.[name]).toBeTypeOf('string')
@@ -55,25 +52,15 @@ describe('Prime packaging boundary', () => {
     })
   })
 
-  it('replaces only the code runtime', async () => {
+  it('adds its host service without replacing the official code runtime', async () => {
     const patches = await loadDialect('../cordis.patch.yml')
-    expect(patches).toHaveLength(2)
+    expect(patches).toHaveLength(1)
 
-    const [retireRuntime, insertRuntime] = patches
-    // The name is a patch-layer assertion: a deployment that replaced the
-    // official row keeps its own provider instead of having it disabled.
-    expect(retireRuntime).toEqual({
-      id: 'code-runtime',
-      name: '@deepseek-ai/dsh-code-runtime-worker-thread',
-      disabled: true,
-    })
-
+    const [insertRuntime] = patches
     expect(insertRuntime?.insert).toHaveLength(1)
     const runtime = insertRuntime?.insert?.[0]
     expect(runtime?.id).toBe('prime-code-runtime')
     expect(runtime?.name).toBe('dsh-prime-agent/runtime')
-    // Budgets stay unset so the official schema keeps supplying its defaults
-    // for the privately mounted fallback.
     expect(Object.keys(runtime?.config ?? {})).toEqual(['stateDirectory'])
   })
 
@@ -109,8 +96,7 @@ describe('Prime packaging boundary', () => {
     const runtimeExpr = stateDirectoryExpr(runtime)
     const presetExpr = stateDirectoryExpr(preset)
     expect(runtimeExpr).toBe("dshHomePath('prime-agent')")
-    // Both sides open the same `realm-identity/hmac.key`; a textual divergence
-    // here is a handshake that always fails closed at runtime.
+    // Both services resolve the same trusted Session-to-Realm mapping.
     expect(presetExpr).toBe(runtimeExpr)
   })
 })

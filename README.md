@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="dsh-prime-agent —— 为 DeepSeek Harness Code Mode 提供持久 TypeScript Realm：普通顶层变量在下一次 run_code 中仍然可用">
+  <img src="./assets/readme/hero.svg" width="100%" alt="dsh-prime-agent —— 为 DeepSeek Harness 提供唯一模型可见的持久 TypeScript REPL：普通顶层变量在下一次 repl cell 中仍然可用">
 </p>
 
 <p align="center">
@@ -8,16 +8,18 @@
   <a href="docs/upstream-sync.zh.md">上游同步手册</a>
 </p>
 
-`dsh-prime-agent` 是面向 DeepSeek Harness 的 RLM-first 控制面。选中 Prime preset 的会话，其 `run_code` 程序运行在一个经认证的长期 TypeScript Realm 里：上一 cell 声明的普通变量、函数和对象，下一 cell 可以直接使用。
+`dsh-prime-agent` 是面向 DeepSeek Harness 的 RLM-first 控制面。选中 Prime preset 的会话只有一个模型可见工具 `repl`：它的唯一参数是 `{ code }`，执行一个持久 TypeScript REPL cell。上一 cell 声明的普通变量、函数和对象，下一 cell 可以直接使用；DSH 的其他工具不进入模型 schema，而是作为 `tools`、`agents`、`jobs` 绑定预加载进 cell。
 
 ```ts
-// 第 1 次 run_code
+// 第 1 次 repl
+repl({ code: `
 const lookup = new Map(records.map(item => [item.id, item]))
 const review = async (id) => tools.review_item({ item: lookup.get(id) })
 lookup.size
+` })
 
-// 第 2 次 run_code —— 同一会话的新调用
-await review('a') // Map 和函数都还活着
+// 第 2 次 repl —— 同一会话的新调用
+repl({ code: `await review('a') // Map 和函数都还活着` })
 ```
 
 普通会话完全不受影响,继续使用官方 one-shot 语义。
@@ -25,19 +27,21 @@ await review('a') // Map 和函数都还活着
 ## 工作原理
 
 <p align="center">
-  <img src="./assets/readme/architecture.svg" width="100%" alt="混合运行时路由:run_code 经 DSH Code Mode bridge 进入 PrimeCodeRuntime,握手认证通过的会话路由到持久 Realm Worker,其余请求走官方 one-shot Worker">
+  <img src="./assets/readme/architecture.svg" width="100%" alt="repl {code} 经 Agent scope 用可信 exec.agent.id 解析 Realm identity,host primeRealmRuntime 服务准入持久 Realm Worker;官方 code-runtime row 未改动,非 Prime 会话继续官方 one-shot">
 </p>
 
-- 插件注册固定名称的 `prime_realm_identity` bootstrap binding。`PrimeCodeRuntime` 在执行程序前以 32 字节 CSPRNG challenge 调用它,验证带 session binding 的 HMAC proof 后,才把请求路由到该会话的持久 Realm Worker。
-- 没有该 binding 的请求原样委托官方 one-shot Worker;binding 存在但握手失败时明确报错,绝不静默降级。
-- Realm 内的工具经跨 run 稳定的 Proxy 与 per-run binding lease 调用:schema、审批、沙箱、日志、并发和取消仍由 DSH 执行,run 结束立即撤销授权。
+- 模型 catalog 只含 `repl`。其他 DSH 工具不直接可见:prompt assembly 把 tools 列表过滤到只剩 `repl`,直接调用其他工具会被 guard 拒绝;这些能力作为 cell 内预加载绑定出现——`tools.*` 是原始 typed bindings,`agents.*`(spawn/fork/list/send/interrupt)与 `jobs.*`(list/output/kill)是 continuable child 与后台任务的薄适配。
+- 路由信任 Agent 执行上下文。`repl` 要求拥有 Agent 会话:插件用可信 `exec.agent.id` 从共享 `realm-identity` 存储解析该会话稳定的不透明 Realm id,再把程序、本轮租约绑定与取消信号交给 host 侧的 `ctx.primeRealmRuntime.run(...)`。没有握手、没有模型可见的身份工具;缺少可信执行上下文或无法解析 Realm id 时明确失败,绝不降级。
+- Host 服务与官方运行时并存。`cordis.patch.yml` 只是把 `dsh-prime-agent/runtime` 作为新 row 插入,官方 `code-runtime` row 原样保留;非 Prime 会话继续使用官方 one-shot 语义,不存在 fallback。
+- Realm 内的绑定经跨 run 稳定的 Proxy 与 per-run binding lease 调用:schema、审批、沙箱、日志、并发和取消仍由 DSH 执行,run 结束立即撤销授权。
 - 多个 TUI 进程可共享 Prime 持久状态并同时运行不同 Session；同一 Session 的 live Realm 同时只允许一个进程持有，owner 退出后另一进程以空 namespace 接管。
-- Prime 不封装搜索接口：直接调用 DSH 的 `grep`，并在 Code Mode 中把 TypeScript 正则字面量的 `.source` 作为 `pattern`，避免字符串二次转义。
-- Profile 显式安装的 DSH Host MCP client 把 server tools 注册进统一 catalog，Code Mode 自动生成 bindings；Prime 不复制 Python kernel-owned MCP runtime。
-- Prime preset 为纯文本工具 projection 与 `tool/code-dispatch` 日志配置 12KB best-effort spill 阈值；backend 可用且 locator notice 能容纳时，完整 canonical value 留在 Node Realm，超出部分写入 artifact 并按需读取。保存失败时保留完整 inline 结果并告警，避免把成功结果静默隐藏。
-- Realm 是 live-only 的：abort、timeout、OOM 会 hard-kill Worker 并丢失 namespace，下一次真正执行时会明确提示之前的 bindings 已丢失。跨重启的检查点由程序显式写入持久任务文件。
+- Prime 不封装搜索接口：直接调用 DSH 的 `grep`，并在 repl 程序内把 TypeScript 正则字面量的 `.source` 作为 `pattern`，避免字符串二次转义。
+- Profile 显式安装的 DSH Host MCP client 把 server tools 注册进统一 catalog，repl 单元自动获得对应 `tools.*` 绑定；Prime 不复制 Python kernel-owned MCP runtime。
+- Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值；`repl` 的 canonical completion 留在 Realm completion history 中，外层结果超过展示预算时由 DSH 写入 artifact 并返回 locator。保存失败时保留完整 inline 成功结果并告警，不伪造 locator。
+- 完成值由 runtime 自动保留在 generation-local 的 completion history 中:`$_` 取最近一个结果,`$out(N)` 按 handle 取回原值;超预算按 FIFO 淘汰,hard kill 后连同 namespace 一起丢失。
+- Realm 是 live-only 的：abort、timeout、OOM 会 hard-kill Worker 并丢失 namespace，下一次真正执行时会明确提示之前的 bindings 与保留结果已丢失。跨重启的检查点由程序显式写入持久任务文件。
 
-完整身份协议、namespace 生命周期、Agent 编排与学习层边界见 [当前架构](docs/architecture.md)。
+完整身份路由、namespace 生命周期、Agent 编排与学习层边界见 [当前架构](docs/architecture.md)。
 
 ## 三层数据
 
@@ -46,7 +50,7 @@ await review('a') // Map 和函数都还活着
 | Realm live namespace | 普通顶层变量、函数、对象、Map 和索引 | 同一 Worker 内的 cell 间保留；hard kill 后丢失 |
 | Completion history | runtime 自动保留的 cell 结果，经 `$_` 与 `$out(N)` 访问 | 同上；超预算按 FIFO 淘汰，失效 handle 抛 `CompletionExpiredError` |
 | 持久任务文件 | 大型输入、重要结果与跨重启检查点 | 由文件系统承载,进程重启后仍可恢复 |
-| `prime_refine` | 稳定路由与行为经验 | 证据化、乐观并发、事务历史和安全回滚 |
+| `refine` | 稳定路由与行为经验 | 证据化、乐观并发、事务历史和安全回滚 |
 
 ## 安装与启用
 
@@ -56,13 +60,13 @@ npm run check
 dsh plugin --profile web add ./dsh-prime-agent
 ```
 
-`dsh plugin add` 即提供全部内容:随包 bundle patch 把宿主 `code-runtime` provider 替换为 `dsh-prime-agent/runtime`;随包 Prime preset 在启动时落位到 `$DSH_HOME/.agent-presets`(仅缺失时)。启用 Prime 模式只是为某个会话选中 Prime preset;默认 preset 与其他 preset 保持官方 one-shot 语义。落位后的 preset 不会被覆盖,删除 `$DSH_HOME/.agent-presets/prime` 并重启即可重新落位当前快照。
+`dsh plugin add` 即提供全部内容:随包 bundle patch 在官方 `code-runtime` row 旁纯插入 `dsh-prime-agent/runtime` host row(不替换、不停用官方运行时);随包 Prime preset 在启动时落位到 `$DSH_HOME/.agent-presets`(仅缺失时)。启用 Prime 模式只是为某个会话选中 Prime preset;默认 preset 与其他 preset 保持官方 one-shot 语义。落位后的 preset 不会被覆盖,删除 `$DSH_HOME/.agent-presets/prime` 并重启即可重新落位当前快照。
 
 Host runtime 会监控启动它的直接父进程。Windows 父 shell 被强制终止或 macOS/POSIX 子进程被重新托管时,插件会释放整个 Cordis tree、Realm Worker 与该进程持有的 Realm leases,随后退出;根级 dispose 未在 5 秒内结算时强制非零退出。它面向前台 `dsh` 生命周期,不支持把宿主有意脱离父进程作为 daemon 运行。
 
 ### TUI 运行
 
-Prime 包直接携带官方 Code Runtime 依赖，并由 hybrid runtime 私有挂载 one-shot fallback；TUI Profile 不需要额外的支持 bundle。若 Profile 已有公开的官方 `code-runtime` row，Prime patch 会先将其停用；TUI 没有该 row 时则直接插入 `prime-code-runtime`，不会补建第二个公开 provider。
+Prime 的 `cordis.patch.yml` 是纯插入：官方 `code-runtime` row 原样保留，新增的 `prime-code-runtime` host row 注册 `primeRealmRuntime` 服务、监控父进程并落位 preset。TUI Profile 不需要额外的支持 bundle，也不会停用或替换官方 provider。
 
 ```powershell
 npm pack
@@ -205,7 +209,7 @@ Prime preset 的 `subagent` 与 `subagent_fork` 默认创建 continuable child�
 
 Jobs 是独立的后台任务生命周期。后台 shell 或 one-shot background provider 返回 Job id，使用 `job_output`、`job_list`、`job_kill` 管理，不能与 continuable child id 混用。大材料和大结果通过共享工作区文件交接，prompt/report 只携带任务、摘要与路径。
 
-## prime_refine
+## refine
 
 持续学习刻意放在次要位置。不要存研究资料、任务状态、工具输出或大上下文;只有出现重复失败、用户纠正或稳定可复用策略后才使用它。
 
@@ -221,17 +225,16 @@ Jobs 是独立的后台任务生命周期。后台 shell 或 one-shot background
 
 | 选项 | 默认值 | 含义 |
 | --- | --- | --- |
-| `refineToolName` | `prime_refine` | 持续学习工具名 |
+| `refineToolName` | `refine` | 持续学习工具名（可配置） |
 | `allowGlobalRefinement` | `false` | 允许模型访问 global 学习状态 |
-| `requireCodeMode` | `true` | 要求 `run_code` 是模型唯一可见工具 |
-| `requireOrchestrationTools` | `true` | 要求具备 Subagent admission 与 `job_output` |
+| `requireOrchestrationTools` | `true` | 要求 Agent catalog 具备 Subagent admission（`subagent`/`subagent_fork`）与 `agents`/`jobs` 控制（`list_agents`、`send_message`、`interrupt_agent`、`job_output`、`job_list`、`job_kill`） |
 | `continual` | 有界默认值 | 学习条目、事务、状态与 prompt 限制 |
 
 `dsh-prime-agent/runtime` 条目另接受官方预算字段（`computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，同名逐字透传）、realm pool 治理项（`maxActiveRealms`、`maxIdleMs`、`maxHostCallsPerRun`、`maxParallelHostCallsPerRun`），以及 completion history 与投影上限（`maxCompletionHistoryEntries`、`maxCompletionHistoryEstimatedBytes`、`maxCompletionHistoryNodes`、`maxCompletionHistoryEntryBytes`、`maxCompletionFullBytes`、`maxCompletionProjectionBytes`）。
 
 ## 存储与安全
 
-- 插件状态位于 `<stateDirectory>/continual`(学习层)与 `<stateDirectory>/realm-identity`(握手密钥、Session identity 和按 Realm 的进程 leases);Session 文件名使用 id 的 keyed hash。
+- 插件状态位于 `<stateDirectory>/continual`(学习层)与 `<stateDirectory>/realm-identity`(HMAC 密钥、Session 稳定 Realm identity 和按 Realm 的进程 leases);Session 文件名使用 id 的 keyed hash。
 - 状态提交使用跨进程写锁与原子替换;损坏、超限、丢失或 revision 冲突都会明确失败。
 - Host runtime 监控直接父进程;父进程消失后执行有界根级清理,避免孤儿进程继续持有 Realm leases。
 - Continual-learning 条目以 JSON 引用的不可信建议记录进入 prompt,不能覆盖当前 system、user、权限或工具约束。
@@ -239,7 +242,7 @@ Jobs 是独立的后台任务生命周期。后台 shell 或 one-shot background
 
 ## 开发
 
-开发、类型检查和测试统一解析 `package-lock.json` 锁定的 npm 发布包；同级 `../deepseek-harness` checkout 仅用于审阅上游 diff 与 preset 快照，不参与模块解析。宿主提供的 DSH peer range 限制在兼容的 `0.1.x` 系列并标记为 optional，避免重复安装宿主服务；`@deepseek-ai/dsh-code-runtime` 与 Worker Thread backend 是例外，它们由 Prime 包作为生产依赖直接交付，用于私有 one-shot fallback。
+开发、类型检查和测试统一解析 `package-lock.json` 锁定的 npm 发布包；同级 `../deepseek-harness` checkout 仅用于审阅上游 diff 与 preset 快照，不参与模块解析。宿主提供的 DSH peer range 限制在兼容的 `0.1.x` 系列并标记为 optional，避免重复安装宿主服务；`@deepseek-ai/dsh-code-runtime` 是例外，由 Prime 包作为生产依赖直接交付，repl bridge 与 Realm seam 复用其官方 run/binding 类型契约（官方运行时本体仍由宿主提供）。
 
 ```sh
 npm run typecheck

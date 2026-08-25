@@ -251,6 +251,8 @@ History 保存原 completion 的 Realm 内引用，语义接近 IPython `Out`。
 | namespace restart | 用户 bindings 与 `$out` 一并丢失，并由现有 restart notice 报告。 |
 | ordinary Session | 继续官方 one-shot Code Runtime，不出现 `$out`。 |
 
+> **WP-C 修订（2026-02-18）**：上表「非 lossless JSON completion」与「projector 内部失败」两行已被 `docs/plan/upstream-python-node-gap-remediation.zh.md` §5 WP-C 取代——非 lossless 的成功 completion 不再 `invalid-output`：值按独立 opaque 预算（entries/nodes/bytes，默认 JSON 存储的 1/4）generation-local 保留，模型收到固定 envelope（`$out`/`use`/`retained`/`type`/`opaque`/`truncated`），`$_`/`$out(id)` 返回原始对象身份；分类走查的抛错点即分类结论（含抛错 getter、抛错 proxy trap、revoked proxy、RangeError），不调用用户 toJSON/toString/inspect hook，不新增二次遍历。opaque 与 lossless-JSON 存储共享 `$out`/`$_` 命名空间与全局单调句柄，预算与 FIFO 淘汰各自独立。`invalid-output` 完成值路径自此不再可达（`undefined` 根 completion 仍无值无槽）。受影响契约测试按新语义显式改写，`tests/completion-opaque.spec.ts` 新增专项覆盖。
+
 ## 9. 分阶段实施
 
 ### Phase 0：契约测试与基准

@@ -264,18 +264,6 @@ describe('binding leases', () => {
     expect(second.value).toContain('unknown binding')
   })
 
-  it('hides the realm handshake bootstrap from the program lease', async () => {
-    const realm = createRealm()
-    const result = await realm.run({
-      program: '({ member: typeof globalThis.tools.prime_realm_identity, present: "prime_realm_identity" in globalThis.tools, keys: Object.keys(globalThis.tools) })',
-      bindings: [tools({
-        echo: async args => args,
-        prime_realm_identity: async () => ({ token: 'must-not-be-reachable' }),
-      })],
-    })
-    expect(result.value).toEqual({ member: 'undefined', present: false, keys: ['echo'] })
-  })
-
   it('routes a binding rejection through the declared error class', async () => {
     const realm = createRealm()
     const namespace: CodeBindingNamespace = {
@@ -590,39 +578,43 @@ describe('budgets and completion', () => {
     expect((await realm.run({ program: 'keptAfterOversizedCompletion', bindings: [] })).value).toBe('v1')
   })
 
-  it('rejects a non-lossless completion without rolling back the cell', async () => {
+  it('retains a non-lossless completion as opaque without losing the cell', async () => {
+    // REWRITTEN BY WP-C: a non-lossless completion no longer fails the cell —
+    // it is retained under the opaque budgets and answered with the fixed
+    // envelope, and the namespace keeps every declaration the program made.
     const realm = createRealm()
     const result = await realm.run({
-      program: 'const keptAfterInvalidCompletion = "v1";\n({ size: NaN })',
+      program: 'const keptAfterOpaqueCompletion = "v1";\n({ size: NaN })',
       bindings: [],
     })
-    expect(result.error).toEqual({ kind: 'invalid-output', message: 'program completion must be lossless JSON' })
+    expect(result.error).toBeUndefined()
+    expect(result.value).toMatchObject({ retained: true, type: 'object', opaque: true, truncated: true })
     expect(realm.generation).toBe(1)
-    expect((await realm.run({ program: 'keptAfterInvalidCompletion', bindings: [] })).value).toBe('v1')
+    expect((await realm.run({ program: 'keptAfterOpaqueCompletion', bindings: [] })).value).toBe('v1')
   })
 
-  it('accepts an undefined completion and rejects other non-lossless completion shapes', async () => {
+  it('accepts an undefined completion and retains every other non-lossless completion shape', async () => {
+    // REWRITTEN BY WP-C: only `undefined` completes without a result. Every
+    // other non-lossless shape is retained as opaque and answered with the
+    // fixed envelope; none of them cost the realm its heap.
     const realm = createRealm()
     const completionCases = [
-      { program: 'undefined', valid: true },
-      { program: '() => 42', valid: false },
-      { program: 'new Map([["answer", 42]])', valid: false },
+      { program: 'undefined', opaque: false },
+      { program: '() => 42', opaque: true },
+      { program: 'new Map([["answer", 42]])', opaque: true },
       {
         program: 'const cyclicCompletion = {}; cyclicCompletion.self = cyclicCompletion; cyclicCompletion',
-        valid: false,
+        opaque: true,
       },
     ] as const
 
     for (const completionCase of completionCases) {
       const result = await realm.run({ program: completionCase.program, bindings: [] })
-      if (completionCase.valid) {
-        expect(result.error).toBeUndefined()
-        expect(result.value).toBeUndefined()
+      expect(result.error, completionCase.program).toBeUndefined()
+      if (completionCase.opaque) {
+        expect(result.value, completionCase.program).toMatchObject({ retained: true, opaque: true, truncated: true })
       } else {
-        expect(result.error).toEqual({
-          kind: 'invalid-output',
-          message: 'program completion must be lossless JSON',
-        })
+        expect(result.value, completionCase.program).toBeUndefined()
       }
     }
     expect(realm.generation).toBe(1)

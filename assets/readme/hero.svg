@@ -2,25 +2,25 @@
      width="1200" height="360" viewBox="0 0 1200 360"
      role="img" aria-labelledby="title desc">
   <title id="title">dsh-prime-agent</title>
-  <desc id="desc">为 DeepSeek Harness Code Mode 提供持久 TypeScript Realm：普通顶层变量和函数在下一次 run_code 中仍然可用。</desc>
+  <desc id="desc">为 DeepSeek Harness 提供唯一模型可见的持久 TypeScript REPL：普通顶层变量和函数在下一次 repl cell 中仍然可用。</desc>
 
   <rect width="1200" height="360" rx="24" fill="#F7F5EF"/>
   <rect x="0.75" y="0.75" width="1198.5" height="358.5" rx="23.25" fill="none" stroke="#E2DCCB" stroke-width="1.5"/>
 
   <g id="title-block" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
-    <text x="64" y="88" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" letter-spacing="3" fill="#8A8FA0">DEEPSEEK HARNESS &#183; CODE MODE PLUGIN</text>
+    <text x="64" y="88" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" letter-spacing="3" fill="#8A8FA0">DEEPSEEK HARNESS &#183; RLM CONTROL PLANE</text>
     <text x="62" y="152" font-size="62" font-weight="700" fill="#20262E">dsh-prime-agent</text>
     <text x="64" y="200" font-size="22" fill="#4A5262">为 Agent 会话提供持久 TypeScript Realm ——</text>
-    <text x="64" y="234" font-size="22" fill="#4A5262">普通顶层变量与函数跨 <tspan font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#2F6FD6">run_code</tspan> cell 存活。</text>
+    <text x="64" y="234" font-size="22" fill="#4A5262">普通顶层变量与函数跨 <tspan font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#2F6FD6">repl</tspan> cell 存活。</text>
     <rect x="64" y="282" width="10" height="10" fill="#C97B22"/>
-    <text x="86" y="292" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" fill="#8A8FA0">TypeScript &#183; 混合运行时 &#183; 一次性 preset 不受影响 &#183; MIT</text>
+    <text x="86" y="292" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" fill="#8A8FA0">TypeScript &#183; 唯一 repl 工具 &#183; 官方 one-shot 不受影响 &#183; MIT</text>
   </g>
 
   <g id="project-proof" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
     <!-- run 1 cell -->
     <rect x="700" y="52" width="448" height="104" rx="12" fill="#FFFFFF" stroke="#DDD7C6" stroke-width="1.5"/>
     <circle cx="722" cy="80" r="4" fill="#2F6FD6"/>
-    <text x="736" y="86" font-size="18" fill="#8A8FA0">run_code &#183; run 1</text>
+    <text x="736" y="86" font-size="18" fill="#8A8FA0">repl &#183; run 1</text>
     <text x="722" y="118" font-size="18" fill="#33404F"><tspan fill="#C97B22">const</tspan> lookup = new Map(records)</text>
     <text x="722" y="144" font-size="18" fill="#33404F"><tspan fill="#C97B22">const</tspan> review = async (id) =&gt; &#8230;</text>
 
@@ -32,7 +32,7 @@
     <!-- run 2 cell -->
     <rect x="700" y="204" width="448" height="104" rx="12" fill="#FFFFFF" stroke="#DDD7C6" stroke-width="1.5"/>
     <circle cx="722" cy="232" r="4" fill="#2F6FD6"/>
-    <text x="736" y="238" font-size="18" fill="#8A8FA0">run_code &#183; run 2</text>
+    <text x="736" y="238" font-size="18" fill="#8A8FA0">repl &#183; run 2</text>
     <text x="722" y="266" font-size="18" fill="#33404F">await <tspan fill="#C97B22">review</tspan>('a')</text>
     <text x="722" y="292" font-size="18" fill="#4E7D4C">// { id: 'a' }</text>
 

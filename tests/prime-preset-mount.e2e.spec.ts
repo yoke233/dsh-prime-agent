@@ -11,7 +11,7 @@ import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import LlmRuntime, { CallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineTool, RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as primeRuntime from '../src/runtime.js'
 
@@ -43,7 +43,7 @@ function completion(execution: ToolExecutionResult): { logs: string[], result?: 
   if (execution.isError) throw new Error(execution.error.message)
   if (!isRecord(execution.value) || !Array.isArray(execution.value.logs)
     || !execution.value.logs.every(log => typeof log === 'string')) {
-    throw new Error('invalid run_code result')
+    throw new Error('invalid repl result')
   }
   return {
     logs: execution.value.logs,
@@ -51,32 +51,40 @@ function completion(execution: ToolExecutionResult): { logs: string[], result?: 
   }
 }
 
-async function runCode(agent: Agent, code: string): Promise<{ logs: string[], result?: unknown }> {
+async function runRepl(agent: Agent, code: string): Promise<{ logs: string[], result?: unknown }> {
   if (ctx === undefined) throw new Error('test context was not created')
   return completion(await ctx.tools.execute({
     callId: CallId(`prime-preset-mount-${++callNumber}`),
-    name: RUN_CODE_NAME,
-    arguments: { code, description: 'Exercise the preset-mounted Prime realm' },
+    name: 'repl',
+    arguments: { code },
     signal: testSignal,
     agent,
   }))
 }
 
-function registerOrchestrationPlaceholder(context: Context, name: 'subagent' | 'job_output'): void {
-  context.tools.register(defineTool({
-    name,
-    description: `Test-only visible ${name} capability required by the packaged Prime policy.`,
-    parameters: {},
-    output: {
-      schema: { type: 'null' },
-      render: () => [{ type: 'text', text: 'unused' }],
-    },
-    execute: async () => null,
-  }))
+/** The full host capability set the packaged Prime policy requires before assembly. */
+const POLICY_REQUIRED_TOOLS = [
+  'subagent', 'list_agents', 'send_message', 'interrupt_agent',
+  'job_output', 'job_list', 'job_kill',
+]
+
+function registerOrchestrationPlaceholders(context: Context): void {
+  for (const name of POLICY_REQUIRED_TOOLS) {
+    context.tools.register(defineTool({
+      name,
+      description: `Test-only visible ${name} capability required by the packaged Prime policy.`,
+      parameters: {},
+      output: {
+        schema: { type: 'null' },
+        render: () => [{ type: 'text', text: 'unused' }],
+      },
+      execute: async () => null,
+    }))
+  }
 }
 
 describe('Prime packaged preset realm rows', () => {
-  it('mounts them for one Agent and supplies the persistent identity binding', async () => {
+  it('mounts them for one Agent and supplies the persistent repl binding', async () => {
     // Keep the temporary composition inside this package scope so Node's
     // ordinary upward lookup resolves the self-reference and explicit dev deps.
     root = await mkdtemp(join(PROJECT_ROOT, '.prime-preset-mount-'))
@@ -85,15 +93,16 @@ describe('Prime packaged preset realm rows', () => {
     const presetDir = join(presetRoot, 'prime')
     await mkdir(presetDir, { recursive: true })
 
-    // Keep the exact shipped realm and presentation rows while excluding the
-    // unrelated filesystem, terminal, delegation, and UI tool rows. Their
+    // Keep the exact shipped `prime-agent` row — the packaged plugin name and
+    // its `!!js dshHomePath(...)` stateDirectory expression — while excluding
+    // the unrelated shell, filesystem, delegation, and UI tool rows. Their
     // composition is covered statically; this E2E targets the preset mount seam.
     const shipped = (await readFile(PACKAGED_COMPOSITION, 'utf8')).replace(/\r\n/g, '\n')
-    const realmRows = shipped.slice(shipped.indexOf('- id: prime-agent\n'))
+    const start = shipped.indexOf('- id: prime-agent\n')
+    if (start < 0) throw new Error('packaged Prime realm row is missing')
+    const end = shipped.indexOf('# ── shell', start)
+    const realmRows = shipped.slice(start, end < 0 ? undefined : end)
       .replace('name: dsh-prime-agent', `name: ${PRIME_AGENT_URL}`)
-    if (!realmRows.includes('- id: tool-presentation\n')) {
-      throw new Error('packaged Prime realm rows are missing')
-    }
     await writeFile(join(presetDir, 'agent.cordis.yml'), realmRows)
 
     ctx = new Context()
@@ -113,8 +122,7 @@ describe('Prime packaged preset realm rows', () => {
       roots: [{ path: presetRoot, trust: 'system' }],
       includeUserRoot: false,
     })
-    registerOrchestrationPlaceholder(ctx, 'subagent')
-    registerOrchestrationPlaceholder(ctx, 'job_output')
+    registerOrchestrationPlaceholders(ctx)
 
     const handle = await ctx.agents.create({
       sessionId: SessionId('prime-preset-agent'),
@@ -125,15 +133,15 @@ describe('Prime packaged preset realm rows', () => {
 
     expect(ctx.agentPresets.composedPreset(handle.agent.ctx)).toBe('prime')
     const assembly = await ctx.systemPrompt.assemble({ scope: handle.agent, agent: handle.agent })
-    expect(assembly.tools.map(tool => tool.name)).toEqual([RUN_CODE_NAME])
+    expect(assembly.tools.map(tool => tool.name)).toEqual(['repl'])
 
-    const first = await runCode(
+    const first = await runRepl(
       handle.agent,
       'const presetSentinel = "mounted-prime"; presetSentinel',
     )
     expect(first.result).toBe('mounted-prime')
 
-    const second = await runCode(handle.agent, 'presetSentinel')
+    const second = await runRepl(handle.agent, 'presetSentinel')
     expect(second.result).toBe('mounted-prime')
   })
 })

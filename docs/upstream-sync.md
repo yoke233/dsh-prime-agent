@@ -22,15 +22,15 @@ Synchronize behavioral contracts and architecture, not implementation language o
 
 | Prime Agent source concept | DSH adapter counterpart | Sync policy |
 | --- | --- | --- |
-| Persistent IPython control environment | Code Mode + Persistent TypeScript Realm | Use IPython only as a behavioral reference; do not adopt its runtime stack or plan it as a backend |
+| Persistent IPython control environment | The sole `repl` tool + Persistent TypeScript Realm | Use IPython only as a behavioral reference; do not adopt its runtime stack or plan it as a backend |
 | Python variables and files as external context | Realm live namespace + workspace handoff/result files | Adapt retrieval, budgeting, snapshot handoff, and recovery behavior |
 | `rlm()` admission handle | DSH continuable Subagent id | Preserve admission-first semantics through inbox acceptance and Session persistence |
 | `agent_message` replies and family roster | `report`, `send_message`, `list_agents`, and DSH Agent/Subagent services | Reuse DSH direct-parent authority and inboxes; do not invent a second message bus |
 | `rlm.list_subagents()` / `delete_subagent()` | `list_agents` / no current delete | Reuse the existing catalog and authority checks; never present interrupt as delete |
-| Continual Harness | `prime_refine` | Adapt evidence, scope, concurrency, and rollback rules |
+| Continual Harness | `refine` | Adapt evidence, scope, concurrency, and rollback rules |
 | Auto-refine and refine review | Not currently adapted | Re-review the upstream contract before implementation; do not infer it from a local roadmap label |
 | Goals, compaction, heartbeat, daemon lifecycle | Existing DSH Goal, Compaction, Jobs, Schedule, and Session capabilities | Compose; do not duplicate |
-| Python/kernel-owned MCP programs | DSH Host MCP tool registry + Code Mode bindings | Reuse Host connection, authentication, tool-generation, and cleanup ownership; do not create a second MCP runtime inside the Realm |
+| Python/kernel-owned MCP programs | DSH Host MCP tool registry + repl cell bindings | Reuse Host connection, authentication, tool-generation, and cleanup ownership; do not create a second MCP runtime inside the Realm |
 | TUI, ACP, providers, billing, installer | Outside this plugin | Ignore unless they change an RLM-visible contract |
 
 The compatibility target is the user's experience and safety invariant, not API name parity.
@@ -84,10 +84,10 @@ After a synchronization pass:
 
 1. Update `docs/prime-agent-learnings.md` when the mental model changed.
 2. Update `docs/architecture.md`, README, and tool policy when the public behavior changed.
-3. Diff the packaged Prime preset (`agent-presets/prime/`, once it ships) against the upstream shipped `code` preset and port composition changes; it is a full copy because DSH has no preset inheritance.
+3. Review the packaged Prime preset (`agent-presets/prime/`) against the upstream shipped `code` preset and port model-facing changes that still apply; the Prime preset is an independent agent-plane composition, not a full snapshot copy of the shipped preset.
 4. Add a regression test for every adopted or adapted contract.
 5. Run `npm run check`.
-6. Run the real DSH composition test covering Code Mode, Subagent, and Jobs.
+6. Run the real DSH composition test covering repl, Subagent, and Jobs.
 7. Review quotas, authority, cancellation, durability, replay visibility, and failure behavior.
 8. Review the final diff for accidental Prime implementation coupling.
 9. Update `upstream-baseline.json` to the exact reviewed commit and date.
@@ -97,8 +97,8 @@ After a synchronization pass:
 | Reviewed baseline | Upstream change | Decision | Adapter result |
 | --- | --- | --- | --- |
 | `7787f074` | Admission-first `rlm()`, explicit child reporting, recoverable child handles | Adapt | A continuable Subagent returns a durable child id; DSH Session owns recovery and the child reports explicitly |
-| `7787f074` | Persistent IPython as the only model-facing control plane | Adapt | Code Mode is the sole surface; an authenticated `prime_realm_identity` handshake routes Prime sessions into a Persistent TypeScript Realm while ordinary sessions retain the official one-shot runtime |
-| `7787f074` | Local/global Continual Harness with refine/rollback | Adapt | `prime_refine` is secondary, evidence-gated, optimistic, bounded, and conflict-safe |
+| `7787f074` | Persistent IPython as the only model-facing control plane | Adapt | The `repl` tool is the sole surface; the agent scope resolves each session's Realm identity from the trusted `exec.agent.id`, and the host `primeRealmRuntime` service admits Prime sessions into a Persistent TypeScript Realm while ordinary sessions retain the official one-shot runtime |
+| `7787f074` | Local/global Continual Harness with refine/rollback | Adapt | `refine` is secondary, evidence-gated, optimistic, bounded, and conflict-safe |
 | `7787f074` | Host owns agent lifecycle, messages, goals, and cancellation | Adopt | The plugin composes DSH services and creates no worker registry or second Agent Loop |
 | `7787f074` | Automatic refinement enabled by default | Defer | Requires explicit proposal/review/outcome design before model-authored automation |
 | `aacf04b4` | Nonblocking long-work loops, parallel independent workers, and proactive root progress | Adapt | Policy uses continuable children or Jobs, retains ids/output locations, forbids sleep polling and long blocking awaits, and gives milestone-progress guidance only to user-facing roots |
@@ -106,17 +106,26 @@ After a synchronization pass:
 | `aacf04b4` | Per-variable IPython snapshot limits and compaction-time oversized-state pruning | Adapt | The TypeScript Realm has no heap snapshots or compaction GC; large material uses task files, projections use a 12KB best-effort spill threshold, compact indices/summaries remain live, and user bindings are never deleted implicitly |
 | `aacf04b4` | Resume unfinished work and Goal continuation after automatic compaction | Adopt | DSH Compaction and the Agent Loop already own continuation and overflow retry; the plugin composes them and injects no second continuation |
 | `aacf04b4` | Daemon-owned family ledger and child deletion/tombstones | Adopt | DSH Agent/Subagent/Session remain family authority; the plugin creates no ledger and never presents interrupt as delete |
-| `aacf04b4` | Generic kernel-owned MCP and ACP MCP programs | Adapt | A profile may register MCP tools through the DSH Host client and Code Mode generates bindings from the unified catalog; Python/kernel and ACP-specific implementations are rejected |
+| `aacf04b4` | Generic kernel-owned MCP and ACP MCP programs | Adapt | A profile may register MCP tools through the DSH Host client and repl cells gain `tools.*` bindings from the unified catalog; Python/kernel and ACP-specific implementations are rejected |
 | `aacf04b4` | Kernel cold-boot, owner-death, and Windows cleanup hardening | Adapt | The Realm reuses Worker generation fencing, parent-process monitoring, quiescent disposal, and cross-process leases; Jupyter, ZMQ, forkserver, and named-pipe details are not ported |
+
+## Local breaking-switch record
+
+This record is not an upstream baseline change; it documents one destructive replacement of the shipped shape in this repository. Review upstream with the current shape in mind and do not regress to the old dual-track design.
+
+- **Replace**: The model-visible entry changed from `run_code` (Code Mode SDK) to the sole `repl` tool; `run_code`, Code Mode SDK assembly, the hybrid route, and the model-visible `prime_realm_identity` handshake were removed. `repl` takes a single `{ code }` argument.
+- **Trusted routing**: Identity no longer passes through the model or a handshake; the agent scope resolves a stable Realm identity from the trusted `exec.agent.id`, and the host `primeRealmRuntime` service admits runs by that id. Missing trusted execution context fails closed.
+- **Coexist**: The official `code-runtime` row is untouched; non-Prime sessions keep the official one-shot semantics with no fallback.
+- **Upgrade note**: Old `run_code` calls, old Code Mode compositions, and old live namespaces do not migrate; there is no alias, feature flag, or silent downgrade, and rollback means reverting the whole version.
 
 ## Semantic gaps to re-check each time
 
 - Prime child answers can inform the parent's active computation. DSH 0.1.1-rc.2 now owns this invariant: the official `tool-subagent-report` defaults to `next-step`, and the continuation manager calls `parent.steer()` so a running parent consumes the report at its nearest step while an idle parent wakes. The manager also owns waking accounting and report-before-settlement FIFO. This plugin composes that capability directly and no longer replaces the report row or maintains a private adapter.
-- Prime's Python heap preserves live objects and functions; the current adapter selects a Persistent TypeScript Realm through an authenticated binding handshake and retains TypeScript live objects inside one Worker generation. IPython remains reference material for behavior and failure semantics, not a product backend.
+- Prime's Python heap preserves live objects and functions; the current adapter selects a Persistent TypeScript Realm through the Realm identity resolved from the trusted `exec.agent.id` and retains TypeScript live objects inside one Worker generation. IPython remains reference material for behavior and failure semantics, not a product backend.
 - Cross-agent context currently uses workspace handoff files. Write-once behavior is a policy convention; there is no separate Capsule store, `share`/`mount`, or file-access grant.
-- `prime_refine` is explicit; it does not yet observe outcomes or propose refinements automatically.
+- `refine` is explicit; it does not yet observe outcomes or propose refinements automatically.
 - Prime can select a reasoning level for one child; DSH 0.1.1-rc.2 currently has no corresponding per-spawn Subagent parameter.
 - Prime compaction removes oversized Python variables that cannot enter a bounded snapshot; DSH compaction does not traverse, snapshot, or prune Realm heap. Spilling bounds model projections and logs only on the best-effort path, preserves inline results on failure, and leaves artifact lifecycle to the DSH store/deployment layer.
-- Prime MCP programs run in Kernel/ACP runtimes; the DSH counterpart belongs to the Host tool registry, so only MCP clients/tools explicitly installed by the profile enter the Code Mode SDK.
+- Prime MCP programs run in Kernel/ACP runtimes; the DSH counterpart belongs to the Host tool registry, so only MCP clients/tools explicitly installed by the profile enter the repl cell bindings.
 
 These gaps are deliberate until a product requirement and a DSH-native ownership path justify closing them.

@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
-import { decodeChallenge, RealmIdentityStore } from '../../lib/realm/identity.js'
+import { RealmIdentityStore } from '../../lib/realm/identity.js'
 import * as primeRuntime from '../../lib/runtime.js'
 
 const [stateDirectory, readyPath, disposedPath, failurePath, sessionOwner = 'orphan-host-session'] = process.argv.slice(2)
@@ -16,16 +16,14 @@ ctx.effect(() => async () => {
 
 try {
   await ctx.plugin(primeRuntime, { stateDirectory })
+  // The trusted seam takes the Realm identity directly: there is no
+  // handshake tool any more, so the fixture resolves its own session's
+  // identity from the same store the plugin uses.
   const identity = new RealmIdentityStore({ directory: `${stateDirectory}/realm-identity` })
-  const handshake = async (args) => {
-    const challenge = decodeChallenge(args?.challenge)
-    if (challenge === undefined) throw new Error('fixture received an invalid challenge')
-    const issued = await identity.issue(sessionOwner, challenge)
-    return { protocol: 1, ...issued }
-  }
-  const result = await ctx.codeRuntime.run({
+  const realmId = await identity.resolve(sessionOwner)
+  const result = await ctx.primeRealmRuntime.run(realmId, {
     program: '"realm ready"',
-    bindings: [{ global: 'tools', functions: { prime_realm_identity: handshake } }],
+    bindings: [],
   })
   if (result.error !== undefined) throw new Error(`fixture Realm failed: ${result.error.message}`)
   await writeFile(readyPath, `${process.pid}\n`)

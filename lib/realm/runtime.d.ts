@@ -1,39 +1,45 @@
 /**
- * The host plane's single `ctx.codeRuntime` provider: one runtime that answers
- * both kinds of request without letting either see the other's semantics.
+ * The host plane's trusted persistent-Realm service, mounted under the
+ * uniquely named `ctx.primeRealmRuntime` service — deliberately NOT the
+ * official `ctx.codeRuntime` seam, which the host keeps for the shipped
+ * one-shot runtime.
  *
- * A request whose bindings carry the fixed `prime_realm_identity` bootstrap is a
- * Prime request. The runtime authenticates it — CSPRNG challenge, token, proof —
- * and routes the program to the persistent realm the token names. Every other
- * request is handed to the official one-shot runtime UNCHANGED. What is
- * deliberately impossible is the third path: a Prime request whose handshake
- * fails never falls back to one-shot, because a session that silently changed
- * persistence semantics mid-conversation is worse than a session that fails loudly.
+ * The seam is trusted: the caller hands over the Realm identity it has
+ * already resolved from a trusted Agent/Session execution context, and the
+ * service admits the run to that Realm's pool under the cross-process lease,
+ * budgets, cancellation, metrics, idle reclaim, namespace notices and disposal
+ * below. There is no handshake to authenticate and no one-shot fallback to
+ * degrade to: a request that names no Realm cannot be routed, and a session
+ * that lost its trusted execution context fails closed at the caller.
  * @module dsh-prime-agent/realm/runtime
  */
+import { Service } from '@deepseek-ai/cordis';
 import type { Context } from '@deepseek-ai/cordis';
-import { CodeRuntime } from '@deepseek-ai/dsh-code-runtime';
 import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
-import type { RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './protocol.js';
+import type { RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits } from './protocol.js';
 import type { RealmBudgets, RealmMetrics } from './realm.js';
 /** Everything the runtime needs that is not a per-run input. */
-export interface PrimeCodeRuntimeOptions {
+export interface PrimeRealmRuntimeOptions {
     /**
-     * The absolute state directory this deployment shares with the agent-scoped
-     * handshake tool. Both sides read the same `realm-identity/hmac.key`; a
-     * mismatch makes every handshake fail closed rather than route anywhere.
+     * The absolute state directory this deployment shares with the agent scope.
+     * Both sides read the same `realm-identity/hmac.key`; a mismatch means the
+     * host-trusted realm ids and the lease directory disagree and every claim
+     * fails closed rather than routing anywhere.
      */
     stateDirectory: string;
-    /** The official one-shot runtime every non-Prime request is delegated to, verbatim. */
-    fallback: CodeRuntime;
     /** Per-run ceilings handed to every realm this runtime creates. */
     budgets: RealmBudgets;
     /**
      * Completion-history ceilings for every realm this runtime creates. Blank
-     * fields take the plan defaults; the history exists only on this authenticated
-     * Prime path, so the one-shot fallback keeps the official semantics exactly.
+     * fields take the plan defaults.
      */
     completionHistory?: Partial<RealmCompletionHistoryLimits>;
+    /**
+     * Opaque (non-JSON) history ceilings for every realm this runtime creates.
+     * Blank fields take the plan defaults; the opaque store is an independent
+     * budget from {@link completionHistory}.
+     */
+    completionOpaque?: Partial<RealmCompletionOpaqueLimits>;
     /**
      * Projection ceilings for every realm this runtime creates: the size past
      * which a completion is referenced rather than shown, and how much a reference
@@ -46,18 +52,15 @@ export interface PrimeCodeRuntimeOptions {
     maxIdleMs: number;
 }
 /**
- * The hybrid `ctx.codeRuntime`. See the module doc for the routing contract; the
- * Service Definition's contract is unchanged, so program, budget, abort and
- * substrate failures RESOLVE with `result.error` and only a disposed runtime or
- * an unusable binding declaration rejects.
+ * The trusted `ctx.primeRealmRuntime`. See the module doc for the seam
+ * contract; program, budget, abort and substrate failures RESOLVE with
+ * `result.error` and only caller misuse — running a disposed runtime or
+ * naming an unusable Realm identity — rejects.
  */
-export declare class PrimeCodeRuntime extends CodeRuntime {
-    readonly language = "typescript";
-    readonly isolation = "worker-thread";
-    private readonly fallback;
-    private readonly identity;
+export declare class PrimeRealmRuntime extends Service {
     private readonly budgets;
     private readonly completionHistory;
+    private readonly completionOpaque;
     private readonly completionProjection;
     /**
      * Counters inherited from realms this runtime has already retired, so the
@@ -77,11 +80,8 @@ export declare class PrimeCodeRuntime extends CodeRuntime {
     private readonly retirements;
     /** Serializes the async claim + synchronous pool-admission decision. */
     private poolMutationTail;
-    private admissionTail;
-    private releaseAdmissionStop;
-    private readonly admissionStopped;
     private disposed;
-    constructor(ctx: Context, options: PrimeCodeRuntimeOptions);
+    constructor(ctx: Context, options: PrimeRealmRuntimeOptions);
     /**
      * Bounded completion counters across every realm this runtime has hosted
      * (plan §11).
@@ -93,20 +93,14 @@ export declare class PrimeCodeRuntime extends CodeRuntime {
      */
     get metrics(): RealmMetrics;
     /**
-     * Route one request. A non-Prime request is delegated verbatim; a Prime
-     * request is authenticated first and never degrades to the one-shot path.
+     * Run one cell in the trusted Realm named by `realmId`.
+     * @param realmId - the Realm identity the caller already resolved from a
+     *   trusted Agent/Session execution context.
      * @param request - the program, its bindings, and the abort signal.
-     * @returns the run's outcome per the seam contract.
+     * @returns the run's outcome per the seam contract; rejects only on caller
+     *   misuse (disposed runtime, unusable Realm identity).
      */
-    run(request: CodeRunRequest): Promise<CodeRunResult>;
-    /** Reserve call order before authentication reveals which realm owns it. */
-    private reserveAdmission;
-    /**
-     * Start one authenticated outcome in call order, then immediately release the
-     * next admission. `action()` synchronously enqueues a valid cell before it
-     * returns its settlement promise, so this never serializes different realms.
-     */
-    private finishAdmission;
+    run(realmId: string, request: CodeRunRequest): Promise<CodeRunResult>;
     /** Admit the run into its realm and append a fresh-namespace notice when needed. */
     private execute;
     /**
@@ -137,14 +131,19 @@ export declare class PrimeCodeRuntime extends CodeRuntime {
     private teardown;
     /**
      * A pre-worker outcome. It goes through the same ledger every other path uses,
-     * because a handshake diagnostic interpolates a message from the host's tool
+     * because a pre-worker diagnostic interpolates a message from the host's tool
      * pipeline and must not be the one result that ignores the output cap.
      */
     private failure;
-    /** A fail-closed handshake outcome; never a rejection of `run()`. */
+    /** A fail-closed pre-worker outcome; never a rejection of `run()`. */
     private exception;
     /** The abort outcome, matching the shipped one-shot runtime's rendering. */
     private aborted;
 }
-export default PrimeCodeRuntime;
+declare module '@deepseek-ai/cordis' {
+    interface Context {
+        primeRealmRuntime: PrimeRealmRuntime;
+    }
+}
+export default PrimeRealmRuntime;
 //# sourceMappingURL=runtime.d.ts.map

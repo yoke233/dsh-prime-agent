@@ -1,18 +1,19 @@
 /**
  * Host runtime row for Prime: the plugin body behind `dsh-prime-agent/runtime`.
  *
- * It is mounted in place of the official `code-runtime` row, and its whole job
- * is composition — monitor its owning parent, mount the SHIPPED one-shot runtime
- * in a private service realm, and publish the hybrid runtime as the host's
- * `ctx.codeRuntime`. The official implementation is reused rather than copied,
- * so config validation, TypeScript stripping, budgets, abort, output limits and
- * disposal for non-Prime requests stay byte-for-byte the shipped behaviour.
+ * It is mounted by the bundle patch as a pure INSERT beside the official
+ * `code-runtime` row, and its whole job is composition — monitor its owning
+ * parent, place the packaged Prime preset, and mount the trusted
+ * `primeRealmRuntime` service. The official `ctx.codeRuntime` is left to
+ * the host: this row neither disables it nor replaces it, so non-Prime
+ * sessions keep the official one-shot semantics from the shipped runtime.
  * @module dsh-prime-agent/runtime
  */
 
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { PrimeRealmRuntime } from './realm/runtime.js'
 import { watchHostParent } from './realm/host-parent.js'
 import { installPrimePreset } from './realm/preset-install.js'
 import type { RealmBudgets, RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './realm/realm.js'
@@ -33,9 +34,9 @@ const USER_PRESET_DIR = '.agent-presets'
 
 /**
  * The official per-run budgets, restated because a realm needs a concrete value
- * even when the deployment leaves the field blank for the official fallback.
- * These MUST track `WorkerThreadCodeRuntime.Config`; a divergence would give the
- * two execution paths different budgets under one unset config.
+ * even when the deployment leaves the field blank. These MUST track
+ * `WorkerThreadCodeRuntime.Config`; a divergence would give realm runs
+ * different budgets from the official one-shot runtime under one unset config.
  */
 const OFFICIAL_DEFAULTS = {
   computeMs: 60_000,
@@ -43,9 +44,6 @@ const OFFICIAL_DEFAULTS = {
   maxOutputBytes: 67_108_864,
   maxOldGenerationSizeMb: 512,
 } as const
-
-/** Fields passed to the official fallback verbatim, under its own names. */
-const OFFICIAL_FIELDS = ['computeMs', 'maxWallMs', 'maxOutputBytes', 'maxOldGenerationSizeMb'] as const
 
 /**
  * Completion-history ceilings, decided by the Phase 0 benchmark
@@ -93,8 +91,8 @@ const DEFAULT_MAX_PARALLEL_HOST_CALLS_PER_RUN = 16
 export interface Config {
   /**
    * Absolute Prime state directory. It MUST be the same value the packaged
-   * preset gives the agent-scoped `prime_realm_identity` tool row, or the two
-   * sides read different HMAC keys and every handshake fails closed.
+   * preset gives the agent-scoped identity tool row, or the two sides read
+   * different HMAC keys and host-trusted realm ids diverge.
    */
   stateDirectory: string
   /** Busy-time budget for one run; blank passes through to the official default. */
@@ -146,59 +144,12 @@ export const Config: z<Config> = z.object({
 }) as unknown as z<Config>
 
 /**
- * The official fallback's config: only fields the deployment actually set, so
- * the official schema keeps supplying its own defaults for the rest.
- */
-function fallbackConfig(config: Config): Record<string, number> {
-  const passthrough: Record<string, number> = {}
-  for (const field of OFFICIAL_FIELDS) {
-    const value = config[field]
-    if (value !== undefined) passthrough[field] = value
-  }
-  return passthrough
-}
-
-/** Runtime modules loaded lazily so an incomplete install gets one actionable row diagnostic. */
-interface CodeModeModules {
-  WorkerThreadCodeRuntime: (typeof import('@deepseek-ai/dsh-code-runtime-worker-thread'))['default']
-  PrimeCodeRuntime: (typeof import('./realm/runtime.js'))['PrimeCodeRuntime']
-}
-
-/**
- * Resolve the Code Mode packages at APPLY time rather than at module load.
- *
- * `@deepseek-ai/dsh-code-runtime` and its worker-thread backend are production
- * dependencies of this package. Keep the import deferred so a corrupt or
- * incomplete installation fails while mounting this row, with an actionable
- * diagnostic, instead of taking down module resolution with a bare
- * `ERR_MODULE_NOT_FOUND` before any plugin body runs.
- */
-async function loadCodeMode(): Promise<CodeModeModules> {
-  try {
-    const [worker, prime] = await Promise.all([
-      import('@deepseek-ai/dsh-code-runtime-worker-thread'),
-      // Pulls in `@deepseek-ai/dsh-code-runtime` transitively: the hybrid
-      // runtime extends the official Service base class.
-      import('./realm/runtime.js'),
-    ])
-    return { WorkerThreadCodeRuntime: worker.default, PrimeCodeRuntime: prime.PrimeCodeRuntime }
-  } catch (error: unknown) {
-    throw new Error(
-      'dsh-prime-agent: the packaged Code Mode dependencies could not be loaded '
-      + '(@deepseek-ai/dsh-code-runtime and @deepseek-ai/dsh-code-runtime-worker-thread); '
-      + 'reinstall dsh-prime-agent and verify that the host uses a compatible DSH 0.1.x release',
-      { cause: error },
-    )
-  }
-}
-
-/**
  * Place the packaged preset, reporting rather than raising on failure.
  *
- * This runs on the startup path of the host's ONLY `codeRuntime` provider, so a
- * `$DSH_HOME` that is a file, a read-only home, or a `dshHomePath` of an
- * unexpected shape must cost the deployment its preset entry in the picker — not
- * its ability to run code at all.
+ * This runs on the startup path of the Prime host row, so a `$DSH_HOME` that
+ * is a file, a read-only home, or a `dshHomePath` of an unexpected shape must
+ * cost the deployment its preset entry in the picker — not its ability to run
+ * the realm service at all.
  */
 async function placePresetOrWarn(ctx: Context): Promise<void> {
   try {
@@ -253,10 +204,11 @@ function completionProjectionLimits(config: Config): RealmCompletionProjectionLi
 }
 
 /**
- * Monitor this host's owner, mount the official one-shot runtime privately, and
- * publish the hybrid runtime. Realm ownership is claimed lazily after an
- * authenticated Prime request identifies the specific Realm, so unrelated TUI
- * processes can share durable state without sharing a live namespace.
+ * Monitor this host's owner, place the packaged preset, and mount the trusted
+ * `primeRealmRuntime` service. The official `codeRuntime` provider is
+ * deliberately untouched: Realm ownership is claimed lazily per requested
+ * Realm id, so unrelated host processes can share durable state without
+ * sharing a live namespace.
  * @param ctx - the host context this row is mounted on.
  * @param config - validated plugin config.
  */
@@ -272,45 +224,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     'prime host parent liveness',
   )
 
-  const { WorkerThreadCodeRuntime, PrimeCodeRuntime } = await loadCodeMode()
-
-  // This row REPLACES the official `code-runtime` provider rather than joining
-  // it; the shipped bundle patch disables the official row for exactly that
-  // reason. Detecting the clash here names the patch, where cordis would only
-  // report a duplicate service registration. Best effort: sibling fibers start
-  // concurrently, so an official row that has not activated yet is invisible and
-  // the duplicate surfaces as cordis's own error instead.
-  if (ctx.get('codeRuntime') !== undefined) {
-    throw new Error(
-      'dsh-prime-agent: ctx.codeRuntime is already provided; the Prime bundle patch must disable the '
-      + 'official code-runtime row, and only one code runtime row may be enabled at a time',
-    )
-  }
-
   // Place the packaged Prime preset into the user preset root, copy-if-absent
   // only — an existing directory (edited or not) is never touched. The roster
   // rescans its roots on every list, so the copy is visible immediately.
   await placePresetOrWarn(ctx)
 
-  // A private service realm, so the official provider and this one never
-  // contend for the host's single `codeRuntime` slot. `isolate` shadows the
-  // name with a fresh symbol for the derived context only (cordis
-  // `vendor/cordis/src/context.ts:121`), and the shipped plugin registers
-  // itself against that symbol through `Service`'s `provide`.
-  const fallbackScope = ctx.isolate('codeRuntime')
-  // A service is only readable once its fiber is active, which happens strictly
-  // after the plugin call returns (`vendor/cordis/src/reflect.ts:241`); the
-  // plugin handle is thenable for exactly this wait
-  // (`vendor/cordis/src/registry.ts:330`).
-  await fallbackScope.plugin(WorkerThreadCodeRuntime, fallbackConfig(config))
-  const fallback = fallbackScope.get('codeRuntime')
-  if (fallback === undefined) {
-    throw new Error('dsh-prime-agent: the official one-shot code runtime did not become available')
-  }
-
-  new PrimeCodeRuntime(ctx, {
+  new PrimeRealmRuntime(ctx, {
     stateDirectory,
-    fallback,
     budgets: realmBudgets(config),
     completionHistory: completionHistoryLimits(config),
     completionProjection: completionProjectionLimits(config),
@@ -319,6 +239,4 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
 }
 
-// Types only: a value re-export would pull the packaged Code Mode dependencies
-// into this module's static graph, defeating the deferred diagnostic above.
-export type { PrimeCodeRuntime, PrimeCodeRuntimeOptions } from './realm/runtime.js'
+export type { PrimeRealmRuntime, PrimeRealmRuntimeOptions } from './realm/runtime.js'

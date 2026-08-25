@@ -1,12 +1,12 @@
 /**
  * Host runtime row for Prime: the plugin body behind `dsh-prime-agent/runtime`.
  *
- * It is mounted in place of the official `code-runtime` row, and its whole job
- * is composition — monitor its owning parent, mount the SHIPPED one-shot runtime
- * in a private service realm, and publish the hybrid runtime as the host's
- * `ctx.codeRuntime`. The official implementation is reused rather than copied,
- * so config validation, TypeScript stripping, budgets, abort, output limits and
- * disposal for non-Prime requests stay byte-for-byte the shipped behaviour.
+ * It is mounted by the bundle patch as a pure INSERT beside the official
+ * `code-runtime` row, and its whole job is composition — monitor its owning
+ * parent, place the packaged Prime preset, and mount the trusted
+ * `primeRealmRuntime` service. The official `ctx.codeRuntime` is left to
+ * the host: this row neither disables it nor replaces it, so non-Prime
+ * sessions keep the official one-shot semantics from the shipped runtime.
  * @module dsh-prime-agent/runtime
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -16,8 +16,8 @@ export declare const name = "prime-code-runtime";
 export interface Config {
     /**
      * Absolute Prime state directory. It MUST be the same value the packaged
-     * preset gives the agent-scoped `prime_realm_identity` tool row, or the two
-     * sides read different HMAC keys and every handshake fails closed.
+     * preset gives the agent-scoped identity tool row, or the two sides read
+     * different HMAC keys and host-trusted realm ids diverge.
      */
     stateDirectory: string;
     /** Busy-time budget for one run; blank passes through to the official default. */
@@ -51,13 +51,14 @@ export interface Config {
 }
 export declare const Config: z<Config>;
 /**
- * Monitor this host's owner, mount the official one-shot runtime privately, and
- * publish the hybrid runtime. Realm ownership is claimed lazily after an
- * authenticated Prime request identifies the specific Realm, so unrelated TUI
- * processes can share durable state without sharing a live namespace.
+ * Monitor this host's owner, place the packaged preset, and mount the trusted
+ * `primeRealmRuntime` service. The official `codeRuntime` provider is
+ * deliberately untouched: Realm ownership is claimed lazily per requested
+ * Realm id, so unrelated host processes can share durable state without
+ * sharing a live namespace.
  * @param ctx - the host context this row is mounted on.
  * @param config - validated plugin config.
  */
 export declare function apply(ctx: Context, config: Config): Promise<void>;
-export type { PrimeCodeRuntime, PrimeCodeRuntimeOptions } from './realm/runtime.js';
+export type { PrimeRealmRuntime, PrimeRealmRuntimeOptions } from './realm/runtime.js';
 //# sourceMappingURL=runtime.d.ts.map

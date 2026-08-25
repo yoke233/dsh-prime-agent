@@ -23,24 +23,29 @@ import type { CodeBindingNamespace, CodeJsonValue, CodeRunFailure, CodeRunReques
 import {
   COMPLETION_EXPIRED_ERROR,
   COMPLETION_HISTORY_GLOBAL,
-  HIDDEN_BINDING_MEMBER,
   LAST_RESULT_GLOBAL,
   MIN_OUTPUT_BYTES,
   OutputLedger,
   resolveCompletionHistoryLimits,
+  resolveCompletionOpaqueLimits,
   resolveCompletionProjectionLimits,
 } from './protocol.js'
 import type {
   HostToRealm,
   RealmCompletionEnvelope,
   RealmCompletionHistoryLimits,
+  RealmCompletionOpaqueLimits,
   RealmCompletionProjectionLimits,
   RealmNamespaceSpec,
   RealmRunMetrics,
   RealmToHost,
 } from './protocol.js'
 
-export type { RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './protocol.js'
+export type {
+  RealmCompletionHistoryLimits,
+  RealmCompletionOpaqueLimits,
+  RealmCompletionProjectionLimits,
+} from './protocol.js'
 
 /**
  * Bounded counters for one realm's completion traffic (plan §11).
@@ -71,9 +76,12 @@ export interface RealmMetrics {
   handlesExpired: number
   /** History accesses refused for running outside their own cell. */
   accessesRefused: number
-  /** Slots and capture bytes the history held when its realm last settled a run. */
+  /** Slots and capture bytes the LOSSLESS-JSON history held at last settlement. */
   historyEntries: number
   historyBytes: number
+  /** Opaque slots and capture-walk bytes the opaque history held at last settlement. */
+  historyOpaqueEntries: number
+  historyOpaqueBytes: number
 }
 
 /** A zeroed counter set, and the shape every accumulator here starts from. */
@@ -92,6 +100,8 @@ export function emptyRealmMetrics(): RealmMetrics {
     accessesRefused: 0,
     historyEntries: 0,
     historyBytes: 0,
+    historyOpaqueEntries: 0,
+    historyOpaqueBytes: 0,
   }
 }
 
@@ -332,7 +342,7 @@ function parseRunMetrics(raw: unknown): RealmRunMetrics {
   if (typeof raw !== 'object' || raw === null) return {}
   const source = raw as Record<string, unknown>
   const metrics: RealmRunMetrics = {}
-  for (const key of ['captureBytes', 'captureNodes', 'evicted', 'expired', 'refused', 'historyEntries', 'historyBytes'] as const) {
+  for (const key of ['captureBytes', 'captureNodes', 'evicted', 'expired', 'refused', 'historyEntries', 'historyBytes', 'historyOpaqueEntries', 'historyOpaqueBytes'] as const) {
     const value = source[key]
     if (typeof value === 'number' && Number.isFinite(value)) metrics[key] = value
   }
@@ -466,6 +476,7 @@ export class PersistentRealm {
 
   private readonly budgets: RealmBudgets
   private readonly completionHistory: RealmCompletionHistoryLimits
+  private readonly completionOpaque: RealmCompletionOpaqueLimits
   private readonly completionProjection: RealmCompletionProjectionLimits
   private readonly counters = emptyRealmMetrics()
   private readonly queue: RunEntry[] = []
@@ -486,12 +497,15 @@ export class PersistentRealm {
     budgets: RealmBudgets
     /** Completion-history ceilings; every field left blank takes its plan default. */
     completionHistory?: Partial<RealmCompletionHistoryLimits>
+    /** Opaque (non-JSON) history ceilings; every field left blank takes its plan default. */
+    completionOpaque?: Partial<RealmCompletionOpaqueLimits>
     /** Projection ceilings; every field left blank takes its plan default. */
     completionProjection?: Partial<RealmCompletionProjectionLimits>
   }) {
     if (options.realmId.length === 0) throw new Error('dsh-prime-agent: realm id must not be empty')
     this.realmId = options.realmId
     this.completionHistory = resolveCompletionHistoryLimits(options.completionHistory)
+    this.completionOpaque = resolveCompletionOpaqueLimits(options.completionOpaque)
     this.completionProjection = resolveCompletionProjectionLimits(options.completionProjection)
     this.budgets = { ...options.budgets }
     for (const [key, value] of Object.entries(this.budgets)) {
@@ -754,9 +768,7 @@ export class PersistentRealm {
     // timer exists, so a malformed declaration cannot strand an armed run.
     const namespaces: RealmNamespaceSpec[] = [...entry.bindings].map(([global, namespace]) => ({
       global,
-      // The handshake bootstrap is never leased to the program, whichever
-      // namespace happens to carry it.
-      names: Object.keys(namespace.functions).filter(name => name !== HIDDEN_BINDING_MEMBER),
+      names: Object.keys(namespace.functions),
       ...namespace.errorClass ? { errorClass: namespace.errorClass } : {},
     }))
 
@@ -820,7 +832,12 @@ export class PersistentRealm {
       code,
       namespaces,
       maxOutputBytes: this.budgets.maxOutputBytes,
-      completion: { id: entry.completionId, limits: this.completionHistory, projection: this.completionProjection },
+      completion: {
+        id: entry.completionId,
+        limits: this.completionHistory,
+        projection: this.completionProjection,
+        opaque: this.completionOpaque,
+      },
     })
   }
 
@@ -1026,6 +1043,8 @@ export class PersistentRealm {
     // report wins rather than adding to the previous one.
     if (metrics.historyEntries !== undefined) this.counters.historyEntries = metrics.historyEntries
     if (metrics.historyBytes !== undefined) this.counters.historyBytes = metrics.historyBytes
+    if (metrics.historyOpaqueEntries !== undefined) this.counters.historyOpaqueEntries = metrics.historyOpaqueEntries
+    if (metrics.historyOpaqueBytes !== undefined) this.counters.historyOpaqueBytes = metrics.historyOpaqueBytes
   }
 
   /**
@@ -1052,7 +1071,7 @@ export class PersistentRealm {
       if (entry.settled) return
       this.post(session, payload)
     }
-    const record = message.name === HIDDEN_BINDING_MEMBER ? undefined : entry.bindings.get(message.global)?.functions
+    const record = entry.bindings.get(message.global)?.functions
     // Own-property lookup only: a forged name like 'constructor' must not walk
     // the record's prototype chain and reach a callable nobody declared.
     const fn = record && Object.hasOwn(record, message.name) ? record[message.name] : undefined

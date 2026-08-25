@@ -12,8 +12,8 @@
  * @module dsh-prime-agent/realm/realm
  */
 import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
-import type { RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './protocol.js';
-export type { RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './protocol.js';
+import type { RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits } from './protocol.js';
+export type { RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits, } from './protocol.js';
 /**
  * Bounded counters for one realm's completion traffic (plan §11).
  *
@@ -43,9 +43,12 @@ export interface RealmMetrics {
     handlesExpired: number;
     /** History accesses refused for running outside their own cell. */
     accessesRefused: number;
-    /** Slots and capture bytes the history held when its realm last settled a run. */
+    /** Slots and capture bytes the LOSSLESS-JSON history held at last settlement. */
     historyEntries: number;
     historyBytes: number;
+    /** Opaque slots and capture-walk bytes the opaque history held at last settlement. */
+    historyOpaqueEntries: number;
+    historyOpaqueBytes: number;
 }
 /** A zeroed counter set, and the shape every accumulator here starts from. */
 export declare function emptyRealmMetrics(): RealmMetrics;
@@ -103,6 +106,7 @@ export declare class PersistentRealm {
     readonly realmId: string;
     private readonly budgets;
     private readonly completionHistory;
+    private readonly completionOpaque;
     private readonly completionProjection;
     private readonly counters;
     private readonly queue;
@@ -122,6 +126,8 @@ export declare class PersistentRealm {
         budgets: RealmBudgets;
         /** Completion-history ceilings; every field left blank takes its plan default. */
         completionHistory?: Partial<RealmCompletionHistoryLimits>;
+        /** Opaque (non-JSON) history ceilings; every field left blank takes its plan default. */
+        completionOpaque?: Partial<RealmCompletionOpaqueLimits>;
         /** Projection ceilings; every field left blank takes its plan default. */
         completionProjection?: Partial<RealmCompletionProjectionLimits>;
     });

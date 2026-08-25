@@ -1,41 +1,34 @@
 /**
- * The host plane's single `ctx.codeRuntime` provider: one runtime that answers
- * both kinds of request without letting either see the other's semantics.
+ * The host plane's trusted persistent-Realm service, mounted under the
+ * uniquely named `ctx.primeRealmRuntime` service — deliberately NOT the
+ * official `ctx.codeRuntime` seam, which the host keeps for the shipped
+ * one-shot runtime.
  *
- * A request whose bindings carry the fixed `prime_realm_identity` bootstrap is a
- * Prime request. The runtime authenticates it — CSPRNG challenge, token, proof —
- * and routes the program to the persistent realm the token names. Every other
- * request is handed to the official one-shot runtime UNCHANGED. What is
- * deliberately impossible is the third path: a Prime request whose handshake
- * fails never falls back to one-shot, because a session that silently changed
- * persistence semantics mid-conversation is worse than a session that fails loudly.
+ * The seam is trusted: the caller hands over the Realm identity it has
+ * already resolved from a trusted Agent/Session execution context, and the
+ * service admits the run to that Realm's pool under the cross-process lease,
+ * budgets, cancellation, metrics, idle reclaim, namespace notices and disposal
+ * below. There is no handshake to authenticate and no one-shot fallback to
+ * degrade to: a request that names no Realm cannot be routed, and a session
+ * that lost its trusted execution context fails closed at the caller.
  * @module dsh-prime-agent/realm/runtime
  */
 
-import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
+import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
-import { CodeRuntime } from '@deepseek-ai/dsh-code-runtime'
-import type { CodeBindingFunction, CodeRunFailure, CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
-import { RealmIdentityStore } from './identity.js'
-import type { RealmVerification } from './identity.js'
+import type { CodeRunFailure, CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
 import {
-  HIDDEN_BINDING_MEMBER,
   MIN_OUTPUT_BYTES,
   OutputLedger,
   resolveCompletionHistoryLimits,
+  resolveCompletionOpaqueLimits,
   resolveCompletionProjectionLimits,
 } from './protocol.js'
-import type { RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './protocol.js'
+import type { RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits } from './protocol.js'
 import { acquireRealmLease, RealmLeaseError } from './realm-lease.js'
 import { addRealmMetrics, emptyRealmMetrics, PersistentRealm } from './realm.js'
 import type { RealmBudgets, RealmMetrics, RealmRunNotice } from './realm.js'
-
-/** The only handshake protocol version this runtime speaks. */
-const HANDSHAKE_PROTOCOL = 1
-
-/** Challenge width, fixed by `RealmIdentityStore`. */
-const CHALLENGE_BYTES = 32
 
 /** Node clamps a longer `setTimeout` delay to 1 ms, which would expire every run immediately. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647
@@ -52,24 +45,36 @@ const MAX_SWEEP_INTERVAL_MS = 60_000
  */
 const NOTICE_RESERVE_BYTES = 512
 
+/**
+ * A Realm identity is the unpadded base64url token the identity store issues,
+ * and the cross-process lease only accepts that shape. The caller of the
+ * trusted seam is expected to pass exactly that; anything else is caller
+ * misuse and rejects rather than resolving as a run failure.
+ */
+const REALM_ID = /^[A-Za-z0-9_-]{43}$/
+
 /** Everything the runtime needs that is not a per-run input. */
-export interface PrimeCodeRuntimeOptions {
+export interface PrimeRealmRuntimeOptions {
   /**
-   * The absolute state directory this deployment shares with the agent-scoped
-   * handshake tool. Both sides read the same `realm-identity/hmac.key`; a
-   * mismatch makes every handshake fail closed rather than route anywhere.
+   * The absolute state directory this deployment shares with the agent scope.
+   * Both sides read the same `realm-identity/hmac.key`; a mismatch means the
+   * host-trusted realm ids and the lease directory disagree and every claim
+   * fails closed rather than routing anywhere.
    */
   stateDirectory: string
-  /** The official one-shot runtime every non-Prime request is delegated to, verbatim. */
-  fallback: CodeRuntime
   /** Per-run ceilings handed to every realm this runtime creates. */
   budgets: RealmBudgets
   /**
    * Completion-history ceilings for every realm this runtime creates. Blank
-   * fields take the plan defaults; the history exists only on this authenticated
-   * Prime path, so the one-shot fallback keeps the official semantics exactly.
+   * fields take the plan defaults.
    */
   completionHistory?: Partial<RealmCompletionHistoryLimits>
+  /**
+   * Opaque (non-JSON) history ceilings for every realm this runtime creates.
+   * Blank fields take the plan defaults; the opaque store is an independent
+   * budget from {@link completionHistory}.
+   */
+  completionOpaque?: Partial<RealmCompletionOpaqueLimits>
   /**
    * Projection ceilings for every realm this runtime creates: the size past
    * which a completion is referenced rather than shown, and how much a reference
@@ -82,24 +87,9 @@ export interface PrimeCodeRuntimeOptions {
   maxIdleMs: number
 }
 
-/** One Prime call's place in the pre-realm admission order. */
-interface PrimeAdmissionTurn {
-  previous: Promise<void>
-  release: () => void
-}
-
 /** One run synchronously enqueued while its pool/lease admission was stable. */
 interface RealmAdmission {
   result: Promise<CodeRunResult>
-}
-
-/** Render an unknown thrown value as a message, `Error` or not, without throwing again. */
-function messageOf(error: unknown): string {
-  try {
-    return error instanceof Error ? error.message : String(error)
-  } catch {
-    return 'unrenderable error value'
-  }
 }
 
 /** Render an abort reason the way the shipped one-shot runtime does. */
@@ -112,71 +102,11 @@ function renderReason(reason: unknown): string {
   }
 }
 
-/**
- * Replace any failure that is not the identity store's own bounded diagnostic.
- * A raw filesystem error carries the storage path, which must never reach a
- * model-visible result.
- */
-function storageFailure(error: unknown): string {
-  const message = messageOf(error)
-  return message.startsWith('prime-realm-identity: ')
-    ? message
-    : 'prime-realm-identity: realm identity storage is unavailable'
-}
-
 /** Bound a lazy cross-process Realm-ownership failure for model-visible output. */
 function realmOwnershipFailure(error: unknown): string {
   return error instanceof RealmLeaseError
     ? error.message
     : 'dsh-prime-agent: Prime session ownership is unavailable'
-}
-
-/**
- * The handshake bootstrap this request declares, boxed so a declared-but-junk
- * member is distinguishable from no declaration at all. Own-property lookup
- * only: a `functions` record inheriting the name from its prototype is not a
- * declaration.
- */
-function findHandshakeMember(request: CodeRunRequest): { value: unknown } | undefined {
-  for (const namespace of request.bindings) {
-    // Guarded per namespace: `functions` may be an accessor or a proxy, and a
-    // throw here would reject `run()` for what the seam defines as a resolved
-    // failure. A namespace that cannot be inspected simply declares nothing.
-    try {
-      const functions: unknown = namespace?.functions
-      if (typeof functions !== 'object' || functions === null) continue
-      if (!Object.hasOwn(functions, HIDDEN_BINDING_MEMBER)) continue
-      return { value: (functions as Record<string, unknown>)[HIDDEN_BINDING_MEMBER] }
-    } catch {
-      continue
-    }
-  }
-  return undefined
-}
-
-/**
- * Accept only the exact handshake response shape. The bootstrap is a real tool
- * call travelling through the host's dispatch pipeline, so its result is data,
- * not a trusted structure: every field is re-checked and rebuilt.
- */
-function parseHandshake(value: unknown): { token: string; proof: string } | undefined {
-  // Wholly guarded: the response crossed the host's tool pipeline and may carry
-  // throwing accessors. A throw escaping here would reject `run()`, which the
-  // seam reserves for caller misuse — a bad response is a resolved failure.
-  try {
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-    const record = value as Record<string, unknown>
-    if (record.protocol !== HANDSHAKE_PROTOCOL) return undefined
-    // Read each field ONCE. An accessor that answered the type check and then
-    // returned something else on a second read would put an unvalidated value
-    // into the verification call.
-    const token: unknown = record.token
-    const proof: unknown = record.proof
-    if (typeof token !== 'string' || typeof proof !== 'string') return undefined
-    return { token, proof }
-  } catch {
-    return undefined
-  }
 }
 
 /**
@@ -219,19 +149,15 @@ function assertBudgets(budgets: RealmBudgets): void {
 }
 
 /**
- * The hybrid `ctx.codeRuntime`. See the module doc for the routing contract; the
- * Service Definition's contract is unchanged, so program, budget, abort and
- * substrate failures RESOLVE with `result.error` and only a disposed runtime or
- * an unusable binding declaration rejects.
+ * The trusted `ctx.primeRealmRuntime`. See the module doc for the seam
+ * contract; program, budget, abort and substrate failures RESOLVE with
+ * `result.error` and only caller misuse — running a disposed runtime or
+ * naming an unusable Realm identity — rejects.
  */
-export class PrimeCodeRuntime extends CodeRuntime {
-  readonly language = 'typescript'
-  readonly isolation = 'worker-thread'
-
-  private readonly fallback: CodeRuntime
-  private readonly identity: RealmIdentityStore
+export class PrimeRealmRuntime extends Service {
   private readonly budgets: RealmBudgets
   private readonly completionHistory: RealmCompletionHistoryLimits
+  private readonly completionOpaque: RealmCompletionOpaqueLimits
   private readonly completionProjection: RealmCompletionProjectionLimits
   /**
    * Counters inherited from realms this runtime has already retired, so the
@@ -251,20 +177,15 @@ export class PrimeCodeRuntime extends CodeRuntime {
   private readonly retirements = new Map<string, Promise<void>>()
   /** Serializes the async claim + synchronous pool-admission decision. */
   private poolMutationTail = Promise.resolve()
-  // A request's realm id is authenticated asynchronously, so its place must be
-  // reserved before the handshake can finish out of order. The turn ends as
-  // soon as realm.run() has enqueued the cell; realm execution stays per-realm.
-  private admissionTail = Promise.resolve()
-  private releaseAdmissionStop!: () => void
-  private readonly admissionStopped = new Promise<void>((resolve) => { this.releaseAdmissionStop = resolve })
   private disposed = false
 
-  constructor(ctx: Context, options: PrimeCodeRuntimeOptions) {
-    super(ctx)
+  constructor(ctx: Context, options: PrimeRealmRuntimeOptions) {
+    super(ctx, 'primeRealmRuntime')
     assertBudgets(options.budgets)
     // Resolved at construction rather than at first admission, so a bad
     // deployment fails at plugin load instead of on some session's first run.
     this.completionHistory = resolveCompletionHistoryLimits(options.completionHistory)
+    this.completionOpaque = resolveCompletionOpaqueLimits(options.completionOpaque)
     this.completionProjection = resolveCompletionProjectionLimits(options.completionProjection)
     if (!(Number.isSafeInteger(options.maxActiveRealms) && options.maxActiveRealms > 0)) {
       throw new Error(`dsh-prime-agent: maxActiveRealms must be a positive safe integer, got ${String(options.maxActiveRealms)}`)
@@ -272,8 +193,6 @@ export class PrimeCodeRuntime extends CodeRuntime {
     if (!(Number.isFinite(options.maxIdleMs) && options.maxIdleMs > 0)) {
       throw new Error(`dsh-prime-agent: maxIdleMs must be a positive number, got ${String(options.maxIdleMs)}`)
     }
-    this.fallback = options.fallback
-    this.identity = new RealmIdentityStore({ directory: join(options.stateDirectory, 'realm-identity') })
     this.outputBytes = options.budgets.maxOutputBytes
     // Realms run against the budget MINUS the notice reserve, so the line this
     // runtime appends afterwards is already paid for.
@@ -309,88 +228,30 @@ export class PrimeCodeRuntime extends CodeRuntime {
   }
 
   /**
-   * Route one request. A non-Prime request is delegated verbatim; a Prime
-   * request is authenticated first and never degrades to the one-shot path.
+   * Run one cell in the trusted Realm named by `realmId`.
+   * @param realmId - the Realm identity the caller already resolved from a
+   *   trusted Agent/Session execution context.
    * @param request - the program, its bindings, and the abort signal.
-   * @returns the run's outcome per the seam contract.
+   * @returns the run's outcome per the seam contract; rejects only on caller
+   *   misuse (disposed runtime, unusable Realm identity).
    */
-  async run(request: CodeRunRequest): Promise<CodeRunResult> {
-    if (this.disposed) throw new Error('dsh-prime-agent: prime code runtime run() after disposal')
-    const bootstrap = findHandshakeMember(request)
-    if (bootstrap === undefined) return await this.fallback.run(request)
-
+  async run(realmId: string, request: CodeRunRequest): Promise<CodeRunResult> {
+    if (this.disposed) throw new Error('dsh-prime-agent: prime realm runtime run() after disposal')
+    if (typeof realmId !== 'string' || realmId.length === 0) {
+      throw new Error('dsh-prime-agent: realm id must not be empty')
+    }
+    if (!REALM_ID.test(realmId)) {
+      throw new Error('dsh-prime-agent: realm id is not a verified Realm identity (43 unpadded base64url characters)')
+    }
     const signal = request.signal
     if (signal?.aborted) return this.aborted(signal)
-    if (typeof bootstrap.value !== 'function') {
-      return this.exception('realm handshake binding is not callable')
-    }
-
-    const challenge = randomBytes(CHALLENGE_BYTES)
-    const admission = this.reserveAdmission()
-    const finish = (action: () => CodeRunResult | Promise<CodeRunResult>): Promise<CodeRunResult> => {
-      return this.finishAdmission(admission, action)
-    }
-    let issued: unknown
-    try {
-      issued = await (bootstrap.value as CodeBindingFunction)({
-        protocol: HANDSHAKE_PROTOCOL,
-        challenge: challenge.toString('base64url'),
-      })
-    } catch (error: unknown) {
-      // An abort that fires while the bootstrap call is in flight surfaces as
-      // the tool's own rejection; it is still an abort, not a failed handshake.
-      if (signal?.aborted) return await finish(() => this.aborted(signal))
-      return await finish(() => this.exception(`realm handshake binding failed: ${messageOf(error)}`))
-    }
-    if (signal?.aborted) return await finish(() => this.aborted(signal))
-
-    const handshake = parseHandshake(issued)
-    if (handshake === undefined) return await finish(() => this.exception('realm handshake returned a malformed response'))
-
-    let verification: RealmVerification
-    try {
-      verification = await this.identity.verify(handshake.token, handshake.proof, challenge)
-    } catch (error: unknown) {
-      return await finish(() => this.exception(storageFailure(error)))
-    }
-    if (!verification.ok) return await finish(() => this.exception(`realm handshake rejected: ${verification.reason}`))
-
-    return await finish(() => signal?.aborted
-      ? this.aborted(signal)
-      : this.execute(verification.realmId, request))
-  }
-
-  /** Reserve call order before authentication reveals which realm owns it. */
-  private reserveAdmission(): PrimeAdmissionTurn {
-    const previous = this.admissionTail
-    let release!: () => void
-    this.admissionTail = new Promise<void>((resolve) => { release = resolve })
-    return { previous, release }
-  }
-
-  /**
-   * Start one authenticated outcome in call order, then immediately release the
-   * next admission. `action()` synchronously enqueues a valid cell before it
-   * returns its settlement promise, so this never serializes different realms.
-   */
-  private async finishAdmission(
-    turn: PrimeAdmissionTurn,
-    action: () => CodeRunResult | Promise<CodeRunResult>,
-  ): Promise<CodeRunResult> {
-    await Promise.race([turn.previous, this.admissionStopped])
-    let outcome: CodeRunResult | Promise<CodeRunResult>
-    try {
-      outcome = action()
-    } finally {
-      turn.release()
-    }
-    return await outcome
+    return await this.execute(realmId, request)
   }
 
   /** Admit the run into its realm and append a fresh-namespace notice when needed. */
   private async execute(realmId: string, request: CodeRunRequest): Promise<CodeRunResult> {
-    // Re-checked AFTER the handshake awaits: teardown may have run while the
-    // bootstrap tool call was in flight, and admitting here would build a realm
+    // Re-checked after the admission awaits: teardown may have run while the
+    // lease claim was in flight, and admitting here would build a realm
     // and a worker that nothing is left to dispose.
     if (this.disposed) {
       return this.failure({ kind: 'abort', message: 'runtime disposed' })
@@ -404,12 +265,12 @@ export class PrimeCodeRuntime extends CodeRuntime {
         notice = namespaceNotice(fresh, namespaceLost)
       })
     } catch (error: unknown) {
-      return this.failure({ kind: 'exception', message: realmOwnershipFailure(error) })
+      return this.exception(realmOwnershipFailure(error))
     }
     if (admission === undefined) {
       return this.disposed
         ? this.failure({ kind: 'abort', message: 'runtime disposed' })
-        : this.failure({ kind: 'exception', message: 'realm admission rejected: active realm limit reached' })
+        : this.exception('realm admission rejected: active realm limit reached')
     }
     const result = await admission.result
     if (notice === undefined) return result
@@ -468,6 +329,7 @@ export class PrimeCodeRuntime extends CodeRuntime {
           realmId,
           budgets: this.budgets,
           completionHistory: this.completionHistory,
+          completionOpaque: this.completionOpaque,
           completionProjection: this.completionProjection,
         })
         this.pool.set(realmId, realm)
@@ -527,7 +389,7 @@ export class PrimeCodeRuntime extends CodeRuntime {
     this.pool.delete(realmId)
     // Take its counters before the worker goes: reclamation releases the whole
     // history, so the levels it was reporting stop being true immediately.
-    addRealmMetrics(this.retiredMetrics, { ...realm.metrics, historyEntries: 0, historyBytes: 0 })
+    addRealmMetrics(this.retiredMetrics, { ...realm.metrics, historyEntries: 0, historyBytes: 0, historyOpaqueEntries: 0, historyOpaqueBytes: 0 })
     const retirement = (async () => {
       try {
         await realm.dispose()
@@ -552,7 +414,6 @@ export class PrimeCodeRuntime extends CodeRuntime {
    */
   private async teardown(): Promise<void> {
     this.disposed = true
-    this.releaseAdmissionStop()
     await this.poolMutationTail
 
     for (const [realmId, realm] of [...this.pool]) this.reclaim(realmId, realm)
@@ -567,7 +428,7 @@ export class PrimeCodeRuntime extends CodeRuntime {
 
   /**
    * A pre-worker outcome. It goes through the same ledger every other path uses,
-   * because a handshake diagnostic interpolates a message from the host's tool
+   * because a pre-worker diagnostic interpolates a message from the host's tool
    * pipeline and must not be the one result that ignores the output cap.
    */
   private failure(error: CodeRunFailure): CodeRunResult {
@@ -575,7 +436,7 @@ export class PrimeCodeRuntime extends CodeRuntime {
     return new OutputLedger(this.outputBytes).failure([], error)
   }
 
-  /** A fail-closed handshake outcome; never a rejection of `run()`. */
+  /** A fail-closed pre-worker outcome; never a rejection of `run()`. */
   private exception(message: string): CodeRunResult {
     return this.failure({ kind: 'exception', message })
   }
@@ -586,4 +447,10 @@ export class PrimeCodeRuntime extends CodeRuntime {
   }
 }
 
-export default PrimeCodeRuntime
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    primeRealmRuntime: PrimeRealmRuntime
+  }
+}
+
+export default PrimeRealmRuntime

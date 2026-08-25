@@ -4,7 +4,7 @@
 
 本文只描述仓库当前已经实现并随包交付的架构，不记录版本路线、未来阶段或候选设计。代码、`agent-presets/prime/agent.cordis.yml` 与 `cordis.patch.yml` 是最终事实来源。
 
-`dsh-prime-agent` 在 DeepSeek Harness（DSH）之上提供一个 RLM-first 控制面：Prime Session 通过唯一模型可见的 `run_code` 使用持久 TypeScript Realm，普通 Session 继续使用 DSH 官方 one-shot Code Runtime。插件复用 DSH 的 Agent、Subagent、Jobs、权限、日志和 Session 生命周期，不创建第二套 Agent Loop。
+`dsh-prime-agent` 在 DeepSeek Harness（DSH）之上提供一个 RLM-first 控制面：Prime Session 通过唯一模型可见的 `repl` 工具（参数 `{ code }`）使用持久 TypeScript Realm，普通 Session 继续使用 DSH 官方 one-shot Code Runtime。插件复用 DSH 的 Agent、Subagent、Jobs、权限、日志和 Session 生命周期，不创建第二套 Agent Loop。
 
 ## 领域术语
 
@@ -14,13 +14,13 @@
 | Realm identity | 由 Session 稳定映射得到的不透明 id，用于把同一 Session 的 Prime cell 路由到同一个 Realm。 |
 | Worker generation | 一个 Realm 当前活着的 Worker Thread。hard kill 后会换代，旧 live namespace 永久丢失。 |
 | live namespace | Worker generation 内跨 cell 保留的普通顶层变量、函数、对象、Map 和索引。它不是持久存储。 |
-| cell / run | 一次 `run_code` 调用。一个 Realm 同时只执行一个 cell。 |
+| cell / run | 一次 `repl` 调用。一个 Realm 同时只执行一个 cell。 |
 | binding lease | 当前 cell 对 DSH 工具 binding 的临时调用权；cell 结束即撤销，保留下来的旧 wrapper 不能越轮调用工具。 |
-| Realm ownership lease | 一个已认证 Realm 的跨进程 live-heap 所有权；不同 Realm 不互斥。 |
+| Realm ownership lease | 一个 Realm 的跨进程 live-heap 所有权；不同 Realm 不互斥。 |
 | continuable child | 由 DSH 持久化、可接收后续消息并可冷恢复的子 Agent。其 id 不是 Job id。 |
 | Job | DSH 的通用后台任务。它有 `job_output`/`job_list`/`job_kill`；continuable child 不通过 Job 收集结果。 |
 | handoff file | 父子 Agent 在共享工作区传递大材料或结果的普通文件。只写一次是 policy 约定，不是文件系统授权。 |
-| harness entry | `prime_refine` 注入 prompt 的一条有界、非可信建议记录。 |
+| harness entry | `refine` 注入 prompt 的一条有界、非可信建议记录。 |
 | refinement transaction | 对 harness entries 的一次 apply 或 rollback 审计记录。 |
 
 “Agent Family”只描述 DSH 持有的直接父子关系和后代树，不表示本插件拥有独立 family registry。“Context Capsule”不是当前运行时对象；当前跨 Agent 上下文原语是 handoff file。
@@ -29,30 +29,32 @@
 
 ```text
 DSH profile
-├─ cordis.patch.yml
-│  ├─ 官方 code-runtime row（存在时 disabled）
-│  ├─ dsh-prime-agent/runtime
-│  │  ├─ Prime request ──→ Realm identity ──→ Realm pool ──→ persistent Worker
-│  │  └─ ordinary request ──────────────────→ 官方 one-shot Worker
+├─ cordis.patch.yml（纯插入）
+│  ├─ 官方 code-runtime row（原样保留）
+│  │  └─ 非 Prime 会话 ─────────────→ 官方 one-shot Worker
+│  ├─ dsh-prime-agent/runtime（prime-code-runtime）
+│  │  └─ primeRealmRuntime 服务
+│  │     ├─ Realm identity ← 可信 exec.agent.id（Agent scope 解析）
+│  │     └─ Realm pool ──→ persistent Worker
 │  └─ 官方 tool-subagent-report（next-step）
 │
 └─ Prime Agent scope
-   ├─ agent-presets/prime
-   ├─ dsh-prime-agent
-   │  ├─ control-plane policy
-   │  ├─ prime_refine
-   │  └─ prime_realm_identity
-   └─ Code Mode：模型只看见 run_code，其他工具成为 TypeScript SDK bindings
+   ├─ agent-presets/prime（独立 agent-plane 组合）
+   └─ dsh-prime-agent
+      ├─ 唯一模型可见工具 repl（参数 { code }）
+      ├─ cell 内隐藏绑定 tools / agents / jobs
+      ├─ control-plane policy（Persistent REPL guidance）
+      └─ refine
 ```
 
 包有两个运行入口：
 
-- `dsh-prime-agent`：Agent scope 内的 policy、continual learning、Realm handshake binding 与 Code Mode assembly 检查。
-- `dsh-prime-agent/runtime`：host scope 内的 hybrid Code Runtime、Realm pool、官方 fallback、按 Realm 的进程 lease、父进程生命周期监控与 Prime preset 落位。
+- `dsh-prime-agent`：Agent scope 内的 `repl` 工具注册、Realm 身份解析、control-plane policy、continual learning 与 prompt assembly（模型 catalog 只保留 `repl`）。
+- `dsh-prime-agent/runtime`：host scope 内的 `primeRealmRuntime` 服务、Realm pool、按 Realm 的进程 lease、父进程生命周期监控与 Prime preset 落位；官方 `code-runtime` row 完全不动。
 
 ## 安装与 preset
 
-随包 `cordis.patch.yml` 只执行一组 runtime 替换：Profile 已有官方 `code-runtime` row 时以名称断言后停用它，无该 row 的 TUI Profile 则跳过停用；两种情况都会插入 hybrid runtime。Prime 包把官方 Code Runtime 与 Worker Thread Runtime 作为生产依赖直接交付，hybrid runtime 在私有 realm 中挂载 one-shot fallback，因此不需要额外的 TUI 支持 bundle，普通请求仍按官方语义处理。
+随包 `cordis.patch.yml` 只执行一个操作：把 `dsh-prime-agent/runtime` 作为新 row 纯插入。官方 `code-runtime` row 原样保留——Prime 包不替换它、不携带也不挂载 one-shot fallback，非 Prime 会话继续由宿主官方 runtime 按官方语义处理。该 host row 注册唯一命名的 `primeRealmRuntime` 服务、监控直接父进程并在启动时落位 Prime preset。
 
 Subagent report 完全复用 DSH 0.1.1-rc.2 base bundle 的官方 `tool-subagent-report`。其默认 `next-step` 调度通过 `parent.steer()` 让运行中的 parent 在最近 step 消费报告，并唤醒空闲 parent；continuation manager 同时负责唤醒记账以及 report 先于后续 settled notice 的 FIFO 顺序。本包不再替换或复制该能力。
 
@@ -62,31 +64,32 @@ runtime 启动时把随包 Prime preset 复制到 `$DSH_HOME/.agent-presets/prim
 
 ## 唯一模型控制面
 
-Prime Agent scope 必须使用 Code Mode。存在 owning Agent 时，prompt assembly 必须只暴露 `run_code`；`prime_refine`、Subagent、Jobs、文件系统及其他工具只作为生成的 TypeScript SDK 成员出现。组合不满足该不变量时，assembly 明确失败。
+Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt assembly 先走完整流程，再在 next() 之后把 tools 列表过滤到只剩 `repl`；`refine`、Subagent、Jobs、文件系统、MCP 及其他工具不进入模型 schema，只作为 cell 内预加载的隐藏绑定出现。模型直接调用 `repl` 之外的任何工具都会被 guard 拒绝（提示 “use the repl tool for this session”）；组合不满足该不变量时，assembly 明确失败。
 
-插件把官方“一次 async 函数”说明改写成持久 REPL cell 说明：
+`repl` 的参数是单个 `code` 字符串。插件把官方“一次 async 函数”说明改写成持久 REPL cell 说明：
 
 - 支持顶层 `await`。
 - cell 的末尾表达式是结果，顶层 `return` 无效。
 - 普通顶层 binding 留在同一 live namespace，供后续 cell 直接使用。
+- cell 内预加载三个绑定命名空间：`tools.*`（当前 Agent catalog 中除 `repl` 外的全部工具，原始 typed bindings）、`agents.*`（`spawn`/`fork`/`list`/`send`/`interrupt` → `subagent`/`subagent_fork`/`list_agents`/`send_message`/`interrupt_agent`）、`jobs.*`（`list`/`output`/`kill` → `job_list`/`job_output`/`job_kill`）。SDK 声明会出现在模型 prompt 中供编写 cell 使用，但这些能力不可作为工具直接调用。
 - 大结果应在程序内过滤、聚合或抽取，只把当前决策需要的摘要送回模型。
 - 必须跨 Worker 或 host 重启保存的进度写入工作区文件。
 
-Prime 不增加搜索适配层。源码发现直接调用 DSH 原生 `grep`；Code Mode 以 TypeScript 正则字面量的 `.source` 生成 `pattern`，Realm bridge 仍只传无损 JSON。
+Prime 不增加搜索适配层。源码发现直接调用 DSH 原生 `grep`；在 repl 程序内以 TypeScript 正则字面量的 `.source` 生成 `pattern`，Realm bridge 仍只传无损 JSON。
 
-MCP 同样不进入 Realm runtime。profile 显式安装 DSH Host MCP client 后，server tools 注册到统一 `ctx.tools` catalog，Code Mode 自动把它们生成当前 Agent 的 TypeScript bindings；连接、认证、重连、工具代际、子进程与清理由 Host 插件拥有。本插件不复制上游的 Python kernel-owned MCP 或 ACP MCP program。
+MCP 同样不进入 Realm runtime。profile 显式安装 DSH Host MCP client 后，server tools 注册到统一 `ctx.tools` catalog，repl 单元自动获得对应 `tools.*` 绑定；连接、认证、重连、工具代际、子进程与清理由 Host 插件拥有。本插件不复制上游的 Python kernel-owned MCP 或 ACP MCP program。
 
-## Realm 身份与 hybrid 路由
+## Realm 身份路由
 
-Prime preset 在 Agent scope 注册固定名称 `prime_realm_identity`。hybrid runtime 对每次 Code Runtime 请求执行以下路由：
+`repl` 的执行路径不使用握手，也没有任何模型可见的身份工具：
 
-1. bindings 中没有该成员：完整委托官方 one-shot runtime。
-2. 成员存在但不可调用、响应格式错误或认证失败：明确失败，不降级。
-3. 成员有效：runtime 生成 32 字节随机 challenge，取得绑定当前 Session 的 token 与 challenge proof。
-4. host 侧用同一个 `<stateDirectory>/realm-identity` 验证 token、proof 与 challenge，得到 Realm identity。
-5. 通过认证的请求按调用准入顺序进入对应 Realm。
+1. 工具执行要求存在 owning Agent 会话（`exec.agent`）；缺少可信 Agent/Session 执行上下文时直接失败。
+2. Agent scope 用可信的 `exec.agent.id` 作为 session owner，从共享 `<stateDirectory>/realm-identity` 存储解析该会话稳定的不透明 Realm identity（首次访问时生成并持久保存）。
+3. 插件为本次 cell 构建 per-run 租约绑定（`tools`/`agents`/`jobs`），并把 Realm id、程序、绑定与 abort signal 交给 host 侧的 `ctx.primeRealmRuntime.run(...)`。
+4. host 服务按 Realm id 在跨进程 lease 下准入对应 Realm：不同 Session/Realm 可由不同进程同时运行；同一 Realm 已被其他存活进程持有时明确拒绝，不降级。
+5. 无法解析出 Realm id、命名了不可用的 Realm id，或缺少可信执行上下文时 fail closed——明确报错，不路由到任何其他 runtime，也没有 one-shot fallback。
 
-每个 Session 的随机 Realm identity 持久保存；原始 Session id 只参与 HMAC framing，不进入文件名。token 同时带版本、Realm identity、Session binding 与 MAC，proof 绑定本次 challenge。比较使用 constant-time 校验，错误不暴露 token、proof、secret、Session id 或宿主路径。
+每个 Session 的随机 Realm identity 持久保存；原始 Session id 只参与 keyed path/HMAC framing，不进入文件名。
 
 同一 Session 恢复后仍映射到同一 Realm identity，但 live namespace 只存在于当前进程的 Worker generation；host 重启后得到空 namespace。fork child 有自己的 Session 和 Realm，不继承父 Realm heap。
 
@@ -110,17 +113,17 @@ DSH compaction 不遍历、序列化或清理 Realm heap，spill 也不会驱逐
 - 旧 cell 保存的 Proxy 和 wrapper 可复用身份，但不能在没有当前 lease 时调用。
 - 本轮已接受的 host 调用全部结算后，cell 才完成。
 - arguments 与 resolution 必须是无损 JSON；函数和原生 handle 只能留在 Worker heap，不能穿过 host bridge。
-- `prime_realm_identity` 只用于 bootstrap，永不租给模型程序。
+- 模型 schema 中没有身份或引导工具；worker 仍按保留名 `prime_realm_identity` 过滤租约成员作为纵深防御，但该名称不再注册，也永不进入模型 prompt。
 
 每个 cell 同时受 host-call 总量和并发量限制，超限调用被拒绝，不扩大权限。
 
 ### 完成值、日志与大输出
 
-Worker 通过 Inspector 取得 cell 的末尾表达式，并把可序列化完成值交给 host。日志与完成值共同受 `maxOutputBytes` 硬上限约束。
+Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分类：lossless JSON 完成值走序列化 history，Map、Set、函数、BigInt、循环对象和 class instance 等非 JSON 值走 generation-local opaque history。日志与模型可见的完成 envelope 共同受 `maxOutputBytes` 硬上限约束。
 
-完成值本身由 runtime 自动保留在 generation-local 的 completion history 中，模型通过 `$_`（最近一个结果）与 `$out(N)`（按 handle 取回原值）访问；`$out.list()/drop(id)/clear()` 是管理面，不写进模型 schema。`maxCompletionFullBytes`（默认 64 KiB）以内的完成值原样返回，超过则改为固定 schema 的有界引用 envelope——cell 仍然成功，原值留在 Realm 内可继续计算，模型只收到 `maxCompletionProjectionBytes`（默认 4096）以内的投影。降级链是 full → rich projection → minimal reference → output-limit，只有连最小引用都放不进剩余预算时才真正失败。捕获遍历带早退：越过 `max(maxCompletionHistoryEntryBytes, maxCompletionFullBytes)` 的值不再被完整走查，因此其超出边界的部分不做 lossless 校验，而 history 保留的是原对象引用、不是快照。handle 由 host 全局单调分配、绝不复用，hard-kill 后旧 handle 明确抛 `CompletionExpiredError`。
+完成值本身由 runtime 自动保留在 generation-local 的 completion history 中，模型通过 `$_`（最近一个结果）与 `$out(N)`（按 handle 取回原值）访问；`$out.list()/drop(id)/clear()` 是管理面，不写进模型 schema。`maxCompletionFullBytes`（默认 64 KiB）以内的完成值原样返回，超过则改为固定 schema 的有界引用 envelope——cell 仍然成功，原值留在 Realm 内可继续计算，模型只收到 `maxCompletionProjectionBytes`（默认 4096）以内的投影。降级链是 full → rich projection → minimal reference → output-limit，只有连最小引用都放不进剩余预算时才真正失败。捕获遍历带早退：越过 `max(maxCompletionHistoryEntryBytes, maxCompletionFullBytes)` 的值不再被完整走查，因此其超出边界的部分不做 lossless 校验，而 history 保留的是原对象引用、不是快照。handle 由 host 全局单调分配、绝不复用，hard-kill 后旧 handle 明确抛 `CompletionExpiredError`。opaque history 使用独立预算（默认 8 项、估算 8 MiB、262144 nodes）和独立 FIFO，不会挤占 lossless JSON history；`$_`/`$out(N)` 返回原对象 identity，分类过程不调用用户 `toJSON`、`toString` 或 inspect hook。
 
-工具调用的 canonical value、持久日志 preview 与 spill locator 仍由 DSH 工具层管理。程序可以在 Realm 内使用完整 canonical value 做归约，而 Prime preset 为模型 projection 与 `tool/code-dispatch` 日志配置 12KB best-effort spill 阈值。backend 可用且 locator notice 能容纳时，超出部分由 DSH spill artifact 保存并按需读取；store 缺失、保存失败或 notice 无法放进预算时，策略保留完整 inline 成功结果并告警，不伪造 locator。这个预算不限制 Realm heap，也不等于上游 IPython 的 snapshot pruning；Realm 不复制 DSH 的 spill 或工具日志存储。
+工具调用的 canonical value、日志与 spill locator 仍由 DSH 工具层管理。程序可以在 Realm 内使用完整 canonical value 做归约；Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值，外层 `repl` 结果超过展示预算时由 DSH spill artifact 保存并按需读取。store 缺失、保存失败或 notice 无法放进预算时，策略保留完整 inline 成功结果并告警，不伪造 locator。这个预算不限制 Realm heap，也不等于上游 IPython 的 snapshot pruning；Realm 不复制 DSH 的 spill 或工具日志存储。
 
 ### 失败与换代
 
@@ -132,7 +135,7 @@ Worker 通过 Inspector 取得 cell 的末尾表达式，并把可序列化完�
 | completion 过大 | cell 成功，模型收到有界引用 envelope；原值按 history 预算保留，超过准入预算时 envelope 标 `retained: false` 且不给 handle。 |
 | 排队 cell 在 dispatch 前取消 | 只取消该 cell。 |
 | active abort、compute/wall timeout、输出失控、Worker exit、OOM 或控制协议违规 | hard-kill 当前 Worker；后续 cell 创建新 generation。 |
-| hard kill 后第一次真正 dispatch | 返回 namespace restart notice，明确上一 generation 的 bindings 已丢失。 |
+| hard kill 后第一次真正 dispatch | 返回 namespace restart notice，明确上一 generation 的 bindings 与保留结果已丢失。 |
 | active Realm 数达到上限 | 先回收最久未使用的 idle Realm；没有 idle 候选时拒绝新 Realm admission。 |
 | runtime dispose | 停止 admission，取消队列，终止并等待全部 Worker 与 host 调用。 |
 
@@ -166,13 +169,13 @@ handoff file 是写入时刻的快照；“写后不改”由 policy 约束，�
 
 ## Continual Harness
 
-`prime_refine` 是控制面之后的次级学习层，当前接口只有：
+`refine` 是控制面之后的次级学习层，当前接口只有：
 
 - `inspect`：读取 scope 的 revision、entries 与近期 transactions。
 - `apply`：提交带 trigger、具体 evidence、可验证 expected outcome 与最小 edits 的事务。
 - `rollback`：在目标事务的所有输出都未漂移时恢复 before snapshots。
 
-apply 与 rollback 都要求调用方先 inspect，并携带 `expected_revision`；磁盘锁内再次检查 revision。每笔事务保存 before/after，历史有界保留。skill/subagent entry 必须引用调用时真实可见的工具，不能把 `run_code` transport 当作 SDK member。
+apply 与 rollback 都要求调用方先 inspect，并携带 `expected_revision`；磁盘锁内再次检查 revision。每笔事务保存 before/after，历史有界保留。skill/subagent entry 必须引用调用时真实可见的工具，不能把 `repl` transport 当作 SDK member。
 
 local state 以 Session id 的 SHA-256 摘要命名。`allowGlobalRefinement` 默认为 false，此时 global inspect 和 mutation 都拒绝；启用后使用单一 `global.json`。当前 apply 是直接写入事务，没有 proposal/review 阶段、自动效果观察或 global 人工批准流程。
 
@@ -193,7 +196,7 @@ local state 以 Session id 的 SHA-256 摘要命名。`allowGlobalRefinement` �
 
 Realm heap、child Session、Job 和工作区 handoff files 不存放在上述插件私有目录：前者是 Worker 内存，child/Job 由 DSH 持有，handoff files 属于任务工作区。
 
-identity 与 continual 文件使用跨进程锁和原子替换；损坏、超限和 revision 冲突明确失败。多个 host runtime 可以共享一个 `stateDirectory`。认证成功后，runtime 在创建 live heap 前惰性取得该 Realm 的进程 lease：不同 Session/Realm 可由不同 TUI 同时运行；同一 Realm 已被其他存活进程持有时明确拒绝，不降级为 one-shot。idle/LRU 回收会先完整终止 Worker，再释放该 Realm 的 lease；旧 Worker 完全终止前，其他进程不能创建同一 Realm 的第二份 heap。记录的 owner pid 被明确证明不存在时，stale lease 可由下一 host 回收；PID 已复用或 liveness 不可判定时保守拒绝，避免生成第二份 heap。崩溃若遗留 `*.lease.lock`，操作者须确认对应 Session 无存活 host 后再清理。
+identity 与 continual 文件使用跨进程锁和原子替换；损坏、超限和 revision 冲突明确失败。多个 host runtime 可以共享一个 `stateDirectory`。身份解析成功后，runtime 在创建 live heap 前惰性取得该 Realm 的进程 lease：不同 Session/Realm 可由不同 TUI 同时运行；同一 Realm 已被其他存活进程持有时明确拒绝，不降级为 one-shot。idle/LRU 回收会先完整终止 Worker，再释放该 Realm 的 lease；旧 Worker 完全终止前，其他进程不能创建同一 Realm 的第二份 heap。记录的 owner pid 被明确证明不存在时，stale lease 可由下一 host 回收；PID 已复用或 liveness 不可判定时保守拒绝，避免生成第二份 heap。崩溃若遗留 `*.lease.lock`，操作者须确认对应 Session 无存活 host 后再清理。
 
 Host runtime 在模块加载时冻结启动宿主的直接父 pid，并立即开始监控。macOS/POSIX 上父进程退出后发生的 reparent，以及 Windows 上父 shell 被强制终止但子进程继续存活，都会触发同一条根级清理路径：停止监控，dispose 整个 Cordis tree，等待 Realm Worker 终止，再释放该 host 持有的 Realm leases，随后以 0 退出；根级 dispose 未在 5 秒内结算则以非零状态强制退出。父 pid 为 init 或当前进程时不安装监控；探测结果不能证明父进程消失时保持运行，避免误杀合法宿主。
 
@@ -204,15 +207,14 @@ Agent-scope `dsh-prime-agent`：
 | 配置 | 默认值 | 作用 |
 | --- | --- | --- |
 | `stateDirectory` | 必填 | Realm identity 与 continual state 根目录。 |
-| `refineToolName` | `prime_refine` | Continual Harness 工具名。 |
+| `refineToolName` | `refine` | Continual Harness 工具名（可配置）。 |
 | `allowGlobalRefinement` | `false` | 是否允许 global harness 读取和写入。 |
-| `requireCodeMode` | `true` | 是否强制模型只看见 `run_code`。 |
-| `requireOrchestrationTools` | `true` | 是否在 prompt assembly 时检查可见 Subagent admission 与 `job_output`。 |
+| `requireOrchestrationTools` | `true` | 是否在 prompt assembly 时要求 Agent catalog 具备 Subagent admission（`subagent`/`subagent_fork`）与 `agents`/`jobs` 控制（`list_agents`、`send_message`、`interrupt_agent`、`job_output`、`job_list`、`job_kill`）。 |
 | `continual` | 有界默认值 | entry、evidence、transaction、状态文件和 prompt 预算。 |
 
-Host-scope `dsh-prime-agent/runtime` 透传官方 `computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，并增加 `maxActiveRealms`、`maxIdleMs`、`maxHostCallsPerRun`、`maxParallelHostCallsPerRun`，以及 completion history 与投影的六个上限：`maxCompletionHistoryEntries`、`maxCompletionHistoryEstimatedBytes`、`maxCompletionHistoryNodes`、`maxCompletionHistoryEntryBytes`、`maxCompletionFullBytes`、`maxCompletionProjectionBytes`。
+Host-scope `dsh-prime-agent/runtime` 透传官方 `computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，并增加 `maxActiveRealms`（默认 8）、`maxIdleMs`（默认 600000）、`maxHostCallsPerRun`（默认 200）、`maxParallelHostCallsPerRun`（默认 16），以及 completion history 与投影的六个上限：`maxCompletionHistoryEntries`（默认 16）、`maxCompletionHistoryEstimatedBytes`（默认 32 MiB）、`maxCompletionHistoryNodes`（默认 1,000,000）、`maxCompletionHistoryEntryBytes`（默认 8 MiB）、`maxCompletionFullBytes`（默认 64 KiB）、`maxCompletionProjectionBytes`（默认 4 KiB）。
 
-runtime row 与 Prime preset 的 `stateDirectory` 必须相同，否则 handshake 两侧读取不同 HMAC key，所有 Prime 请求都会 fail closed。
+runtime row 与 Prime preset 的 `stateDirectory` 必须相同，否则身份记录与 lease 目录不一致，所有 Prime 请求都会 fail closed。
 
 ## 当前契约边界
 
@@ -230,6 +232,6 @@ runtime row 与 Prime preset 的 `stateDirectory` 必须相同，否则 handshak
 
 ## 验证面
 
-仓库测试覆盖：Realm identity 并发签发与认证、多个 host 共享状态、同 Realm 跨进程互斥与接管、Session 隔离、跨 cell binding 连续性、调用顺序、binding lease、host-call 预算、超时/abort/Worker 换代、namespace-loss notice、输出上限与 Unicode、工具失败恢复、approval escalation、Subagent Job 编排、官方 report 组合边界、preset 落位和 bundle patch 结构。
+仓库测试覆盖：Realm identity 稳定解析与持久化、多个 host 共享状态、同 Realm 跨进程互斥与接管、Session 隔离、跨 cell binding 连续性、调用顺序、binding lease、host-call 预算、超时/abort/Worker 换代、namespace-loss notice、completion history 预算、输出上限与 Unicode、工具失败恢复、approval escalation、Subagent Job 编排、官方 report 组合边界、preset 落位和 bundle patch 结构。
 
 上游行为映射与同步流程见 [Prime Agent 学习笔记](prime-agent-learnings.md) 和 [上游同步与差异对照手册](upstream-sync.zh.md)。

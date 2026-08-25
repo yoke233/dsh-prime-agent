@@ -19,13 +19,13 @@
  *   own realm.
  */
 
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { CodeBindingFunction, CodeBindingNamespace, CodeJsonValue, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
-import { decodeChallenge, RealmIdentityStore } from '../src/realm/identity.js'
+import type { CodeBindingFunction, CodeBindingNamespace, CodeJsonValue } from '@deepseek-ai/dsh-code-runtime'
 import { PersistentRealm } from '../src/realm/realm.js'
 import type { RealmBudgets, RealmCompletionHistoryLimits } from '../src/realm/realm.js'
 import * as primeRuntime from '../src/runtime.js'
@@ -35,12 +35,6 @@ const BUDGETS: RealmBudgets = {
   maxWallMs: 10_000,
   maxOutputBytes: 65_536,
   maxOldGenerationSizeMb: 128,
-}
-
-/** The single message every non-lossless completion still gets in Phase 1. */
-const INVALID_COMPLETION: CodeRunResult['error'] = {
-  kind: 'invalid-output',
-  message: 'program completion must be lossless JSON',
 }
 
 const realms: PersistentRealm[] = []
@@ -92,20 +86,12 @@ async function startHost(config: Record<string, unknown> = {}): Promise<Context>
   return context
 }
 
-/** Bindings that make a request a Prime request, over the key the runtime verifies. */
-function primeFor(sessionOwner: string): CodeBindingNamespace[] {
-  return [{
-    global: 'tools',
-    functions: {
-      prime_realm_identity: async (args: any) => {
-        const challenge = decodeChallenge(args?.challenge)
-        if (challenge === undefined) throw new Error('handshake challenge was not 32 bytes')
-        const { token, proof } = await new RealmIdentityStore({ directory: join(stateDirectory(), 'realm-identity') })
-          .issue(sessionOwner, challenge)
-        return { protocol: 1, token, proof }
-      },
-    } as unknown as Record<string, CodeBindingFunction>,
-  }]
+/**
+ * Deterministic 43-char unpadded base64url Realm identity for one test seed,
+ * the exact shape the trusted seam accepts and the lease directory verifies.
+ */
+function realmId(seed: string): string {
+  return createHash('sha256').update(seed).digest('base64url')
 }
 
 /** One `$out.list()` row, as the intrinsic renders it. */
@@ -114,8 +100,10 @@ interface HistoryRow {
   type: string
   serializedBytesAtCapture: number
   nodes: number
-  /** Own key total of a root object; 0 for every other type. */
+  /** Own key total of a root object; 0 for every other type and for opaque values. */
   keyCount: number
+  /** Present only on rows whose value is a retained NON-JSON live object. */
+  opaque?: true
 }
 
 /**
@@ -212,21 +200,27 @@ describe('completion history: what enters a slot', () => {
     expect((missing.value as unknown as CaughtRejection).message).toContain('recompute it')
   })
 
-  it('opens no slot for an exception or an invalid completion', async () => {
+  it('opens no slot for an exception, and retains every successful completion', async () => {
     // Plan §7.1: only the SUCCESS arm of the boundary retains. `startRun`'s
     // `finally` releases the object group on every path, so a slot opened there
     // would also capture values from runs that failed.
     const realm = createRealm()
     expect((await realm.run({ program: 'throw new Error("boom")', bindings: [] })).error?.kind).toBe('exception')
-    expect((await realm.run({ program: '({ fn: () => 1 })', bindings: [] })).error).toEqual(INVALID_COMPLETION)
-    expect(await history(realm)).toEqual([])
+    // REWRITTEN BY WP-C: a non-lossless completion is no longer a failure — it
+    // is an opaque retention under its own budget.
+    const opaque = await realm.run({ program: '({ fn: () => 1 })', bindings: [] })
+    expect(opaque.error).toBeUndefined()
+    expect(opaque.value).toMatchObject({ retained: true, opaque: true, truncated: true })
+    const rows = await history(realm)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.opaque).toBe(true)
     // REWRITTEN BY PHASE 2 (plan §9 Phase 2): the oversized completion used to
-    // belong on this list, as the third way a run could fail. It is now a
-    // success that retains — which is the whole point of the phase, and which
-    // this suite covers where the projection lives rather than here.
+    // belong on the failure list. It is now a success that retains — which is
+    // the whole point of the phase, and which this suite covers where the
+    // projection lives rather than here.
     const projected = await realm.run({ program: '"y".repeat(70000)', bindings: [] })
     expect(projected.error).toBeUndefined()
-    expect(await history(realm)).toHaveLength(1)
+    expect(await history(realm)).toHaveLength(2)
     // None of the three cost the realm its heap.
     expect(realm.generation).toBe(1)
   })
@@ -337,24 +331,32 @@ describe('completion history: identity', () => {
 
   it('keeps the retained object addressable after the program makes it non-serializable', async () => {
     // Plan §10: mutating a retained value into something non-JSON must not
-    // corrupt the history, and returning it again is an ordinary invalid-output
-    // whose cell still keeps the bindings it committed.
+    // corrupt the history. REWRITTEN BY WP-C: returning the spoiled value again
+    // is no longer a failure — it is a SECOND retention, under the opaque
+    // budgets, of the same object the JSON slot already holds. Both handles
+    // answer with the same identity, and the cell keeps the bindings it
+    // committed.
     const realm = createRealm()
     await realm.run({ program: 'const spoiled = { n: 1 }\nspoiled', bindings: [] })
     const [row] = await history(realm)
     const id = row?.id ?? 0
 
-    const failed = await realm.run({
+    const succeeded = await realm.run({
       program: 'const keptBesideSpoiling = "kept"\nspoiled.fn = () => 1\nspoiled',
       bindings: [],
     })
-    expect(failed.error).toEqual(INVALID_COMPLETION)
-    // Partial commit is unchanged: the declaration that completed survives.
+    expect(succeeded.error).toBeUndefined()
+    expect(succeeded.value).toMatchObject({ retained: true, opaque: true, truncated: true })
+    // The declaration that completed survives, as it did beside a failure.
     expect(await probe(realm, 'keptBesideSpoiling')).toBe('kept')
-    // The slot still holds the same object; only its serializability changed.
+    // The JSON slot still holds the same object; only its serializability changed.
     expect(await probe(realm, `typeof $out(${id}).fn`)).toBe('function')
-    // The failed cell opened no slot of its own.
-    expect(await history(realm)).toHaveLength(1)
+    // The second retention opened an OPAQUE slot for the same identity.
+    const rows = await history(realm)
+    expect(rows).toHaveLength(2)
+    expect(rows[0]?.opaque).toBeUndefined()
+    expect(rows[1]?.opaque).toBe(true)
+    expect(await probe(realm, `$out(${rows[1]?.id ?? 0}) === $out(${id})`)).toBe(true)
   })
 })
 
@@ -608,11 +610,12 @@ describe('completion history: generation fencing', () => {
     expect(stale.value).toMatchObject({ threw: true, name: 'CompletionExpiredError' })
   })
 
-  it('opens no slot when the walk runs out of stack', async () => {
+  it('retains a value the walk ran out of stack on, as opaque', async () => {
     // Phase 0 §3.8 put the recursion ceiling around 7,800 frames and found it
     // moves with stack state, so only the BEHAVIOUR is asserted: the RangeError
-    // becomes the ordinary invalid-output diagnostic, the realm keeps its heap,
-    // and nothing reaches the history.
+    // REWRITTEN BY WP-C is the classification walk's verdict that the value is
+    // not lossless JSON, so the value is retained as opaque and the cell
+    // succeeds — the realm keeps its heap and the history gains one opaque slot.
     const realm = createRealm()
     await realm.run({ program: '({ retained: true })', bindings: [] })
     const before = await history(realm)
@@ -621,9 +624,12 @@ describe('completion history: generation fencing', () => {
       program: 'let deep: unknown = { leaf: true }\nfor (let i = 0; i < 60000; i++) deep = { next: deep }\ndeep',
       bindings: [],
     })
-    expect(tooDeep.error).toEqual(INVALID_COMPLETION)
+    expect(tooDeep.error).toBeUndefined()
+    expect(tooDeep.value).toMatchObject({ retained: true, opaque: true, truncated: true })
     expect(realm.generation).toBe(1)
-    expect(await history(realm)).toEqual(before)
+    const after = await history(realm)
+    expect(after).toHaveLength(before.length + 1)
+    expect(after[after.length - 1]?.opaque).toBe(true)
   })
 
   it('opens no slot when the worker dies mid-run', async () => {
@@ -971,24 +977,24 @@ describe('completion history: the expiry class', () => {
 
 describe('completion history: the deployment path', () => {
   it('carries the plugin config through to the realm that enforces it', async () => {
-    // The limits travel plugin config -> PrimeCodeRuntime -> PersistentRealm ->
-    // the run message. Constructing a realm directly, as every test above does,
-    // would not prove any of that wiring.
+    // The limits travel plugin config -> the trusted realm service ->
+    // PersistentRealm -> the run message. Constructing a realm directly, as
+    // every test above does, would not prove any of that wiring.
     const ctx = await startHost({ maxCompletionHistoryEntries: 1 })
-    const bindings = primeFor('session-history-config')
+    const realm = realmId('session-history-config')
 
-    const first = await ctx.codeRuntime.run({ program: '({ first: true })', bindings })
+    const first = await ctx.primeRealmRuntime.run(realm, { program: '({ first: true })', bindings: [] })
     expect(first.error).toBeUndefined()
-    await ctx.codeRuntime.run({ program: '({ second: true })', bindings })
+    await ctx.primeRealmRuntime.run(realm, { program: '({ second: true })', bindings: [] })
 
-    const observed = await ctx.codeRuntime.run({
+    const observed = await ctx.primeRealmRuntime.run(realm, {
       program: 'console.log(JSON.stringify($out.list().map(entry => entry.type)))',
-      bindings,
+      bindings: [],
     })
     expect(observed.error).toBeUndefined()
     // One entry of budget, so the second completion evicted the first.
     expect(observed.logs[0]).toBe('["object"]')
-    expect((await ctx.codeRuntime.run({ program: '$_', bindings })).value).toEqual({ second: true })
+    expect((await ctx.primeRealmRuntime.run(realm, { program: '$_', bindings: [] })).value).toEqual({ second: true })
   })
 
   it('releases the history when an idle realm is reclaimed, and says nothing extra about it', async () => {
@@ -1001,20 +1007,20 @@ describe('completion history: the deployment path', () => {
     // recovery instruction. Warning on every fresh namespace would spend tokens
     // on every session start to pre-empt a case the error already handles.
     const ctx = await startHost({ maxIdleMs: 150 })
-    const bindings = primeFor('session-reclaimed')
+    const realm = realmId('session-reclaimed')
 
-    await ctx.codeRuntime.run({ program: '({ beforeReclaim: true })', bindings })
-    const listed = await ctx.codeRuntime.run({
+    await ctx.primeRealmRuntime.run(realm, { program: '({ beforeReclaim: true })', bindings: [] })
+    const listed = await ctx.primeRealmRuntime.run(realm, {
       program: 'console.log(JSON.stringify($out.list()[0].id))',
-      bindings,
+      bindings: [],
     })
     const handle = JSON.parse(listed.logs[0] as string) as number
 
     await new Promise((resolve) => { setTimeout(resolve, 700) })
 
-    const after = await ctx.codeRuntime.run({
+    const after = await ctx.primeRealmRuntime.run(realm, {
       program: `({ entries: $out.list().length, stale: ${caught(`$out(${handle})`)}.name })`,
-      bindings,
+      bindings: [],
     })
     expect(after.value).toEqual({ entries: 0, stale: 'CompletionExpiredError' })
     expect(after.logs.filter(line => line.startsWith('[prime-realm] ')))
@@ -1022,10 +1028,17 @@ describe('completion history: the deployment path', () => {
   })
 
   it('leaves the ordinary one-shot runtime without a completion history', async () => {
-    // Plan §7.3 and §12: the history exists only on the authenticated Prime
-    // path. A request with no handshake binding is delegated to the official
-    // runtime verbatim, which knows nothing about any of this.
-    const ctx = await startHost()
+    // Plan §7.3 and §12: the history exists only on the Prime path. The
+    // trusted seam is a separate service mounted BESIDE the official one-shot
+    // runtime, which keeps its shipped semantics and knows nothing about any
+    // of this.
+    root = await mkdtemp(join(tmpdir(), 'dsh-prime-history-'))
+    const ctx = new Context()
+    contexts.push(ctx)
+    const { default: WorkerThreadCodeRuntime } = await import('@deepseek-ai/dsh-code-runtime-worker-thread')
+    await ctx.plugin(WorkerThreadCodeRuntime, {})
+    await ctx.plugin(primeRuntime, { stateDirectory: stateDirectory() })
+
     const oneShot = await ctx.codeRuntime.run({
       program: 'return [typeof $out, typeof $_, typeof CompletionExpiredError]',
       bindings: [],
@@ -1033,10 +1046,10 @@ describe('completion history: the deployment path', () => {
     expect(oneShot.error).toBeUndefined()
     expect(oneShot.value).toEqual(['undefined', 'undefined', 'undefined'])
 
-    // The same deployment still installs them for a Prime session.
-    const prime = await ctx.codeRuntime.run({
+    // The same deployment still installs them for a Prime realm.
+    const prime = await ctx.primeRealmRuntime.run(realmId('session-oneshot-control'), {
       program: '[typeof $out, typeof $_, typeof CompletionExpiredError]',
-      bindings: primeFor('session-oneshot-control'),
+      bindings: [],
     })
     expect(prime.value).toEqual(['function', 'undefined', 'function'])
   })

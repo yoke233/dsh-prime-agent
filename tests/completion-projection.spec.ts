@@ -228,14 +228,18 @@ describe('completion projection: the first acceptance case', () => {
     expect(keys.map(entry => entry.key)).toEqual(['pad', 'later'])
     expect(keys[1]).toEqual({ key: 'later' })
 
-    // And the same getter INSIDE the ceiling still fails the run, so what moved
-    // is the boundary, not the rule.
+    // And the same getter INSIDE the ceiling no longer fails the run at all:
+    // the walk reached it, read it, and its throw classified the value as a
+    // NON-JSON live object, which the opaque budgets retain (WP-C). What moved
+    // is the boundary, not the classification.
     const reached = createRealm()
-    const failed = await reached.run({
+    const retained = await reached.run({
       program: `({ get later() { throw new Error("boom") } })`,
       bindings: [],
     })
-    expect(failed.error).toEqual({ kind: 'invalid-output', message: 'program completion must be lossless JSON' })
+    expect(retained.error).toBeUndefined()
+    expect(retained.value).toMatchObject({ retained: true, opaque: true, truncated: true })
+    expect(reached.generation).toBe(1)
   })
 
   it('never reads past the ceiling, so a getter beyond it is not invoked', async () => {
@@ -679,12 +683,14 @@ describe('completion projection: the boundaries the early exit must not move', (
     expect(result.value).toBe('y'.repeat(4000))
   })
 
-  it('still refuses a non-lossless value the bounded walk actually reached', async () => {
-    // Plan §8: inside the capture ceiling nothing changed. These must keep
-    // failing, and with the message that says nothing about which part was
-    // refused.
+  it('retains a non-lossless value the bounded walk actually reached, as opaque', async () => {
+    // REWRITTEN BY WP-C (plan §5 "non-JSON live objects"): inside the capture
+    // ceiling these values are still refused the WIRE, but the refusal no
+    // longer fails the cell. Each is retained under the opaque budgets and
+    // answered with the fixed envelope, and the original value stays reachable
+    // by identity through its handle.
     const realm = createRealm()
-    const refused = [
+    const retained = [
       '({ big: 10n })',
       '({ fn: () => 1 })',
       '({ when: new Date() })',
@@ -696,9 +702,10 @@ describe('completion projection: the boundaries the early exit must not move', (
       // walk finished.
       '(() => { const rows = [1, 2]; (rows as unknown as Record<string, unknown>).extra = 3; return rows })()',
     ]
-    for (const program of refused) {
+    for (const program of retained) {
       const result = await realm.run({ program, bindings: [] })
-      expect(result.error, program).toEqual({ kind: 'invalid-output', message: 'program completion must be lossless JSON' })
+      expect(result.error, program).toBeUndefined()
+      expect(result.value, program).toMatchObject({ retained: true, opaque: true, truncated: true })
     }
   })
 

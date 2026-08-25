@@ -21,6 +21,7 @@ import type { MessagePort } from 'node:worker_threads'
 import type {
   HostToRealm,
   RealmCompletionHistoryLimits,
+  RealmCompletionOpaqueLimits,
   RealmCompletionProjectionLimits,
   RealmNamespaceSpec,
   RealmProgramFailure,
@@ -69,13 +70,6 @@ const capturedStringCharCodeAt = String.prototype.charCodeAt
 const capturedStringSlice = String.prototype.slice
 const capturedStringStartsWith = String.prototype.startsWith
 const capturedSymbolIterator = Symbol.iterator
-
-/**
- * Mirrors `HIDDEN_BINDING_MEMBER` in `./protocol.ts`, which this module cannot
- * import at runtime. Defense in depth: the host already filters the name out of
- * every namespace declaration it sends.
- */
-const HIDDEN_BINDING_MEMBER = 'prime_realm_identity'
 
 /** Bounded inspect options, so a pathological value cannot explode the rendering. */
 const INSPECT_OPTIONS = { depth: 4, maxArrayLength: 100, maxStringLength: 10_000 } as const
@@ -628,7 +622,6 @@ function installNamespaces(specs: RealmNamespaceSpec[]): void {
     const handle = ensureHandle(spec.global)
     for (let nameIndex = 0; nameIndex < spec.names.length; nameIndex++) {
       const name = spec.names[nameIndex] as string
-      if (name === HIDDEN_BINDING_MEMBER) continue
       capturedReflectApply(capturedSetAdd, handle.allowed, [name])
     }
     handle.errorClass = spec.errorClass ? ensureErrorClass(spec.errorClass) : undefined
@@ -1016,6 +1009,14 @@ interface CompletionSlot {
    * be a quarter-megabyte answer to a metadata query (§9 Phase 2).
    */
   keyCount: number
+  /**
+   * Whether this slot holds a NON-JSON live value. Opaque slots are charged
+   * against their own entries/nodes/bytes budgets, evicted FIFO within their
+   * own class, and their rows in `$out.list()` carry `opaque: true` so the
+   * byte/node numbers there are read as capture-walk charges rather than as
+   * serialized sizes.
+   */
+  opaque: boolean
 }
 
 /** Model-visible intrinsics this runtime owns; see `protocol.ts` for the reserved name. */
@@ -1039,6 +1040,13 @@ let completionLimits: RealmCompletionHistoryLimits = {
   maxCompletionHistoryEntryBytes: 8_388_608,
 }
 
+/** Restates `DEFAULT_COMPLETION_OPAQUE_LIMITS`, on the same terms. */
+let opaqueLimits: RealmCompletionOpaqueLimits = {
+  maxCompletionOpaqueEntries: 8,
+  maxCompletionOpaqueEstimatedBytes: 8_388_608,
+  maxCompletionOpaqueNodes: 262_144,
+}
+
 /** Restates `DEFAULT_COMPLETION_PROJECTION_LIMITS`, on the same terms. */
 let projectionLimits: RealmCompletionProjectionLimits = {
   maxCompletionFullBytes: 65_536,
@@ -1058,10 +1066,18 @@ let runMetrics: RealmRunMetrics = {}
 /** History accesses refused since the last settlement, whoever attempted them. */
 let refusedAccesses = 0
 
-/** Retained completions in FIFO order, oldest first. Generation-local by construction. */
+/**
+ * Retained completions in FIFO order, oldest first. Generation-local by
+ * construction. Lossless-JSON and opaque slots share ONE store — handles,
+ * `$_` and `$out.list()` are a single namespace — while the budgets behind
+ * them stay independent: each class is charged and evicted on its own.
+ */
 const completionSlots: CompletionSlot[] = []
 let retainedBytes = 0
 let retainedNodes = 0
+/** Opaque-store totals, kept apart from the JSON store's for the same reason. */
+let opaqueBytes = 0
+let opaqueNodes = 0
 /**
  * The slot the LAST completion landed in, which is not the newest slot: an
  * identity hit reuses an older slot and deliberately keeps its FIFO position, so
@@ -1069,10 +1085,20 @@ let retainedNodes = 0
  */
 let lastRetainedId: number | undefined
 
-/** How `$out.list()` names a value, without rendering any of its content. */
+/**
+ * How `$out.list()` names a value, without rendering any of its content.
+ *
+ * `Array.isArray` is the one call here that can throw — a revoked proxy — and
+ * the opaque path reaches it with values the walk already refused, so the
+ * throw is answered with the safe `typeof` verdict instead of escaping.
+ */
 function completionType(value: unknown): string {
   if (value === null) return 'null'
-  if (capturedArrayIsArray(value)) return 'array'
+  try {
+    if (capturedArrayIsArray(value)) return 'array'
+  } catch {
+    // A revoked proxy: not an array by any test the program cannot veto.
+  }
   return typeof value
 }
 
@@ -1084,21 +1110,62 @@ function findCompletionSlot(id: number): CompletionSlot | undefined {
   return undefined
 }
 
-/** Drop the oldest slot, releasing the history's claim on its value. */
-function evictOldestCompletion(): void {
-  const evicted = capturedReflectApply(capturedArraySplice, completionSlots, [0, 1]) as CompletionSlot[]
-  const slot = evicted[0]
-  if (slot === undefined) return
-  retainedBytes -= slot.bytes
-  retainedNodes -= slot.nodes
-  runMetrics.evicted = (runMetrics.evicted ?? 0) + 1
+/** Lossless-JSON slots currently held, whatever the shared store's total length. */
+function jsonEntryCount(): number {
+  let count = 0
+  for (let index = 0; index < completionSlots.length; index++) {
+    if (!(completionSlots[index] as CompletionSlot).opaque) count += 1
+  }
+  return count
 }
 
-/** Whether one more entry of this size fits inside all three history budgets. */
+/** Opaque slots currently held, whatever the shared store's total length. */
+function opaqueEntryCount(): number {
+  let count = 0
+  for (let index = 0; index < completionSlots.length; index++) {
+    if ((completionSlots[index] as CompletionSlot).opaque) count += 1
+  }
+  return count
+}
+
+/** Drop the oldest LOSSLESS-JSON slot, releasing the history's claim on its value. */
+function evictOldestCompletion(): void {
+  for (let index = 0; index < completionSlots.length; index++) {
+    const slot = completionSlots[index] as CompletionSlot
+    if (slot.opaque) continue
+    capturedReflectApply(capturedArraySplice, completionSlots, [index, 1])
+    retainedBytes -= slot.bytes
+    retainedNodes -= slot.nodes
+    runMetrics.evicted = (runMetrics.evicted ?? 0) + 1
+    return
+  }
+}
+
+/** Drop the oldest OPAQUE slot, leaving every lossless-JSON slot untouched. */
+function evictOldestOpaqueCompletion(): void {
+  for (let index = 0; index < completionSlots.length; index++) {
+    const slot = completionSlots[index] as CompletionSlot
+    if (!slot.opaque) continue
+    capturedReflectApply(capturedArraySplice, completionSlots, [index, 1])
+    opaqueBytes -= slot.bytes
+    opaqueNodes -= slot.nodes
+    runMetrics.evicted = (runMetrics.evicted ?? 0) + 1
+    return
+  }
+}
+
+/** Whether one more JSON entry of this size fits inside all three JSON budgets. */
 function completionHistoryFits(bytes: number, nodes: number): boolean {
-  return completionSlots.length + 1 <= completionLimits.maxCompletionHistoryEntries
+  return jsonEntryCount() + 1 <= completionLimits.maxCompletionHistoryEntries
     && retainedBytes + bytes <= completionLimits.maxCompletionHistoryEstimatedBytes
     && retainedNodes + nodes <= completionLimits.maxCompletionHistoryNodes
+}
+
+/** Whether one more opaque entry of this charge fits inside all three opaque budgets. */
+function opaqueHistoryFits(bytes: number, nodes: number): boolean {
+  return opaqueEntryCount() + 1 <= opaqueLimits.maxCompletionOpaqueEntries
+    && opaqueBytes + bytes <= opaqueLimits.maxCompletionOpaqueEstimatedBytes
+    && opaqueNodes + nodes <= opaqueLimits.maxCompletionOpaqueNodes
 }
 
 /**
@@ -1134,9 +1201,14 @@ function completionFitsAlone(bytes: number, nodes: number): boolean {
  * capture.
  */
 function retainCompletion(value: unknown, bytes: number, stats: CaptureStats): number | undefined {
+  // The identity scan is scoped to the JSON class. The same object can be
+  // retained once as JSON and later, mutated, again as opaque: each capture is
+  // charged to the class that admitted it, so a JSON hit must not reuse an
+  // opaque slot (or vice versa) and quietly move a value between budgets.
   if (typeof value === 'object' && value !== null) {
     for (let index = 0; index < completionSlots.length; index++) {
       const slot = completionSlots[index] as CompletionSlot
+      if (slot.opaque) continue
       if (capturedObjectIs(slot.value, value)) {
         lastRetainedId = slot.id
         return slot.id
@@ -1149,7 +1221,7 @@ function retainCompletion(value: unknown, bytes: number, stats: CaptureStats): n
   // Refused outright rather than evicted for: one oversized result must not cost
   // the model every earlier handle it still holds.
   if (stats.overNodeLimit || !completionFitsAlone(bytes, stats.nodes)) return undefined
-  while (completionSlots.length > 0 && !completionHistoryFits(bytes, stats.nodes)) evictOldestCompletion()
+  while (jsonEntryCount() > 0 && !completionHistoryFits(bytes, stats.nodes)) evictOldestCompletion()
   /* c8 ignore next 2 -- unreachable: the value fits an empty store and the entry budget is a positive integer, so an emptied store always has room. */
   if (!completionHistoryFits(bytes, stats.nodes)) return undefined
   const slot = capturedObjectCreate(null) as CompletionSlot
@@ -1159,9 +1231,59 @@ function retainCompletion(value: unknown, bytes: number, stats: CaptureStats): n
   slot.nodes = stats.nodes
   slot.type = completionType(value)
   slot.keyCount = stats.rootKeyCount
+  slot.opaque = false
   capturedReflectApply(capturedArrayPush, completionSlots, [slot])
   retainedBytes += bytes
   retainedNodes += stats.nodes
+  lastRetainedId = slot.id
+  return slot.id
+}
+
+/**
+ * Admit one successful run's NON-JSON completion into the opaque history.
+ *
+ * Reached only from the catch arm of the classification walk, so the value's
+ * graph was deliberately never measured: the slot is charged what the walk
+ * accounted for before it threw, against the OPAQUE budgets alone. Identity
+ * reuse follows the JSON rule with one extension — functions are scanned too,
+ * because `Object.is` on a function is an identity test with no content cost,
+ * and a function is the most common live value a model recirculates. The
+ * refused-oversized rule is the same: a charge that cannot fit an EMPTY
+ * opaque store never clears the store for it.
+ */
+function retainOpaqueCompletion(value: unknown, stats: CaptureStats): number | undefined {
+  const kind = typeof value
+  if (kind === 'object' || kind === 'function') {
+    for (let index = 0; index < completionSlots.length; index++) {
+      const slot = completionSlots[index] as CompletionSlot
+      if (!slot.opaque) continue
+      if (capturedObjectIs(slot.value, value)) {
+        lastRetainedId = slot.id
+        return slot.id
+      }
+    }
+  }
+  const run = active
+  /* c8 ignore next -- capture runs inside its own run, so the slot is always held here. */
+  if (run === undefined) return undefined
+  const bytes = stats.bytes
+  const nodes = stats.nodes
+  if (bytes > opaqueLimits.maxCompletionOpaqueEstimatedBytes
+    || nodes > opaqueLimits.maxCompletionOpaqueNodes) return undefined
+  while (opaqueEntryCount() > 0 && !opaqueHistoryFits(bytes, nodes)) evictOldestOpaqueCompletion()
+  /* c8 ignore next 2 -- unreachable: the charge fits an empty store and the entry budget is a positive integer, so an emptied store always has room. */
+  if (!opaqueHistoryFits(bytes, nodes)) return undefined
+  const slot = capturedObjectCreate(null) as CompletionSlot
+  slot.id = run.completionId
+  slot.value = value
+  slot.bytes = bytes
+  slot.nodes = nodes
+  slot.type = completionType(value)
+  slot.keyCount = 0
+  slot.opaque = true
+  capturedReflectApply(capturedArrayPush, completionSlots, [slot])
+  opaqueBytes += bytes
+  opaqueNodes += nodes
   lastRetainedId = slot.id
   return slot.id
 }
@@ -1232,17 +1354,21 @@ const completionList = (): unknown[] => {
   const rows: unknown[] = []
   for (let index = 0; index < completionSlots.length; index++) {
     const slot = completionSlots[index] as CompletionSlot
-    capturedReflectApply(capturedArrayPush, rows, [{
-      id: slot.id,
-      type: slot.type,
-      serializedBytesAtCapture: slot.bytes,
-      nodes: slot.nodes,
-      // The COUNT, never the keys themselves. It is one small integer whatever
-      // the value's shape, which is what separates it from the names: sixteen
-      // 20,000-character keys across sixteen rows would be a quarter-megabyte
-      // answer to a metadata query (§9 Phase 2).
-      keyCount: slot.keyCount,
-    }])
+    const row = capturedObjectCreate(null) as Record<string, unknown>
+    row.id = slot.id
+    row.type = slot.type
+    // For an opaque slot these are the classification walk's CHARGE, not a
+    // serialized size — the `opaque: true` marker is what tells the two apart.
+    row.serializedBytesAtCapture = slot.bytes
+    row.nodes = slot.nodes
+    // The COUNT, never the keys themselves. It is one small integer whatever
+    // the value's shape, which is what separates it from the names: sixteen
+    // 20,000-character keys across sixteen rows would be a quarter-megabyte
+    // answer to a metadata query (§9 Phase 2). Opaque values are never walked
+    // for their keys, so their count is always zero.
+    row.keyCount = slot.keyCount
+    if (slot.opaque) row.opaque = true
+    capturedReflectApply(capturedArrayPush, rows, [row])
   }
   return rows
 }
@@ -1255,8 +1381,13 @@ const completionDrop = (id: unknown): boolean => {
     const slot = completionSlots[index] as CompletionSlot
     if (slot.id !== handle) continue
     capturedReflectApply(capturedArraySplice, completionSlots, [index, 1])
-    retainedBytes -= slot.bytes
-    retainedNodes -= slot.nodes
+    if (slot.opaque) {
+      opaqueBytes -= slot.bytes
+      opaqueNodes -= slot.nodes
+    } else {
+      retainedBytes -= slot.bytes
+      retainedNodes -= slot.nodes
+    }
     if (lastRetainedId === handle) lastRetainedId = undefined
     return true
   }
@@ -1270,6 +1401,8 @@ const completionClear = (): number => {
   completionSlots.length = 0
   retainedBytes = 0
   retainedNodes = 0
+  opaqueBytes = 0
+  opaqueNodes = 0
   lastRetainedId = undefined
   return released
 }
@@ -1443,6 +1576,58 @@ function projectCompletion(
 }
 
 /**
+ * The FIXED envelope a NON-JSON completion crosses as, whatever it was.
+ *
+ * The value itself never serializes, and rendering it would mean calling the
+ * program's own hooks — toJSON, toString, inspect, or any proxy trap — so
+ * the envelope deliberately carries no contents at all: a handle when the value
+ * was retained, the safe typeof-grade type, and the 'opaque: true' marker
+ * that tells the model this is a live value to reach through $out(id), not a
+ * projection of something serializable. The chain is the same
+ * rich -> minimal -> output-limit as the JSON projector's, and the rich rung
+ * is already small enough that the minimal one exists only for the most
+ * starved wire budgets.
+ */
+function projectOpaqueCompletion(
+  value: unknown,
+  id: number | undefined,
+  remaining: number,
+  maxOutputBytes: number,
+): DoneFragment {
+  const budget = projectionLimits.maxCompletionProjectionBytes < remaining
+    ? projectionLimits.maxCompletionProjectionBytes
+    : remaining
+  const type = completionType(value)
+  const rich = capturedObjectCreate(null) as Record<string, unknown>
+  if (id !== undefined) {
+    rich[COMPLETION_HISTORY_GLOBAL] = id
+    rich.use = `${COMPLETION_HISTORY_GLOBAL}(${id})`
+  }
+  rich.retained = id !== undefined
+  rich.type = type
+  rich.opaque = true
+  // The value was never measured (measuring it would run the program's own
+  // code), so there is no capture size to report and no reason to invent one.
+  if (id === undefined) rich.reason = 'opaque history budget exceeded'
+  rich.truncated = true
+  const richJson = capturedJsonStringify(rich)
+  if (capturedBufferByteLength(richJson, 'utf8') <= budget) return { json: richJson }
+
+  const minimal = capturedObjectCreate(null) as Record<string, unknown>
+  if (id !== undefined) {
+    minimal[COMPLETION_HISTORY_GLOBAL] = id
+    minimal.use = `${COMPLETION_HISTORY_GLOBAL}(${id})`
+  } else {
+    minimal.type = type
+    minimal.opaque = true
+  }
+  minimal.truncated = true
+  const minimalJson = capturedJsonStringify(minimal)
+  if (capturedBufferByteLength(minimalJson, 'utf8') <= remaining) return { json: minimalJson }
+  return outputLimit(maxOutputBytes)
+}
+
+/**
  * Prepare the program's completion value; only lossless JSON crosses, whole when
  * it is small enough and as a bounded reference when it is not. This is also the
  * one place the history can retain from: it holds the live value, its exact
@@ -1451,6 +1636,12 @@ function projectCompletion(
  * boundary, so an exception, abort, timeout, cancellation or output overflow
  * never opens a slot.
  *
+ * A value the walk refuses is NOT a failed cell (WP-C): it is a live object
+ * whose generation-local retention the opaque budgets decide, answered with a
+ * fixed envelope. The one walk does double duty — it classifies, and it charges
+ * the opaque slot with what it accounted for before refusing — so a second
+ * pass that could fire user getters again is never taken.
+ *
  * The walk is bounded, which moves one boundary the plan calls out explicitly
  * (§8): validity is now judged over the part that was WALKED. A value whose tail
  * lies past the capture ceiling is never read, so a bigint hiding there is never
@@ -1458,7 +1649,7 @@ function projectCompletion(
  * price of not serializing 64 MiB to discover it was unusable, and it costs the
  * model nothing real — the history retains the original object, not the
  * snapshot, so a value that was never fully validated is still exactly what
- * `$out(id)` hands back.
+ * $out(id) hands back.
  */
 function prepareCompletion(value: unknown, remaining: number, maxOutputBytes: number): DoneFragment {
   if (value === undefined) return {}
@@ -1475,7 +1666,20 @@ function prepareCompletion(value: unknown, remaining: number, maxOutputBytes: nu
   try {
     snapshot = snapshotValue(value, new CapturedSet<object>(), stats, slot)
   } catch {
-    return boundedFailure('invalid-output', 'program completion must be lossless JSON', remaining, maxOutputBytes)
+    // NON-JSON live value: retain it under the opaque budgets and answer with
+    // the fixed envelope. The walk already stopped at the first thing it would
+    // not render — a bigint, a function, a non-plain prototype, a getter that
+    // threw, a revoked proxy — and none of the program's own hooks were needed
+    // to say so. The cell is a SUCCESS either way.
+    projectedCompletion = true
+    const id = retainOpaqueCompletion(value, stats)
+    runMetrics.retained = id !== undefined
+    runMetrics.rejected = id === undefined
+    runMetrics.historyEntries = jsonEntryCount()
+    runMetrics.historyBytes = retainedBytes
+    runMetrics.historyOpaqueEntries = opaqueEntryCount()
+    runMetrics.historyOpaqueBytes = opaqueBytes
+    return projectOpaqueCompletion(value, id, remaining, maxOutputBytes)
   }
   projectedCompletion = true
   if (stats.aborted) {
@@ -1483,8 +1687,10 @@ function prepareCompletion(value: unknown, remaining: number, maxOutputBytes: nu
     // abandoned for good reason, and unretainable whatever the measurement would
     // have said.
     runMetrics.rejected = true
-    runMetrics.historyEntries = completionSlots.length
+    runMetrics.historyEntries = jsonEntryCount()
     runMetrics.historyBytes = retainedBytes
+    runMetrics.historyOpaqueEntries = opaqueEntryCount()
+    runMetrics.historyOpaqueBytes = opaqueBytes
     return projectCompletion(value, undefined, undefined, slot.node, remaining, maxOutputBytes)
   }
   let json: string
@@ -1500,8 +1706,10 @@ function prepareCompletion(value: unknown, remaining: number, maxOutputBytes: nu
   runMetrics.captureNodes = stats.nodes
   runMetrics.retained = id !== undefined
   runMetrics.rejected = id === undefined
-  runMetrics.historyEntries = completionSlots.length
+  runMetrics.historyEntries = jsonEntryCount()
   runMetrics.historyBytes = retainedBytes
+  runMetrics.historyOpaqueEntries = opaqueEntryCount()
+  runMetrics.historyOpaqueBytes = opaqueBytes
   if (bytes <= projectionLimits.maxCompletionFullBytes && bytes <= remaining) {
     projectedCompletion = false
     return { json }
@@ -1681,6 +1889,7 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
     // still reach a terminal, not strand the host waiting out its wall clock.
     completionLimits = message.completion.limits
     projectionLimits = message.completion.projection
+    opaqueLimits = message.completion.opaque
     installCompletionIntrinsics()
     installNamespaces(message.namespaces)
     const parameters: ReplEvaluateParameters = {

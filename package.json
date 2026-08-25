@@ -1,7 +1,7 @@
 {
   "name": "dsh-prime-agent",
-  "version": "0.2.0",
-  "description": "Prime Agent-inspired persistent RLM control plane for DeepSeek Harness Code Mode",
+  "version": "0.3.0",
+  "description": "Persistent TypeScript REPL control plane for DeepSeek Harness",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yoke233/dsh-prime-agent.git"
@@ -14,7 +14,7 @@
     "deepseek-harness",
     "dsh-plugin",
     "rlm",
-    "code-mode",
+    "typescript-repl",
     "agent"
   ],
   "type": "module",
@@ -58,7 +58,6 @@
   },
   "dependencies": {
     "@deepseek-ai/dsh-code-runtime": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-code-runtime-worker-thread": "^0.1.1-rc.2",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependencies": {

@@ -1,10 +1,10 @@
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { CodeBindingFunction, CodeBindingNamespace, CodeJsonValue, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
-import { decodeChallenge, RealmIdentityStore } from '../src/realm/identity.js'
+import type { CodeBindingErrorClass, CodeBindingFunction, CodeBindingNamespace, CodeJsonValue, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
 import * as primeRuntime from '../src/runtime.js'
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- test bindings receive already-validated JSON */
@@ -25,7 +25,7 @@ function stateDirectory(): string {
   return join(root, 'state')
 }
 
-/** Boot a real host row: lazy per-Realm ownership, official fallback, real workers. */
+/** Boot a real host row: trusted realm service, cross-process leases, real workers. */
 async function startHost(config: Record<string, unknown> = {}): Promise<Context> {
   const context = new Context()
   contexts.push(context)
@@ -33,44 +33,19 @@ async function startHost(config: Record<string, unknown> = {}): Promise<Context>
   return context
 }
 
-/** The identity store the agent-scoped bootstrap tool would use, over the same directory. */
-function identityStore(): RealmIdentityStore {
-  return new RealmIdentityStore({ directory: join(stateDirectory(), 'realm-identity') })
-}
-
 /**
- * A faithful stand-in for the `prime_realm_identity` tool: it decodes the
- * runtime's challenge and issues over the SAME on-disk key the runtime verifies
- * against. `mangle` lets a test corrupt the response after it was legitimately
- * issued.
+ * Deterministic 43-char unpadded base64url Realm identity for one test seed,
+ * the exact shape the identity store issues and the lease accepts.
  */
-function issuer(sessionOwner: string, mangle?: (issued: { protocol: number; token: string; proof: string }) => unknown): Binding {
-  return async (args: any) => {
-    const challenge = decodeChallenge(args?.challenge)
-    if (challenge === undefined) throw new Error('handshake challenge was not 32 bytes')
-    const { token, proof } = await identityStore().issue(sessionOwner, challenge)
-    const issued = { protocol: 1, token, proof }
-    return (mangle ? mangle(issued) : issued) as CodeJsonValue
-  }
+function realmId(seed: string): string {
+  return createHash('sha256').update(seed).digest('base64url')
 }
 
-function bindings(functions: Record<string, Binding>): CodeBindingNamespace[] {
-  return [{ global: 'tools', functions: functions as Record<string, CodeBindingFunction> }]
-}
-
-/** Bindings that make the request a Prime request for `sessionOwner`. */
-function primeFor(sessionOwner: string, extra: Record<string, Binding> = {}): CodeBindingNamespace[] {
-  return bindings({ prime_realm_identity: issuer(sessionOwner), ...extra })
-}
-
-function primeForWithErrorClass(
-  sessionOwner: string,
-  errorClass: { name: string, memberNameProperty: string } | undefined,
-  extra: Record<string, Binding> = {},
-): CodeBindingNamespace[] {
-  const [namespace] = primeFor(sessionOwner, extra)
-  if (namespace === undefined) throw new Error('Prime fixture did not create its tools namespace')
-  return errorClass === undefined ? [{ ...namespace }] : [{ ...namespace, errorClass }]
+/** One `tools` namespace, optionally with a frozen error-class descriptor. */
+function toolsBindings(functions: Record<string, Binding>, errorClass?: CodeBindingErrorClass): CodeBindingNamespace[] {
+  return [errorClass === undefined
+    ? { global: 'tools', functions: functions as Record<string, CodeBindingFunction> }
+    : { global: 'tools', functions: functions as Record<string, CodeBindingFunction>, errorClass }]
 }
 
 function bindingNamespace(global: string, functions: Record<string, Binding>): CodeBindingNamespace {
@@ -115,49 +90,26 @@ async function makeRoot(prefix: string): Promise<void> {
   root = await mkdtemp(join(tmpdir(), prefix))
 }
 
-describe('prime code runtime routing', () => {
-  it('delegates a request without the handshake binding to the official one-shot runtime', async () => {
-    await makeRoot('dsh-prime-oneshot-')
-    const ctx = await startHost()
-
-    const first = await ctx.codeRuntime.run({
-      program: 'globalThis.carried = "from run one"\nreturn 1',
-      bindings: [],
-    })
-    expect(first.error).toBeUndefined()
-    expect(first.value).toBe(1)
-    // The one-shot path is the official implementation verbatim: no realm
-    // bookkeeping is appended to it.
-    expect(notices(first)).toEqual([])
-
-    const second = await ctx.codeRuntime.run({
-      program: 'return [typeof globalThis.carried, typeof globalThis.state]',
-      bindings: [],
-    })
-    expect(second.error).toBeUndefined()
-    expect(second.value).toEqual(['undefined', 'undefined'])
-    expect(notices(second)).toEqual([])
-  })
-
+describe('prime realm runtime routing', () => {
   it('keeps ordinary bindings across cells without emitting retained-run notices', async () => {
     await makeRoot('dsh-prime-continuity-')
     const ctx = await startHost()
 
-    const first = await ctx.codeRuntime.run({
+    const first = await ctx.primeRealmRuntime.run(realmId('session-alpha'), {
       program: `
         const lookup = new Map([['a', { id: 'a' }]])
         const review = async (id: string) => await tools.review_item({ item: lookup.get(id) })
         ;({ size: lookup.size, stateGlobal: typeof globalThis.state })
       `,
-      bindings: primeFor('session-alpha', { review_item: async args => ({ seen: args.item }) }),
+      bindings: toolsBindings({ review_item: async args => ({ seen: args.item }) }),
     })
     expect(first.error).toBeUndefined()
     expect(first.value).toEqual({ size: 1, stateGlobal: 'undefined' })
     expectFreshNamespaceNotice(first)
 
-    const second = await ctx.codeRuntime.run({
+    const second = await ctx.primeRealmRuntime.run(realmId('session-alpha'), {
       program: 'await review("a")',
-      bindings: primeFor('session-alpha', { review_item: async args => ({ rebound: args.item }) }),
+      bindings: toolsBindings({ review_item: async args => ({ rebound: args.item }) }),
     })
     expect(second.error).toBeUndefined()
     // The persisted closure resolved THIS run's binding, not run one's.
@@ -165,156 +117,44 @@ describe('prime code runtime routing', () => {
     expect(notices(second)).toEqual([])
   })
 
-  it('routes one session to one realm and keeps separate sessions isolated', async () => {
+  it('routes one realm id to one live namespace and keeps separate realm ids isolated', async () => {
     await makeRoot('dsh-prime-sessions-')
     const ctx = await startHost()
 
-    await ctx.codeRuntime.run({ program: 'const owner = "alpha"', bindings: primeFor('session-alpha') })
-    await ctx.codeRuntime.run({ program: 'const owner = "beta"', bindings: primeFor('session-beta') })
+    await ctx.primeRealmRuntime.run(realmId('session-alpha'), { program: 'const owner = "alpha"', bindings: [] })
+    await ctx.primeRealmRuntime.run(realmId('session-beta'), { program: 'const owner = "beta"', bindings: [] })
 
-    const alpha = await ctx.codeRuntime.run({ program: 'owner', bindings: primeFor('session-alpha') })
-    const beta = await ctx.codeRuntime.run({ program: 'owner', bindings: primeFor('session-beta') })
+    const alpha = await ctx.primeRealmRuntime.run(realmId('session-alpha'), { program: 'owner', bindings: [] })
+    const beta = await ctx.primeRealmRuntime.run(realmId('session-beta'), { program: 'owner', bindings: [] })
     expect(alpha.value).toBe('alpha')
     expect(beta.value).toBe('beta')
 
-    // A resumed session reaches the same realm; a fork (a new session id) does not.
-    const forked = await ctx.codeRuntime.run({ program: 'typeof owner === "undefined" ? null : owner', bindings: primeFor('session-alpha-fork') })
+    // A resumed session reaches the same realm; a fork (a new realm id) does not.
+    const forked = await ctx.primeRealmRuntime.run(realmId('session-alpha-fork'), {
+      program: 'typeof owner === "undefined" ? null : owner',
+      bindings: [],
+    })
     expect(forked.value).toBeNull()
   })
 
-  it('admits cells for one realm in run call order even when handshakes finish out of order', async () => {
+  it('serializes cells for one realm in run call order', async () => {
     await makeRoot('dsh-prime-admission-order-')
     const ctx = await startHost()
-    const issueFirst = issuer('session-ordered')
+    const parked = deferred<CodeJsonValue>()
 
-    const first = ctx.codeRuntime.run({
-      program: 'const dispatchOrder = ["first"]\ndispatchOrder',
-      bindings: bindings({
-        prime_realm_identity: async args => {
-          await sleep(400)
-          return issueFirst(args)
-        },
-      }),
+    const first = ctx.primeRealmRuntime.run(realmId('session-ordered'), {
+      program: 'globalThis.order = ["first"]\nawait tools.park({})',
+      bindings: toolsBindings({ park: () => parked.promise }),
     })
-    const second = ctx.codeRuntime.run({
-      program: 'dispatchOrder.push("second")\ndispatchOrder',
-      bindings: primeFor('session-ordered'),
+    await sleep(150)
+    const second = ctx.primeRealmRuntime.run(realmId('session-ordered'), {
+      program: 'globalThis.order.push("second")\nglobalThis.order',
+      bindings: [],
     })
+    parked.resolve('first done')
 
-    expect((await first).value).toEqual(['first'])
+    expect((await first).value).toBe('first done')
     expect((await second).value).toEqual(['first', 'second'])
-  })
-
-  it('freezes each namespace error-class descriptor after the first legal Prime run', async () => {
-    await makeRoot('dsh-prime-schema-error-class-')
-    const ctx = await startHost()
-    const descriptor = { name: 'ToolError', memberNameProperty: 'tool' }
-
-    await expect(ctx.codeRuntime.run({
-      program: '"must not run"',
-      bindings: [
-        ...primeForWithErrorClass('session-schema-error', descriptor),
-        bindingNamespace('tools', {}),
-      ],
-    })).rejects.toThrow('duplicate binding global')
-
-    const first = await ctx.codeRuntime.run({
-      program: 'const schemaKept = "stable"\nschemaKept',
-      bindings: primeForWithErrorClass('session-schema-error', descriptor),
-    })
-    expect(first.value).toBe('stable')
-    expectFreshNamespaceNotice(first)
-
-    const drifted = [
-      primeFor('session-schema-error'),
-      primeForWithErrorClass('session-schema-error', { name: 'OtherError', memberNameProperty: 'tool' }),
-      primeForWithErrorClass('session-schema-error', { name: 'ToolError', memberNameProperty: 'operation' }),
-    ]
-    for (const candidate of drifted) {
-      await expect(ctx.codeRuntime.run({
-        program: 'globalThis.schemaDriftRan = true\n"must not run"',
-        bindings: candidate,
-      })).rejects.toThrow('changed its frozen error class descriptor')
-    }
-
-    const after = await ctx.codeRuntime.run({
-      program: '({ kept: schemaKept, driftRan: Object.hasOwn(globalThis, "schemaDriftRan") })',
-      bindings: primeForWithErrorClass('session-schema-error', descriptor),
-    })
-    expect(after.value).toEqual({ kept: 'stable', driftRan: false })
-    expect(notices(after)).toEqual([])
-
-    await ctx.codeRuntime.run({
-      program: 'const noErrorClassKept = "stable"\nnoErrorClassKept',
-      bindings: primeFor('session-schema-add'),
-    })
-    await expect(ctx.codeRuntime.run({
-      program: 'globalThis.addedErrorClassRan = true\n"must not run"',
-      bindings: primeForWithErrorClass('session-schema-add', descriptor),
-    })).rejects.toThrow('changed its frozen error class descriptor')
-    const afterAdded = await ctx.codeRuntime.run({
-      program: '({ kept: noErrorClassKept, driftRan: Object.hasOwn(globalThis, "addedErrorClassRan") })',
-      bindings: primeFor('session-schema-add'),
-    })
-    expect(afterAdded.value).toEqual({ kept: 'stable', driftRan: false })
-    expect(notices(afterAdded)).toEqual([])
-  })
-
-  it('rejects a namespace first introduced after the user claimed its lexical name', async () => {
-    await makeRoot('dsh-prime-schema-late-global-')
-    const ctx = await startHost()
-
-    await ctx.codeRuntime.run({
-      program: 'const lateTools = 7\nlateTools',
-      bindings: primeFor('session-schema-late'),
-    })
-    await expect(ctx.codeRuntime.run({
-      program: 'await globalThis.lateTools.echo({ value: 9 })',
-      bindings: [
-        ...primeFor('session-schema-late'),
-        bindingNamespace('lateTools', { echo: async args => args }),
-      ],
-    })).rejects.toThrow('was not declared by this Realm\'s first Prime run')
-
-    const after = await ctx.codeRuntime.run({
-      program: '({ lexical: lateTools, installed: Object.hasOwn(globalThis, "lateTools") })',
-      bindings: primeFor('session-schema-late'),
-    })
-    expect(after.value).toEqual({ lexical: 7, installed: false })
-    expect(notices(after)).toEqual([])
-  })
-
-  it('allows a frozen namespace to be omitted, restored and given new functions', async () => {
-    await makeRoot('dsh-prime-schema-members-')
-    const ctx = await startHost()
-
-    const first = await ctx.codeRuntime.run({
-      program: 'const rememberedExtras = globalThis.extras\nawait globalThis.extras.echo({ turn: 1 })',
-      bindings: [
-        ...primeFor('session-schema-members'),
-        bindingNamespace('extras', { echo: async args => ({ source: 'first', args }) }),
-      ],
-    })
-    expect(first.value).toEqual({ source: 'first', args: { turn: 1 } })
-
-    const omitted = await ctx.codeRuntime.run({
-      program: '({ same: rememberedExtras === globalThis.extras, member: typeof globalThis.extras.echo })',
-      bindings: primeFor('session-schema-members'),
-    })
-    expect(omitted.value).toEqual({ same: true, member: 'undefined' })
-
-    const restored = await ctx.codeRuntime.run({
-      program: '({ same: rememberedExtras === globalThis.extras, result: await globalThis.extras.echo({ turn: 3 }) })',
-      bindings: [
-        ...primeFor('session-schema-members'),
-        bindingNamespace('extras', { echo: async args => ({ source: 'restored', args }) }),
-      ],
-    })
-    expect(restored.value).toEqual({
-      same: true,
-      result: { source: 'restored', args: { turn: 3 } },
-    })
-    expect(notices(restored)).toEqual([])
   })
 
   it('does not serialize execution across different realms', async () => {
@@ -323,9 +163,9 @@ describe('prime code runtime routing', () => {
     const parked = deferred<CodeJsonValue>()
     const alphaStarted = deferred<void>()
 
-    const alpha = ctx.codeRuntime.run({
+    const alpha = ctx.primeRealmRuntime.run(realmId('session-order-alpha'), {
       program: 'await tools.park({})',
-      bindings: primeFor('session-order-alpha', {
+      bindings: toolsBindings({
         park: () => {
           alphaStarted.resolve(undefined)
           return parked.promise
@@ -334,9 +174,9 @@ describe('prime code runtime routing', () => {
     })
     await alphaStarted.promise
 
-    const beta = ctx.codeRuntime.run({
+    const beta = ctx.primeRealmRuntime.run(realmId('session-order-beta'), {
       program: '"beta completed"',
-      bindings: primeFor('session-order-beta'),
+      bindings: [],
     })
     const betaBeforeRelease = await Promise.race([
       beta,
@@ -348,193 +188,176 @@ describe('prime code runtime routing', () => {
     expect((await alpha).value).toBe('alpha completed')
   })
 
-  it('hides the handshake bootstrap from the program lease', async () => {
-    await makeRoot('dsh-prime-hidden-')
+  it('rejects an unusable realm id as caller misuse', async () => {
+    await makeRoot('dsh-prime-realm-id-')
     const ctx = await startHost()
 
-    const result = await ctx.codeRuntime.run({
-      program: `
-        let called = 'not reached'
-        try {
-          await tools.prime_realm_identity({ protocol: 1, challenge: 'x' })
-        } catch (error) {
-          called = String(error?.message ?? error)
-        }
-        ;({
-          member: typeof tools.prime_realm_identity,
-          present: 'prime_realm_identity' in tools,
-          keys: Object.keys(tools),
-          called,
-        })
-      `,
-      bindings: primeFor('session-hidden', { echo: async args => args as CodeJsonValue }),
+    await expect(ctx.primeRealmRuntime.run('', { program: '1', bindings: [] }))
+      .rejects.toThrow('realm id must not be empty')
+    await expect(ctx.primeRealmRuntime.run('not-a-verified-realm-identity', { program: '1', bindings: [] }))
+      .rejects.toThrow('realm id is not a verified Realm identity')
+  })
+
+  it('freezes each namespace error-class descriptor after the first legal run', async () => {
+    await makeRoot('dsh-prime-schema-error-class-')
+    const ctx = await startHost()
+    const descriptor = { name: 'ToolError', memberNameProperty: 'tool' }
+
+    await expect(ctx.primeRealmRuntime.run(realmId('session-schema-error'), {
+      program: '"must not run"',
+      bindings: [
+        ...toolsBindings({}, descriptor),
+        bindingNamespace('tools', {}),
+      ],
+    })).rejects.toThrow('duplicate binding global')
+
+    const first = await ctx.primeRealmRuntime.run(realmId('session-schema-error'), {
+      program: 'const schemaKept = "stable"\nschemaKept',
+      bindings: toolsBindings({}, descriptor),
     })
-    expect(result.error).toBeUndefined()
-    expect(result.value).toMatchObject({
-      member: 'undefined',
-      present: false,
-      keys: ['echo'],
+    expect(first.value).toBe('stable')
+    expectFreshNamespaceNotice(first)
+
+    const drifted = [
+      toolsBindings({}),
+      toolsBindings({}, { name: 'OtherError', memberNameProperty: 'tool' }),
+      toolsBindings({}, { name: 'ToolError', memberNameProperty: 'operation' }),
+    ]
+    for (const candidate of drifted) {
+      await expect(ctx.primeRealmRuntime.run(realmId('session-schema-error'), {
+        program: 'globalThis.schemaDriftRan = true\n"must not run"',
+        bindings: candidate,
+      })).rejects.toThrow('changed its frozen error class descriptor')
+    }
+
+    const after = await ctx.primeRealmRuntime.run(realmId('session-schema-error'), {
+      program: '({ kept: schemaKept, driftRan: Object.hasOwn(globalThis, "schemaDriftRan") })',
+      bindings: toolsBindings({}, descriptor),
     })
-    expect(String((result.value as Record<string, unknown>).called)).toContain('prime_realm_identity')
+    expect(after.value).toEqual({ kept: 'stable', driftRan: false })
+    expect(notices(after)).toEqual([])
+
+    // The first run declares `tools` WITHOUT an error class, so adding one
+    // later is a frozen-descriptor change rather than a late declaration.
+    await ctx.primeRealmRuntime.run(realmId('session-schema-add'), {
+      program: 'const noErrorClassKept = "stable"\nnoErrorClassKept',
+      bindings: toolsBindings({}),
+    })
+    await expect(ctx.primeRealmRuntime.run(realmId('session-schema-add'), {
+      program: 'globalThis.addedErrorClassRan = true\n"must not run"',
+      bindings: toolsBindings({}, descriptor),
+    })).rejects.toThrow('changed its frozen error class descriptor')
+    const afterAdded = await ctx.primeRealmRuntime.run(realmId('session-schema-add'), {
+      program: '({ kept: noErrorClassKept, driftRan: Object.hasOwn(globalThis, "addedErrorClassRan") })',
+      bindings: [],
+    })
+    expect(afterAdded.value).toEqual({ kept: 'stable', driftRan: false })
+    expect(notices(afterAdded)).toEqual([])
+  })
+
+  it('rejects a namespace first introduced after the user claimed its lexical name', async () => {
+    await makeRoot('dsh-prime-schema-late-global-')
+    const ctx = await startHost()
+
+    await ctx.primeRealmRuntime.run(realmId('session-schema-late'), {
+      program: 'const lateTools = 7\nlateTools',
+      bindings: [],
+    })
+    await expect(ctx.primeRealmRuntime.run(realmId('session-schema-late'), {
+      program: 'await globalThis.lateTools.echo({ value: 9 })',
+      bindings: [
+        ...toolsBindings({}),
+        bindingNamespace('lateTools', { echo: async args => args }),
+      ],
+    })).rejects.toThrow("was not declared by this Realm's first Prime run")
+
+    const after = await ctx.primeRealmRuntime.run(realmId('session-schema-late'), {
+      program: '({ lexical: lateTools, installed: Object.hasOwn(globalThis, "lateTools") })',
+      bindings: [],
+    })
+    expect(after.value).toEqual({ lexical: 7, installed: false })
+    expect(notices(after)).toEqual([])
+  })
+
+  it('allows a frozen namespace to be omitted, restored and given new functions', async () => {
+    await makeRoot('dsh-prime-schema-members-')
+    const ctx = await startHost()
+
+    const first = await ctx.primeRealmRuntime.run(realmId('session-schema-members'), {
+      program: 'const rememberedExtras = globalThis.extras\nawait globalThis.extras.echo({ turn: 1 })',
+      bindings: [
+        ...toolsBindings({}),
+        bindingNamespace('extras', { echo: async args => ({ source: 'first', args }) }),
+      ],
+    })
+    expect(first.value).toEqual({ source: 'first', args: { turn: 1 } })
+
+    const omitted = await ctx.primeRealmRuntime.run(realmId('session-schema-members'), {
+      program: '({ same: rememberedExtras === globalThis.extras, member: typeof globalThis.extras.echo })',
+      bindings: [],
+    })
+    expect(omitted.value).toEqual({ same: true, member: 'undefined' })
+
+    const restored = await ctx.primeRealmRuntime.run(realmId('session-schema-members'), {
+      program: '({ same: rememberedExtras === globalThis.extras, result: await globalThis.extras.echo({ turn: 3 }) })',
+      bindings: [
+        ...toolsBindings({}),
+        bindingNamespace('extras', { echo: async args => ({ source: 'restored', args }) }),
+      ],
+    })
+    expect(restored.value).toEqual({
+      same: true,
+      result: { source: 'restored', args: { turn: 3 } },
+    })
+    expect(notices(restored)).toEqual([])
   })
 })
 
-describe('prime handshake failure is fail-closed', () => {
-  it('refuses a forged token without degrading to one-shot semantics', async () => {
-    await makeRoot('dsh-prime-forged-')
-    const ctx = await startHost()
-
-    const forged = await ctx.codeRuntime.run({
-      program: '1',
-      bindings: bindings({
-        prime_realm_identity: async () => ({ protocol: 1, token: 'A'.repeat(130), proof: 'B'.repeat(43) }),
-      }),
-    })
-    expect(forged.error?.kind).toBe('exception')
-    expect(forged.error?.message).toContain('realm handshake rejected')
-    expect(forged.value).toBeUndefined()
-    expect(forged.logs).toEqual([])
-
-    // Fail-closed means fail-closed: the run did NOT quietly execute one-shot.
-    const oneShot = await ctx.codeRuntime.run({ program: 'return 1', bindings: [] })
-    expect(oneShot.value).toBe(1)
-    expect(notices(oneShot)).toEqual([])
-  })
-
-  it('refuses a genuine token whose challenge proof was tampered with', async () => {
-    await makeRoot('dsh-prime-tampered-')
-    const ctx = await startHost()
-
-    const result = await ctx.codeRuntime.run({
-      program: '1',
-      bindings: bindings({
-        prime_realm_identity: issuer('session-tampered', issued => ({
-          ...issued,
-          proof: `${issued.proof.startsWith('A') ? 'B' : 'A'}${issued.proof.slice(1)}`,
-        })),
-      }),
-    })
-    expect(result.error?.kind).toBe('exception')
-    expect(result.error?.message).toContain('challenge proof does not match this token')
-  })
-
-  it('refuses a replayed proof issued for a different challenge', async () => {
-    await makeRoot('dsh-prime-replay-')
-    const ctx = await startHost()
-    const store = identityStore()
-    const stale = await store.issue('session-replay', Buffer.alloc(32, 7))
-
-    const result = await ctx.codeRuntime.run({
-      program: '1',
-      bindings: bindings({ prime_realm_identity: async () => ({ protocol: 1, ...stale }) }),
-    })
-    expect(result.error?.kind).toBe('exception')
-    expect(result.error?.message).toContain('challenge proof does not match this token')
-  })
-
-  it('refuses a malformed handshake response and a bootstrap that rejects', async () => {
-    await makeRoot('dsh-prime-malformed-')
-    const ctx = await startHost()
-
-    const shapes: unknown[] = [null, 'token', { protocol: 2, token: 'a', proof: 'b' }, { protocol: 1, token: 5, proof: 'b' }, { protocol: 1, proof: 'b' }]
-    for (const shape of shapes) {
-      const result = await ctx.codeRuntime.run({
-        program: '1',
-        bindings: bindings({ prime_realm_identity: async () => shape as CodeJsonValue }),
-      })
-      expect(result.error?.kind).toBe('exception')
-      expect(result.error?.message).toBe('realm handshake returned a malformed response')
-    }
-
-    const rejected = await ctx.codeRuntime.run({
-      program: '1',
-      bindings: bindings({ prime_realm_identity: async () => { throw new Error('tool denied by policy') } }),
-    })
-    expect(rejected.error?.kind).toBe('exception')
-    expect(rejected.error?.message).toBe('realm handshake binding failed: tool denied by policy')
-  })
-
-  it('resolves rather than rejects when the handshake response fights inspection', async () => {
-    await makeRoot('dsh-prime-hostile-shape-')
-    const ctx = await startHost()
-
-    const hostile: unknown[] = [
-      { protocol: 1, get token(): string { throw new Error('no token for you') }, proof: 'p' },
-      { protocol: 1, token: 'a', get proof(): string { throw new Error('no proof for you') } },
-      { get protocol(): number { throw new Error('no protocol for you') } },
-    ]
-    for (const response of hostile) {
-      const result = await ctx.codeRuntime.run({
-        program: '1',
-        bindings: bindings({ prime_realm_identity: async () => response as CodeJsonValue }),
-      })
-      expect(result.error).toEqual({ kind: 'exception', message: 'realm handshake returned a malformed response' })
-    }
-
-    // A namespace whose `functions` throws on access declares no handshake, so
-    // probing it must not fail the call on its own. The request is then an
-    // ordinary one-shot, and the official runtime is left to judge the
-    // namespace — which it does, as the caller misuse it is.
-    const hostileNamespace = [{ global: 'tools', get functions(): never { throw new Error('no functions') } }] as unknown as CodeBindingNamespace[]
-    await expect(ctx.codeRuntime.run({ program: 'return 7', bindings: hostileNamespace }))
-      .rejects.toThrow('no functions')
-  })
-
-  it('never leaks the token, proof, or challenge into a failure message', async () => {
-    await makeRoot('dsh-prime-secrets-')
-    const ctx = await startHost()
-    let seen: { challenge: string; token: string; proof: string } | undefined
-
-    const result = await ctx.codeRuntime.run({
-      program: '1',
-      bindings: bindings({
-        prime_realm_identity: async (args: any) => {
-          const challenge = decodeChallenge(args.challenge)
-          if (challenge === undefined) throw new Error('bad challenge')
-          const issued = await identityStore().issue('session-secret', challenge)
-          seen = { challenge: String(args.challenge), ...issued }
-          return { protocol: 1, token: issued.token, proof: `${issued.proof.slice(0, -1)}Z` }
-        },
-      }),
-    })
-    expect(result.error?.kind).toBe('exception')
-    const message = result.error?.message ?? ''
-    expect(seen).toBeDefined()
-    expect(message).not.toContain(seen?.token)
-    expect(message).not.toContain(seen?.proof)
-    expect(message).not.toContain(seen?.challenge)
-    expect(message).not.toContain(stateDirectory())
-  })
-
-  it('reports an abort rather than a handshake failure', async () => {
+describe('prime realm abort semantics', () => {
+  it('reports an abort before dispatch when the signal already fired', async () => {
     await makeRoot('dsh-prime-abort-')
     const ctx = await startHost()
 
     const preAborted = new AbortController()
     preAborted.abort('user stopped the turn')
-    let bootstrapCalls = 0
-    const before = await ctx.codeRuntime.run({
+    const before = await ctx.primeRealmRuntime.run(realmId('session-abort'), {
       program: '1',
       signal: preAborted.signal,
-      bindings: bindings({
-        prime_realm_identity: async () => { bootstrapCalls += 1; return null },
-      }),
+      bindings: [],
     })
     expect(before.error).toEqual({ kind: 'abort', message: 'user stopped the turn' })
-    expect(bootstrapCalls).toBe(0)
+    expect(notices(before)).toEqual([])
+  })
 
-    const during = new AbortController()
-    const mid = await ctx.codeRuntime.run({
-      program: '1',
-      signal: during.signal,
-      bindings: bindings({
-        prime_realm_identity: async () => {
-          during.abort('aborted mid-handshake')
-          throw new Error('dispatch cancelled')
-        },
-      }),
+  it('cancels only the queued cell whose signal fires', async () => {
+    await makeRoot('dsh-prime-abort-queued-')
+    const ctx = await startHost()
+    const parked = deferred<CodeJsonValue>()
+    const controller = new AbortController()
+
+    const held = ctx.primeRealmRuntime.run(realmId('session-abort-queued'), {
+      program: 'await tools.park({})',
+      bindings: toolsBindings({ park: () => parked.promise }),
     })
-    expect(mid.error).toEqual({ kind: 'abort', message: 'aborted mid-handshake' })
+    await sleep(150)
+    const queued = ctx.primeRealmRuntime.run(realmId('session-abort-queued'), {
+      program: 'globalThis.queuedRan = true\n"queued ran"',
+      signal: controller.signal,
+      bindings: [],
+    })
+    controller.abort('user stopped the turn')
+    parked.resolve('released')
+
+    const heldResult = await held
+    expect(heldResult.value).toBe('released')
+    const queuedResult = await queued
+    expect(queuedResult.error).toEqual({ kind: 'abort', message: 'user stopped the turn' })
+    // The cancelled cell never ran; the realm survived and keeps its namespace.
+    const after = await ctx.primeRealmRuntime.run(realmId('session-abort-queued'), {
+      program: 'Object.hasOwn(globalThis, "queuedRan")',
+      bindings: [],
+    })
+    expect(after.value).toBe(false)
   })
 })
 
@@ -543,21 +366,24 @@ describe('realm namespace reporting', () => {
     await makeRoot('dsh-prime-generation-')
     const ctx = await startHost({ maxWallMs: 400 })
 
-    const seeded = await ctx.codeRuntime.run({ program: 'const kept = "v1"', bindings: primeFor('session-gen') })
+    const seeded = await ctx.primeRealmRuntime.run(realmId('session-gen'), { program: 'const kept = "v1"', bindings: [] })
     expectFreshNamespaceNotice(seeded)
 
-    const killed = await ctx.codeRuntime.run({
+    const killed = await ctx.primeRealmRuntime.run(realmId('session-gen'), {
       program: 'for (;;) {}',
-      bindings: primeFor('session-gen'),
+      bindings: [],
     })
     expect(killed.error?.kind).toBe('timeout')
     expect(notices(killed)).toEqual([])
 
-    const after = await ctx.codeRuntime.run({ program: 'typeof kept === "undefined" ? null : kept', bindings: primeFor('session-gen') })
+    const after = await ctx.primeRealmRuntime.run(realmId('session-gen'), {
+      program: 'typeof kept === "undefined" ? null : kept',
+      bindings: [],
+    })
     expect(after.value).toBeNull()
     expectLostNamespaceNotice(after)
 
-    const settled = await ctx.codeRuntime.run({ program: '1', bindings: primeFor('session-gen') })
+    const settled = await ctx.primeRealmRuntime.run(realmId('session-gen'), { program: '1', bindings: [] })
     expect(notices(settled)).toEqual([])
   })
 
@@ -565,14 +391,17 @@ describe('realm namespace reporting', () => {
     await makeRoot('dsh-prime-queued-')
     const ctx = await startHost({ maxWallMs: 500 })
 
-    await ctx.codeRuntime.run({ program: 'const kept = "v1"', bindings: primeFor('session-queue') })
+    await ctx.primeRealmRuntime.run(realmId('session-queue'), { program: 'const kept = "v1"', bindings: [] })
 
     // Both cells are admitted against the same worker. The first is hard-killed,
     // so the second starts against an empty namespace even though it was queued
     // before the kill.
-    const killed = ctx.codeRuntime.run({ program: 'for (;;) {}', bindings: primeFor('session-queue') })
+    const killed = ctx.primeRealmRuntime.run(realmId('session-queue'), { program: 'for (;;) {}', bindings: [] })
     await sleep(100)
-    const queued = ctx.codeRuntime.run({ program: 'typeof kept === "undefined" ? null : kept', bindings: primeFor('session-queue') })
+    const queued = ctx.primeRealmRuntime.run(realmId('session-queue'), {
+      program: 'typeof kept === "undefined" ? null : kept',
+      bindings: [],
+    })
 
     const first = await killed
     expect(first.error?.kind).toBe('timeout')
@@ -587,20 +416,23 @@ describe('realm namespace reporting', () => {
     await makeRoot('dsh-prime-undispatched-')
     const ctx = await startHost({ maxWallMs: 400 })
 
-    await ctx.codeRuntime.run({ program: 'const kept = "v1"', bindings: primeFor('session-undispatched') })
-    const killed = await ctx.codeRuntime.run({ program: 'for (;;) {}', bindings: primeFor('session-undispatched') })
+    await ctx.primeRealmRuntime.run(realmId('session-undispatched'), { program: 'const kept = "v1"', bindings: [] })
+    const killed = await ctx.primeRealmRuntime.run(realmId('session-undispatched'), { program: 'for (;;) {}', bindings: [] })
     expect(killed.error?.kind).toBe('timeout')
 
     // A program that does not survive the type strip never spawns a worker and
     // therefore neither reports nor consumes the pending loss notice.
-    const stripFailed = await ctx.codeRuntime.run({
+    const stripFailed = await ctx.primeRealmRuntime.run(realmId('session-undispatched'), {
       program: 'enum Nope { A }\n1',
-      bindings: primeFor('session-undispatched'),
+      bindings: [],
     })
     expect(stripFailed.error?.kind).toBe('exception')
     expect(notices(stripFailed)).toEqual([])
 
-    const after = await ctx.codeRuntime.run({ program: 'typeof kept === "undefined" ? null : kept', bindings: primeFor('session-undispatched') })
+    const after = await ctx.primeRealmRuntime.run(realmId('session-undispatched'), {
+      program: 'typeof kept === "undefined" ? null : kept',
+      bindings: [],
+    })
     expect(after.value).toBeNull()
     expectLostNamespaceNotice(after)
   })
@@ -610,9 +442,9 @@ describe('realm namespace reporting', () => {
     const maxOutputBytes = 2_048
     const ctx = await startHost({ maxOutputBytes })
 
-    const result = await ctx.codeRuntime.run({
+    const result = await ctx.primeRealmRuntime.run(realmId('session-output-cap'), {
       program: 'for (let index = 0; index < 200; index++) console.log("line " + index + " " + "y".repeat(60))\n"done"',
-      bindings: primeFor('session-output-cap'),
+      bindings: [],
     })
     expect(result.error?.kind).toBe('output-limit')
     expectFreshNamespaceNotice(result)
@@ -626,17 +458,20 @@ describe('realm namespace reporting', () => {
     await makeRoot('dsh-prime-misuse-')
     const ctx = await startHost({ maxWallMs: 400 })
 
-    await ctx.codeRuntime.run({ program: 'const kept = "v1"', bindings: primeFor('session-misuse') })
-    const killed = await ctx.codeRuntime.run({ program: 'for (;;) {}', bindings: primeFor('session-misuse') })
+    await ctx.primeRealmRuntime.run(realmId('session-misuse'), { program: 'const kept = "v1"', bindings: [] })
+    const killed = await ctx.primeRealmRuntime.run(realmId('session-misuse'), { program: 'for (;;) {}', bindings: [] })
     expect(killed.error?.kind).toBe('timeout')
 
     // Caller misuse rejects, so this run never dispatches and must not consume
     // the report the next run needs.
-    const misuse = [...primeFor('session-misuse'), { global: 'tools', functions: {} }]
-    await expect(ctx.codeRuntime.run({ program: '1', bindings: misuse }))
+    const misuse = [...toolsBindings({}), bindingNamespace('tools', {})]
+    await expect(ctx.primeRealmRuntime.run(realmId('session-misuse'), { program: '1', bindings: misuse }))
       .rejects.toThrow('duplicate binding global')
 
-    const after = await ctx.codeRuntime.run({ program: 'typeof kept === "undefined" ? null : kept', bindings: primeFor('session-misuse') })
+    const after = await ctx.primeRealmRuntime.run(realmId('session-misuse'), {
+      program: 'typeof kept === "undefined" ? null : kept',
+      bindings: [],
+    })
     expect(after.value).toBeNull()
     expectLostNamespaceNotice(after)
   })
@@ -647,13 +482,16 @@ describe('realm pool governance', () => {
     await makeRoot('dsh-prime-lru-')
     const ctx = await startHost({ maxActiveRealms: 1 })
 
-    await ctx.codeRuntime.run({ program: 'const owner = "alpha"', bindings: primeFor('session-alpha') })
+    await ctx.primeRealmRuntime.run(realmId('session-alpha'), { program: 'const owner = "alpha"', bindings: [] })
     // Admitting beta has to reclaim alpha, which is idle.
-    const beta = await ctx.codeRuntime.run({ program: 'const owner = "beta"', bindings: primeFor('session-beta') })
+    const beta = await ctx.primeRealmRuntime.run(realmId('session-beta'), { program: 'const owner = "beta"', bindings: [] })
     expect(beta.error).toBeUndefined()
     expectFreshNamespaceNotice(beta)
 
-    const alpha = await ctx.codeRuntime.run({ program: 'typeof owner === "undefined" ? null : owner', bindings: primeFor('session-alpha') })
+    const alpha = await ctx.primeRealmRuntime.run(realmId('session-alpha'), {
+      program: 'typeof owner === "undefined" ? null : owner',
+      bindings: [],
+    })
     expect(alpha.value).toBeNull()
     expectFreshNamespaceNotice(alpha)
   })
@@ -663,18 +501,18 @@ describe('realm pool governance', () => {
     const first = await startHost({ maxActiveRealms: 1 })
     const second = await startHost({ maxActiveRealms: 1 })
 
-    await first.codeRuntime.run({
+    await first.primeRealmRuntime.run(realmId('session-local-alpha'), {
       program: 'const retainedAfterConflict = "alpha"\nretainedAfterConflict',
-      bindings: primeFor('session-local-alpha'),
+      bindings: [],
     })
-    await second.codeRuntime.run({ program: '"foreign owner"', bindings: primeFor('session-foreign-beta') })
+    await second.primeRealmRuntime.run(realmId('session-foreign-beta'), { program: '"foreign owner"', bindings: [] })
 
-    const conflict = await first.codeRuntime.run({ program: '"must not run"', bindings: primeFor('session-foreign-beta') })
+    const conflict = await first.primeRealmRuntime.run(realmId('session-foreign-beta'), { program: '"must not run"', bindings: [] })
     expect(conflict.error?.message).toContain('already active in another host process')
 
-    const retained = await first.codeRuntime.run({
+    const retained = await first.primeRealmRuntime.run(realmId('session-local-alpha'), {
       program: 'retainedAfterConflict',
-      bindings: primeFor('session-local-alpha'),
+      bindings: [],
     })
     expect(retained.value).toBe('alpha')
     expect(notices(retained)).toEqual([])
@@ -685,14 +523,14 @@ describe('realm pool governance', () => {
     const ctx = await startHost({ maxActiveRealms: 1 })
     const parked = deferred<CodeJsonValue>()
 
-    const held = ctx.codeRuntime.run({
+    const held = ctx.primeRealmRuntime.run(realmId('session-held'), {
       program: 'await tools.park({})',
-      bindings: primeFor('session-held', { park: () => parked.promise }),
+      bindings: toolsBindings({ park: () => parked.promise }),
     })
     // Let the run reach the parked binding call before the second admission.
     await sleep(200)
 
-    const refused = await ctx.codeRuntime.run({ program: '1', bindings: primeFor('session-refused') })
+    const refused = await ctx.primeRealmRuntime.run(realmId('session-refused'), { program: '1', bindings: [] })
     expect(refused.error).toEqual({
       kind: 'exception',
       message: 'realm admission rejected: active realm limit reached',
@@ -708,10 +546,13 @@ describe('realm pool governance', () => {
     const first = await startHost({ maxIdleMs: 150 })
     const second = await startHost({ maxIdleMs: 150 })
 
-    await first.codeRuntime.run({ program: 'const owner = "idle"', bindings: primeFor('session-idle') })
+    await first.primeRealmRuntime.run(realmId('session-idle'), { program: 'const owner = "idle"', bindings: [] })
     await sleep(700)
 
-    const after = await second.codeRuntime.run({ program: 'typeof owner === "undefined" ? null : owner', bindings: primeFor('session-idle') })
+    const after = await second.primeRealmRuntime.run(realmId('session-idle'), {
+      program: 'typeof owner === "undefined" ? null : owner',
+      bindings: [],
+    })
     expect(after.value).toBeNull()
     expectFreshNamespaceNotice(after)
   })
@@ -720,7 +561,7 @@ describe('realm pool governance', () => {
     await makeRoot('dsh-prime-hostcalls-')
     const ctx = await startHost({ maxHostCallsPerRun: 2 })
 
-    const result = await ctx.codeRuntime.run({
+    const result = await ctx.primeRealmRuntime.run(realmId('session-budget'), {
       program: `
         const seen: string[] = []
         for (let index = 0; index < 4; index++) {
@@ -733,7 +574,7 @@ describe('realm pool governance', () => {
         const survived = true
         seen
       `,
-      bindings: primeFor('session-budget', { ping: async () => 'pong' }),
+      bindings: toolsBindings({ ping: async () => 'pong' }),
     })
     expect(result.error).toBeUndefined()
     expect(result.value).toEqual([
@@ -744,7 +585,10 @@ describe('realm pool governance', () => {
     ])
 
     // A refused call is the program's problem, not the realm's: its namespace survives.
-    const after = await ctx.codeRuntime.run({ program: 'survived === true', bindings: primeFor('session-budget') })
+    const after = await ctx.primeRealmRuntime.run(realmId('session-budget'), {
+      program: 'survived === true',
+      bindings: [],
+    })
     expect(after.value).toBe(true)
     expect(notices(after)).toEqual([])
   })
@@ -754,7 +598,7 @@ describe('realm pool governance', () => {
     const ctx = await startHost({ maxParallelHostCallsPerRun: 1 })
     const parked = deferred<CodeJsonValue>()
 
-    const running = ctx.codeRuntime.run({
+    const running = ctx.primeRealmRuntime.run(realmId('session-parallel'), {
       program: `
         const first = tools.park({})
         let second = 'not reached'
@@ -765,7 +609,7 @@ describe('realm pool governance', () => {
         }
         [String(await first), second]
       `,
-      bindings: primeFor('session-parallel', { park: () => parked.promise }),
+      bindings: toolsBindings({ park: () => parked.promise }),
     })
     // The refusal has to happen while the first call is still in flight, so the
     // parked host function is only released once both calls have been issued.
@@ -776,7 +620,6 @@ describe('realm pool governance', () => {
     expect(result.error).toBeUndefined()
     expect(result.value).toEqual(['released', 'parallel host call budget exhausted (1 binding calls in flight)'])
   })
-
 })
 
 describe('cross-process Realm ownership', () => {
@@ -785,13 +628,13 @@ describe('cross-process Realm ownership', () => {
     const first = await startHost()
     const second = await startHost()
 
-    const firstRun = await first.codeRuntime.run({
+    const firstRun = await first.primeRealmRuntime.run(realmId('session-first-host'), {
       program: 'const firstHostValue = "first"\nfirstHostValue',
-      bindings: primeFor('session-first-host'),
+      bindings: [],
     })
-    const secondRun = await second.codeRuntime.run({
+    const secondRun = await second.primeRealmRuntime.run(realmId('session-second-host'), {
       program: 'const secondHostValue = "second"\nsecondHostValue',
-      bindings: primeFor('session-second-host'),
+      bindings: [],
     })
 
     expect(firstRun.value).toBe('first')
@@ -805,15 +648,15 @@ describe('cross-process Realm ownership', () => {
     const first = await startHost()
     const second = await startHost()
 
-    const owned = await first.codeRuntime.run({
+    const owned = await first.primeRealmRuntime.run(realmId('session-shared-host'), {
       program: 'const ownerSentinel = "first host"\nownerSentinel',
-      bindings: primeFor('session-shared-host'),
+      bindings: [],
     })
     expect(owned.value).toBe('first host')
 
-    const conflict = await second.codeRuntime.run({
+    const conflict = await second.primeRealmRuntime.run(realmId('session-shared-host'), {
       program: '"must not execute"',
-      bindings: primeFor('session-shared-host'),
+      bindings: [],
     })
     expect(conflict.error).toMatchObject({
       kind: 'exception',
@@ -823,9 +666,9 @@ describe('cross-process Realm ownership', () => {
     await first.fiber.dispose()
     contexts.splice(contexts.indexOf(first), 1)
 
-    const takeover = await second.codeRuntime.run({
+    const takeover = await second.primeRealmRuntime.run(realmId('session-shared-host'), {
       program: 'typeof ownerSentinel',
-      bindings: primeFor('session-shared-host'),
+      bindings: [],
     })
     expect(takeover.value).toBe('undefined')
     expectFreshNamespaceNotice(takeover)
@@ -833,15 +676,34 @@ describe('cross-process Realm ownership', () => {
 })
 
 describe('host composition', () => {
-  it('refuses to mount beside another code runtime instead of colliding on the service', async () => {
-    await makeRoot('dsh-prime-double-provider-')
+  it('mounts beside the official code runtime without touching it', async () => {
+    await makeRoot('dsh-prime-coexists-')
     const { default: WorkerThreadCodeRuntime } = await import('@deepseek-ai/dsh-code-runtime-worker-thread')
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(WorkerThreadCodeRuntime, {})
+    await ctx.plugin(primeRuntime, { stateDirectory: stateDirectory() })
 
-    await expect(ctx.plugin(primeRuntime, { stateDirectory: stateDirectory() }))
-      .rejects.toThrow('ctx.codeRuntime is already provided')
+    // The official one-shot runtime keeps its shipped semantics untouched.
+    const first = await ctx.codeRuntime.run({ program: 'globalThis.carried = "one-shot"\nreturn 1', bindings: [] })
+    expect(first.error).toBeUndefined()
+    expect(first.value).toBe(1)
+    const second = await ctx.codeRuntime.run({ program: 'return typeof globalThis.carried', bindings: [] })
+    expect(second.error).toBeUndefined()
+    expect(second.value).toBe('undefined')
+
+    // The Prime seam is the separate, uniquely named service.
+    expect(ctx.primeRealmRuntime).toBeDefined()
+    const seeded = await ctx.primeRealmRuntime.run(realmId('session-coexist'), {
+      program: 'const kept = "realm"\nkept',
+      bindings: [],
+    })
+    expect(seeded.error).toBeUndefined()
+    expect(seeded.value).toBe('realm')
+    expectFreshNamespaceNotice(seeded)
+    const resumed = await ctx.primeRealmRuntime.run(realmId('session-coexist'), { program: 'kept', bindings: [] })
+    expect(resumed.value).toBe('realm')
+    expect(notices(resumed)).toEqual([])
   })
 
   it('starts the host even when the packaged preset cannot be placed', async () => {
@@ -857,11 +719,12 @@ describe('host composition', () => {
     ctx.provide('logger', { warn: (message: string) => { warnings.push(message) } })
     await ctx.plugin(primeRuntime, { stateDirectory: stateDirectory() })
 
-    // The preset is missing from the picker; the runtime is not.
-    expect(ctx.codeRuntime).toBeDefined()
+    // The preset is missing from the picker; the realm service is not.
+    expect(ctx.primeRealmRuntime).toBeDefined()
     expect(warnings.some(message => message.includes('could not place the packaged Prime preset'))).toBe(true)
 
-    const result = await ctx.codeRuntime.run({ program: 'return "still running"', bindings: [] })
+    const result = await ctx.primeRealmRuntime.run(realmId('session-preset'), { program: '"still running"', bindings: [] })
+    expect(result.error).toBeUndefined()
     expect(result.value).toBe('still running')
   })
 
@@ -872,7 +735,7 @@ describe('host composition', () => {
     ctx.provide('dshHomePath', { notCallable: true })
     await ctx.plugin(primeRuntime, { stateDirectory: stateDirectory() })
 
-    expect(ctx.codeRuntime).toBeDefined()
+    expect(ctx.primeRealmRuntime).toBeDefined()
   })
 })
 
@@ -880,48 +743,39 @@ describe('runtime disposal', () => {
   it('stops admission and terminates every realm', async () => {
     await makeRoot('dsh-prime-dispose-')
     const ctx = await startHost()
-    const runtime = ctx.codeRuntime
+    const runtime = ctx.primeRealmRuntime
 
-    await ctx.codeRuntime.run({ program: 'const owner = "alpha"', bindings: primeFor('session-alpha') })
-    await ctx.codeRuntime.run({ program: 'const owner = "beta"', bindings: primeFor('session-beta') })
+    await runtime.run(realmId('session-alpha'), { program: 'const owner = "alpha"', bindings: [] })
+    await runtime.run(realmId('session-beta'), { program: 'const owner = "beta"', bindings: [] })
 
     await ctx.fiber.dispose()
     contexts.splice(contexts.indexOf(ctx), 1)
 
-    await expect(runtime.run({ program: '1', bindings: primeFor('session-alpha') }))
-      .rejects.toThrow('prime code runtime run() after disposal')
-    // The one-shot path is refused by the same admission gate.
-    await expect(runtime.run({ program: 'return 1', bindings: [] }))
-      .rejects.toThrow('prime code runtime run() after disposal')
+    await expect(runtime.run(realmId('session-alpha'), { program: '1', bindings: [] }))
+      .rejects.toThrow('prime realm runtime run() after disposal')
   })
 
-  it('refuses to build a realm for a handshake that only completes after teardown', async () => {
-    await makeRoot('dsh-prime-dispose-handshake-')
+  it('settles a run admitted around teardown with an abort, leaving no orphan worker', async () => {
+    await makeRoot('dsh-prime-dispose-race-')
     const ctx = await startHost()
-    const gate = deferred<void>()
+    const gate = deferred<CodeJsonValue>()
 
-    const racing = ctx.codeRuntime.run({
-      program: '1',
-      bindings: bindings({
-        prime_realm_identity: async (args: any) => {
-          await gate.promise
-          const challenge = decodeChallenge(args.challenge)
-          if (challenge === undefined) throw new Error('bad challenge')
-          const issued = await identityStore().issue('session-racing', challenge)
-          return { protocol: 1, ...issued }
-        },
-      }),
+    // The program cannot finish before teardown: either the admission loses the
+    // race and resolves 'runtime disposed', or the realm was built and its
+    // teardown settles the in-flight run with 'realm disposed'. Both are aborts,
+    // and neither path leaves a worker that nothing is left to dispose.
+    const racing = ctx.primeRealmRuntime.run(realmId('session-racing'), {
+      program: 'await tools.park({})',
+      bindings: toolsBindings({ park: () => gate.promise }),
     })
     await sleep(100)
 
     await ctx.fiber.dispose()
     contexts.splice(contexts.indexOf(ctx), 1)
-    gate.resolve()
+    gate.resolve('never delivered')
 
-    // A realm admitted here would own a worker that nothing is left to dispose.
     const result = await racing
-    expect(result.error).toEqual({ kind: 'abort', message: 'runtime disposed' })
-    expect(notices(result)).toEqual([])
+    expect(result.error?.kind).toBe('abort')
   })
 
   it('settles a run that was in flight when the runtime was disposed', async () => {
@@ -929,9 +783,9 @@ describe('runtime disposal', () => {
     const ctx = await startHost()
     const parked = deferred<CodeJsonValue>()
 
-    const held = ctx.codeRuntime.run({
+    const held = ctx.primeRealmRuntime.run(realmId('session-inflight'), {
       program: 'await tools.park({})',
-      bindings: primeFor('session-inflight', { park: () => parked.promise }),
+      bindings: toolsBindings({ park: () => parked.promise }),
     })
     await sleep(200)
 

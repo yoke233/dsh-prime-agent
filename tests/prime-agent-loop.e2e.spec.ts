@@ -9,19 +9,18 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { CallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { installLlmReplay, type ReplayEntry } from '@deepseek-ai/dsh-llm-replay'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import LocalSpillStore from '@deepseek-ai/dsh-spill-local'
 import * as SpillPolicy from '@deepseek-ai/dsh-spill-policy'
-import { registerRealmIdentity } from '../src/realm/identity-tool.js'
+import * as primeAgent from '../src/index.js'
 import * as primeRuntime from '../src/runtime.js'
 
 function toolCallResponse(rawCallId: string, code: string): StreamChunk[] {
   const id = CallId(rawCallId)
-  const argumentsJson = JSON.stringify({ code, description: 'Prime agent-loop E2E step' })
+  const argumentsJson = JSON.stringify({ code })
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
-    { type: 'tool-call-delta', index: 0, id, name: RUN_CODE_NAME, argumentsDelta: argumentsJson },
-    { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: RUN_CODE_NAME, arguments: argumentsJson } },
+    { type: 'tool-call-delta', index: 0, id, name: 'repl', argumentsDelta: argumentsJson },
+    { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'repl', arguments: argumentsJson } },
     { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } },
     { type: 'finish', reason: { kind: 'tool-calls' } },
   ]
@@ -64,7 +63,7 @@ afterEach(async () => {
 })
 
 describe('Prime realm across deterministic agent-loop turns', () => {
-  it('keeps live bindings while every model request and outer call uses only run_code', async () => {
+  it('keeps live bindings while every model request and outer call uses only repl', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-prime-agent-loop-'))
     const stateDirectory = join(root, 'state')
     const overrideFile = join(root, 'replay.override.json')
@@ -79,12 +78,13 @@ describe('Prime realm across deterministic agent-loop turns', () => {
     await writeFile(overrideFile, JSON.stringify(script))
 
     ctx = new Context()
-    await mountAgentLoopTestDependencies(ctx, { tools: { mode: 'code' } })
+    // Native tool presentation: the Prime plugin itself owns the `repl` surface.
+    await mountAgentLoopTestDependencies(ctx)
     await ctx.plugin(LocalSpillStore, { root: join(root, 'spill') })
     await ctx.plugin(SpillPolicy, { maxInlineBytes: 1024 })
     await ctx.plugin(AgentLoop, { agents: [] })
     await ctx.plugin(primeRuntime, { stateDirectory })
-    registerRealmIdentity(ctx, { stateDirectory })
+    await ctx.plugin(primeAgent, { stateDirectory, requireOrchestrationTools: false })
     const requests: GenerateOptions[] = []
     ctx.on('llm/stream', (options, next) => {
       requests.push(options)
@@ -100,32 +100,32 @@ describe('Prime realm across deterministic agent-loop turns', () => {
       provider: 'prime-e2e',
       model: 'scripted',
     })
-    await send(ctx, agent, 'Store the sentinel with run_code.')
-    await send(ctx, agent, 'Read the sentinel with run_code.')
-    await send(ctx, agent, 'Return the large report with run_code.')
+    await send(ctx, agent, 'Store the sentinel with repl.')
+    await send(ctx, agent, 'Read the sentinel with repl.')
+    await send(ctx, agent, 'Return the large report with repl.')
     replay.assertConsumed()
 
     expect(requests).toHaveLength(6)
     for (const request of requests) {
-      expect(request.tools?.map(tool => tool.name)).toEqual([RUN_CODE_NAME])
+      expect(request.tools?.map(tool => tool.name)).toEqual(['repl'])
     }
     const headers = agent.session.events.filter(event => event.type === 'request/header')
     expect(headers.length).toBeGreaterThan(0)
     for (const header of headers) {
-      expect(header.data.header.tools?.map(tool => tool.name)).toEqual([RUN_CODE_NAME])
+      expect(header.data.header.tools?.map(tool => tool.name)).toEqual(['repl'])
     }
 
     const calls = agent.session.events.filter(event => event.type === 'tool/call')
     expect(calls).toHaveLength(3)
-    expect(calls.every(event => event.data.name === RUN_CODE_NAME)).toBe(true)
+    expect(calls.every(event => event.data.name === 'repl')).toBe(true)
 
     const results = agent.session.events.filter(event => event.type === 'tool/result')
     expect(results).toHaveLength(3)
     expect(JSON.stringify(results[1]?.data.message)).toContain('424242')
 
-    // Plan 1.4: the DURABLE outer `tool/result` the agent loop committed for
-    // the oversized completion is bounded — preview plus locator, never the
-    // full body — and the artifact recovers the complete text.
+    // The DURABLE outer `tool/result` the agent loop committed for the
+    // oversized completion is bounded — preview plus locator, never the full
+    // body — and the artifact recovers the complete rendered text.
     const body = 'SPILL-'.repeat(1000)
     expect(JSON.stringify(results[2]?.data.message)).not.toContain(body)
     const spilled = results[2]?.type === 'tool/result'
@@ -140,9 +140,10 @@ describe('Prime realm across deterministic agent-loop turns', () => {
     if (locator === undefined) throw new Error(`no spill locator in: ${spilled.slice(-300)}`)
     expect(await readFile(locator, 'utf8')).toContain(body)
 
-    const handshakes = agent.session.events.filter(event => event.type === 'tool/code-dispatch'
-      && event.data.name === 'prime_realm_identity')
-    expect(handshakes).toHaveLength(3)
+    // No handshake/bootstrap dispatch exists any more: the realm is routed by
+    // the plugin's own identity resolution, and nothing probes a bootstrap tool.
+    const dispatches = agent.session.events.filter(event => event.type === 'tool/code-dispatch')
+    expect(dispatches).toHaveLength(0)
 
     const final = agent.session.events.findLast(event => event.type === 'assistant/message')
     const finalText = final?.type === 'assistant/message'

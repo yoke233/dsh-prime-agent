@@ -1,32 +1,27 @@
-/** Realm identity secret, per-session realm records, tokens, and challenge proofs. */
+/**
+ * Trusted Session-to-Realm identity.
+ *
+ * Maps a trusted session id to a stable opaque Realm id under one deployment
+ * directory. Persistence is keyed: the session id itself never reaches the
+ * filesystem, the storage key is deployment-random, and first resolution
+ * converges through an atomic file lock so concurrent processes agree on one
+ * Realm per session. Any corruption of the key or a session record fails
+ * closed instead of silently resetting identity.
+ */
 
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomBytes } from 'node:crypto'
 import { mkdir, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 
 const SCHEMA_VERSION = 1
-const TOKEN_VERSION = 1
 const KEY_BYTES = 32
 const REALM_BYTES = 32
-const MAC_BYTES = 32
-const CHALLENGE_BYTES = 32
-const PREFIX_BYTES = 1 + REALM_BYTES + MAC_BYTES
-const TOKEN_BYTES = PREFIX_BYTES + MAC_BYTES
 const KEY_CHARS = 43
 const REALM_CHARS = 43
-const PROOF_CHARS = 43
-const CHALLENGE_CHARS = 43
-const TOKEN_CHARS = 130
-const MAX_OWNER_CHARS = 512
+const MAX_SESSION_ID_CHARS = 512
 
-const SESSION_BINDING_DOMAIN = 'session-binding/v1'
-const TOKEN_MAC_DOMAIN = 'token-mac/v1'
-const PROOF_DOMAIN = 'proof/v1'
 const SESSION_PATH_DOMAIN = 'session-path/v1'
-
-/** Result of authenticating one token and challenge proof. */
-export type RealmVerification = { ok: true; realmId: string } | { ok: false; reason: string }
 
 /** Deployment configuration; the directory is `<stateDirectory>/realm-identity`. */
 export interface RealmIdentityOptions {
@@ -64,23 +59,12 @@ function decodeExact(value: unknown, chars: number, bytes: number): Buffer | und
   return decoded
 }
 
-/** Decode a wire challenge into its exact 32 bytes, or `undefined` when malformed. */
-export function decodeChallenge(value: unknown): Uint8Array | undefined {
-  return decodeExact(value, CHALLENGE_CHARS, CHALLENGE_BYTES)
-}
-
-function assertOwner(sessionOwner: string): void {
-  if (typeof sessionOwner !== 'string' || sessionOwner.length === 0 || sessionOwner.length > MAX_OWNER_CHARS) {
-    throw new Error(`prime-realm-identity: session owner must be 1 to ${MAX_OWNER_CHARS} characters`)
+function assertSessionId(sessionId: string): void {
+  if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > MAX_SESSION_ID_CHARS) {
+    throw new Error(`prime-realm-identity: session id must be 1 to ${MAX_SESSION_ID_CHARS} characters`)
   }
-  if (/\p{Surrogate}/u.test(sessionOwner)) {
-    throw new Error('prime-realm-identity: session owner must contain well-formed Unicode')
-  }
-}
-
-function assertChallenge(challenge: Uint8Array): void {
-  if (!(challenge instanceof Uint8Array) || challenge.byteLength !== CHALLENGE_BYTES) {
-    throw new Error(`prime-realm-identity: challenge must be exactly ${CHALLENGE_BYTES} bytes`)
+  if (/\p{Surrogate}/u.test(sessionId)) {
+    throw new Error('prime-realm-identity: session id must contain well-formed Unicode')
   }
 }
 
@@ -108,10 +92,9 @@ function parseRealmRecord(text: string): Buffer {
 }
 
 /**
- * Persistent realm identity for one `stateDirectory`. The agent-scoped bootstrap
- * tool and the host runtime each construct their own instance over the same
- * directory; no process singleton is involved. Errors never carry a token,
- * proof, secret, session owner, or storage path.
+ * Persistent Realm identity for one `stateDirectory`. The agent-scoped entry
+ * constructs its own instance over the directory; no process singleton is
+ * involved. Errors never carry a secret, the session id, or a storage path.
  */
 export class RealmIdentityStore {
   private readonly directory: string
@@ -123,43 +106,11 @@ export class RealmIdentityStore {
     this.directory = directory
   }
 
-  /** Issue the session's stable realm token plus a proof over this challenge. */
-  async issue(sessionOwner: string, challenge: Uint8Array): Promise<{ token: string; proof: string }> {
-    assertOwner(sessionOwner)
-    assertChallenge(challenge)
+  /** Resolve a trusted session id to its stable opaque Realm id. */
+  async resolve(sessionId: string): Promise<string> {
+    assertSessionId(sessionId)
     const key = await this.loadKey()
-    const realm = await this.loadRealm(key, sessionOwner)
-    const sessionBinding = mac(key, frame(SESSION_BINDING_DOMAIN, textBytes(sessionOwner)))
-    const prefix = Buffer.concat([Buffer.of(TOKEN_VERSION), realm, sessionBinding])
-    const token = Buffer.concat([prefix, mac(key, frame(TOKEN_MAC_DOMAIN, prefix))])
-    return {
-      token: encode(token),
-      proof: encode(mac(key, frame(PROOF_DOMAIN, token, challenge))),
-    }
-  }
-
-  /**
-   * Authenticate one token and its challenge proof in constant time. Malformed
-   * input resolves to a bounded reason; only corrupted storage throws.
-   */
-  async verify(token: string, proof: string, challenge: Uint8Array): Promise<RealmVerification> {
-    if (!(challenge instanceof Uint8Array) || challenge.byteLength !== CHALLENGE_BYTES) {
-      return { ok: false, reason: `challenge must be exactly ${CHALLENGE_BYTES} bytes` }
-    }
-    const tokenBytes = decodeExact(token, TOKEN_CHARS, TOKEN_BYTES)
-    if (tokenBytes === undefined) return { ok: false, reason: 'token is not a well-formed realm token' }
-    const proofBytes = decodeExact(proof, PROOF_CHARS, MAC_BYTES)
-    if (proofBytes === undefined) return { ok: false, reason: 'proof is not a well-formed challenge proof' }
-    if (tokenBytes[0] !== TOKEN_VERSION) return { ok: false, reason: 'token version is not supported' }
-    const key = await this.loadKey()
-    const prefix = tokenBytes.subarray(0, PREFIX_BYTES)
-    if (!timingSafeEqual(tokenBytes.subarray(PREFIX_BYTES), mac(key, frame(TOKEN_MAC_DOMAIN, prefix)))) {
-      return { ok: false, reason: 'token authentication failed' }
-    }
-    if (!timingSafeEqual(proofBytes, mac(key, frame(PROOF_DOMAIN, tokenBytes, challenge)))) {
-      return { ok: false, reason: 'challenge proof does not match this token' }
-    }
-    return { ok: true, realmId: encode(tokenBytes.subarray(1, 1 + REALM_BYTES)) }
+    return encode(await this.loadRealm(key, sessionId))
   }
 
   private async loadKey(): Promise<Buffer> {
@@ -187,8 +138,8 @@ export class RealmIdentityStore {
     return key
   }
 
-  private async loadRealm(key: Buffer, sessionOwner: string): Promise<Buffer> {
-    const filename = this.sessionPath(key, sessionOwner)
+  private async loadRealm(key: Buffer, sessionId: string): Promise<Buffer> {
+    const filename = this.sessionPath(key, sessionId)
     const existing = await this.readRealmFile(filename)
     if (existing !== undefined) return existing
     await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
@@ -207,9 +158,9 @@ export class RealmIdentityStore {
     return text === undefined ? undefined : parseRealmRecord(text)
   }
 
-  /** Keyed session path; the raw session owner never reaches the filesystem. */
-  private sessionPath(key: Buffer, sessionOwner: string): string {
-    const keyed = mac(key, frame(SESSION_PATH_DOMAIN, textBytes(sessionOwner))).toString('hex')
+  /** Keyed session path; the raw session id never reaches the filesystem. */
+  private sessionPath(key: Buffer, sessionId: string): string {
+    const keyed = mac(key, frame(SESSION_PATH_DOMAIN, textBytes(sessionId))).toString('hex')
     return join(this.directory, 'sessions', `${keyed}.json`)
   }
 }
