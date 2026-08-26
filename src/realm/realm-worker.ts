@@ -1749,11 +1749,11 @@ function prepareCompletion(value: unknown, remaining: number, maxOutputBytes: nu
   return projectCompletion(value, id, bytes, slot.node, remaining, maxOutputBytes)
 }
 
-/** Prepare a thrown program value without sending an unbounded stack across the port. */
+/** Prepare a thrown program value as one concise diagnostic; internal stacks are not model-actionable. */
 function prepareException(error: unknown, remaining: number, maxOutputBytes: number): DoneFragment {
   let message: string
   try {
-    const detail: unknown = error instanceof CapturedError ? error.stack ?? error.message : error
+    const detail: unknown = error instanceof CapturedError ? error.message : error
     message = typeof detail === 'string' ? detail : String(detail)
   } catch {
     message = 'program threw an unrenderable value'

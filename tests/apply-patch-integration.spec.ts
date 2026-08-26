@@ -288,6 +288,44 @@ describe('apply_patch registry integration', () => {
     expect(mismatch.files.get('src/a.txt')).toBe('old\n')
   })
 
+  it('projects replay-safe diff cards for running and settled patch calls', async () => {
+    const h = await harness({ 'src/a.txt': 'old\n' })
+    const patch = `*** Begin Patch
+*** Update File: src/a.txt
+@@
+-old
++new
+*** Add File: src/b.txt
++first
++second
+*** End Patch`
+    const tool = h.ctx.tools.get('apply_patch', h.agent)
+    expect(tool?.presentCall?.({ patch })).toEqual({
+      card: 'diff',
+      title: 'Apply patch',
+      diffs: [
+        { path: 'src/a.txt', oldText: 'old', newText: 'new' },
+        { path: 'src/b.txt', oldText: null, newText: 'first\nsecond\n' },
+      ],
+      locations: [{ path: 'src/a.txt' }, { path: 'src/b.txt' }],
+    })
+
+    const result = await apply(h, patch)
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('patch unexpectedly failed')
+    const expectedResultView = {
+      card: 'diff',
+      title: 'Apply patch',
+      diffs: [
+        { path: 'src/a.txt', oldText: 'old', newText: 'new' },
+        { path: 'src/b.txt', oldText: null, newText: 'first\nsecond\n' },
+      ],
+    }
+    expect(tool?.presentResult?.({ patch }, result)).toEqual(expectedResultView)
+    expect(tool?.presentResult?.({ patch }, { ...result, meta: undefined })).toEqual(expectedResultView)
+    expect(tool?.presentCall?.({ patch: 'not a patch' })).toBeUndefined()
+  })
+
   it('reports ordered partial application without claiming rollback or atomicity', async () => {
     const h = await harness({ 'src/a.txt': 'a\n', 'src/b.txt': 'b\n' })
     h.failWritePath.value = 'src/b.txt'

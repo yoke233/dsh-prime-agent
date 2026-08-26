@@ -88,6 +88,10 @@ MCP 同样不进入 Realm runtime。profile 显式安装 DSH Host MCP client 后
 
 多文件写入是按 patch 顺序执行的多个正式 DSH `write` 调用，不是 batch transaction。后续 write 失败时工具返回 `PARTIAL_APPLY` 并列出此前成功路径，不伪装成成功，也不宣称自动回滚或 crash-atomic。当前 DSH 没有受策略保护且可组合的 delete/rename seam，因此本插件不通过 Node `fs`、shell、`git apply` 或空文件写入模拟这些操作。
 
+`apply_patch` 在工具定义 seam 上实现标准 `DiffCallView` / `DiffResultView`。调用阶段从 patch 解析出按文件、按 hunk 排列的 `{ path, oldText, newText }` 与可打开位置；成功结果优先使用持久化 `presentationMeta`，nested dispatch 没有 result metadata 时从同一 durable patch 参数重建等价视图。Prime REPL bridge 不发明独立 UI metadata，而是与官方 `run_code` 一样，在真实开始与结算时写入 `tool/code-dispatch-start` / `tool/code-dispatch`，携带 root/parent/sub-call identity、JSON arguments、`content` 与 `isError`。官方 Web 直接把这些事件折叠成递归 `subCalls`；TUI 通过同一协议和工具 presenter 渲染。失败、旧日志或无法解析的参数仍走 generic error fallback，绝不把失败意图渲染成已应用差异。
+
+`edit` 仍保留：它的窄 interface 对一次 literal replacement 更省 token、更容易审阅，也能保持 `old_string` 唯一匹配约束；`apply_patch` 用于相关的多 hunk 或多文件 Add/Update。`write` 只用于有意替换完整文件。模型 policy 按这三个粒度选择工具，不做 alias 或兼容 shim。
+
 ## Realm 身份路由
 
 `repl` 的执行路径不使用握手，也没有任何模型可见的身份工具：
@@ -143,7 +147,7 @@ Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分�
 | 情形 | 当前结果 |
 | --- | --- |
 | 语法错误 | cell 不执行，namespace 不变。 |
-| 普通程序异常或被程序捕获的工具失败 | 当前 cell 失败或由程序处理；Worker generation 保留。异常前已经完成的声明、赋值和外部副作用可能保留，遵循 REPL partial-commit 语义。 |
+| 普通程序异常或被程序捕获的工具失败 | 当前 cell 失败或由程序处理；Worker generation 保留。未捕获异常只投影简洁 message，不暴露 Worker/V8 内部调用栈。异常前已经完成的声明、赋值和外部副作用可能保留，遵循 REPL partial-commit 语义。 |
 | completion 序列化失败 | cell 已执行且 namespace 保留，当前结果以 invalid output 失败；判定范围以有界走查为界，超出捕获天花板的部分不校验。 |
 | completion 过大 | cell 成功；外层 canonical value 保留有界内部 envelope 与可信 presentation metadata，模型只见 notebook preview。原值按 history 预算保留；未通过准入时不提供 handle，也不暗示 `$_` 可取回原值。 |
 | 排队 cell 在 dispatch 前取消 | 只取消该 cell。 |

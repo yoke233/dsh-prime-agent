@@ -1,1 +1,1 @@
-{"version":3,"file":"plugin.d.ts","sourceRoot":"","sources":["../../src/apply-patch/plugin.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,OAAO,EAAE,MAAM,qBAAqB,CAAA;AAMlD,eAAO,MAAM,qBAAqB,gBAAgB,CAAA;AAElD,0DAA0D;AAC1D,wBAAgB,kBAAkB,CAAC,GAAG,EAAE,OAAO,GAAG,IAAI,CAoDrD"}
+{"version":3,"file":"plugin.d.ts","sourceRoot":"","sources":["../../src/apply-patch/plugin.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,OAAO,EAAE,MAAM,qBAAqB,CAAA;AAclD,eAAO,MAAM,qBAAqB,gBAAgB,CAAA;AAsDlD,0DAA0D;AAC1D,wBAAgB,kBAAkB,CAAC,GAAG,EAAE,OAAO,GAAG,IAAI,CAwErD"}

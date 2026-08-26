@@ -8,22 +8,33 @@ function success(value: unknown, additionalContexts: unknown[] = []): ToolExecut
   return { isError: false, value, content: [], additionalContexts, concludesTurn: false } as ToolExecutionResult
 }
 
-function harness(names: string[], execute: (input: ToolExecutionInput) => Promise<ToolExecutionResult>, mode: (name: string) => 'parallel' | 'exclusive' = () => 'parallel') {
+function harness(
+  names: string[],
+  execute: (input: ToolExecutionInput) => Promise<ToolExecutionResult>,
+  mode: (name: string) => 'parallel' | 'exclusive' = () => 'parallel',
+) {
   const deferred: unknown[] = []
-  const agent = { id: 'bridge-agent' } as unknown as Agent
+  const events: Array<{ type: string; data: unknown }> = []
+  const agent = {
+    id: 'bridge-agent',
+    session: { append: (type: string, data: unknown) => { events.push({ type, data }) } },
+  } as unknown as Agent
   const token = { opaque: 'parent' } as unknown as ToolRunContext['token']
   const signal = new AbortController().signal
-  const ctx = { tools: {
-    schemas: () => names.map(name => ({ name })),
-    executionMode: (input: ToolExecutionInput) => ({ kind: mode(input.name) }),
-    execute,
-  } } as unknown as Context
+  const ctx = {
+    tools: {
+      schemas: () => names.map(name => ({ name })),
+      executionMode: (input: ToolExecutionInput) => ({ kind: mode(input.name) }),
+      execute,
+    },
+    waterfall: async (_name: string, _dispatch: unknown, next: () => Promise<unknown>) => await next(),
+  } as unknown as Context
   const exec = {
     agent, token, signal, callId: 'outer-call', rootCallId: 'root-call',
     deferContext: (value: unknown) => { deferred.push(value) },
     concludeTurn: () => {},
   } as unknown as ToolRunContext
-  return { leased: createReplBindings(ctx, exec), agent, token, signal, deferred }
+  return { leased: createReplBindings(ctx, exec), agent, token, signal, deferred, events }
 }
 
 function namespace(bindings: ReturnType<typeof createReplBindings>['bindings'], global: string) {
@@ -58,6 +69,66 @@ describe('REPL capability bridge', () => {
       expect(String(input.rootCallId)).toBe('root-call')
       expect(String(input.callId)).toMatch(/^outer-call:repl:\d+$/)
     }
+    await h.leased.finish()
+  })
+
+  it('records official Code Dispatch lifecycle events in submission order', async () => {
+    const releases = new Map<string, () => void>()
+    const h = harness(['slow', 'fast'], input => new Promise(resolve => {
+      releases.set(input.name, () => resolve({
+        ...success({ name: input.name }),
+        content: [{ type: 'text', text: `${input.name} output` }],
+      }))
+    }))
+    const tools = namespace(h.leased.bindings, 'tools')
+    const slow = tools.slow!({ order: 1 })
+    const fast = tools.fast!({ order: 2 })
+    expect(h.events.map(event => event.type)).toEqual([
+      'tool/code-dispatch-start',
+      'tool/code-dispatch-start',
+    ])
+
+    releases.get('fast')!()
+    await Promise.resolve()
+    expect(h.events.map(event => event.type)).toEqual([
+      'tool/code-dispatch-start',
+      'tool/code-dispatch-start',
+    ])
+    releases.get('slow')!()
+    await Promise.all([slow, fast])
+
+    expect(h.events).toEqual([
+      {
+        type: 'tool/code-dispatch-start',
+        data: {
+          rootCallId: 'root-call', parentCallId: 'outer-call', subCallId: 'outer-call:repl:1',
+          name: 'slow', arguments: { order: 1 },
+        },
+      },
+      {
+        type: 'tool/code-dispatch-start',
+        data: {
+          rootCallId: 'root-call', parentCallId: 'outer-call', subCallId: 'outer-call:repl:2',
+          name: 'fast', arguments: { order: 2 },
+        },
+      },
+      {
+        type: 'tool/code-dispatch',
+        data: {
+          rootCallId: 'root-call', parentCallId: 'outer-call', subCallId: 'outer-call:repl:1',
+          name: 'slow', arguments: { order: 1 }, isError: false,
+          content: [{ type: 'text', text: 'slow output' }],
+        },
+      },
+      {
+        type: 'tool/code-dispatch',
+        data: {
+          rootCallId: 'root-call', parentCallId: 'outer-call', subCallId: 'outer-call:repl:2',
+          name: 'fast', arguments: { order: 2 }, isError: false,
+          content: [{ type: 'text', text: 'fast output' }],
+        },
+      },
+    ])
     await h.leased.finish()
   })
 

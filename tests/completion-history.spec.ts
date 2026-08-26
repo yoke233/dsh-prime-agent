@@ -202,7 +202,10 @@ describe('completion history: what enters a slot', () => {
     // capture values from failed runs. A non-lossless successful completion is
     // retained as opaque under its own budget.
     const realm = createRealm()
-    expect((await realm.run({ program: 'throw new Error("boom")', bindings: [] })).error?.kind).toBe('exception')
+    expect((await realm.run({ program: 'throw new Error("boom")', bindings: [] })).error).toEqual({
+      kind: 'exception',
+      message: 'boom',
+    })
     const opaque = await realm.run({ program: '({ fn: () => 1 })', bindings: [] })
     expect(opaque.error).toBeUndefined()
     expect(opaque.value).toMatchObject({ retained: true, opaque: true, truncated: true })

@@ -1,7 +1,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { CallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { CodeBindingFunction, CodeBindingNamespace } from '@deepseek-ai/dsh-code-runtime'
-import type { JsonValue, ToolExecutionInput, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type {
+  CodeDispatchLog,
+  JsonValue,
+  ToolExecutionInput,
+  ToolExecutionResult,
+  ToolRunContext,
+} from '@deepseek-ai/dsh-tools'
 
 export const REPL_TOOL_NAME = 'repl'
 type DispatchMode = 'parallel' | 'exclusive'
@@ -69,7 +75,25 @@ function officialPresentation(result: ToolExecutionResult): string | undefined {
   return result.content.filter(block => block.type === 'text').map(block => block.text).join('')
 }
 
-export interface ReplBindings { bindings: CodeBindingNamespace[]; finish(): Promise<void> }
+async function dispatchLogContent(
+  ctx: Context,
+  dispatch: CodeDispatchLog,
+): Promise<ToolExecutionResult['content']> {
+  try {
+    return await ctx.waterfall(
+      'tools/code-dispatch-log',
+      dispatch,
+      () => Promise.resolve(dispatch.content),
+    )
+  } catch {
+    return dispatch.content
+  }
+}
+
+export interface ReplBindings {
+  bindings: CodeBindingNamespace[]
+  finish(): Promise<void>
+}
 
 /** Build one cell's leased host capabilities from the calling Agent's catalog. */
 export function createReplBindings(ctx: Context, exec: ToolRunContext): ReplBindings {
@@ -80,9 +104,11 @@ export function createReplBindings(ctx: Context, exec: ToolRunContext): ReplBind
   let commitTail: Promise<void> = Promise.resolve()
 
   const binding = (toolName: string): CodeBindingFunction => async (argumentsValue: unknown): Promise<JsonValue> => {
+    const subCallId = CallId(String(exec.callId) + ':repl:' + String(++dispatchNumber))
+    const rootCallId = exec.rootCallId ?? exec.callId
     const input: ToolExecutionInput = {
-      callId: CallId(String(exec.callId) + ':repl:' + String(++dispatchNumber)),
-      ...(exec.rootCallId === undefined ? {} : { rootCallId: exec.rootCallId }),
+      callId: subCallId,
+      rootCallId,
       name: toolName,
       arguments: argumentsValue,
       agent,
@@ -94,8 +120,34 @@ export function createReplBindings(ctx: Context, exec: ToolRunContext): ReplBind
     let releaseCommit!: () => void
     commitTail = new Promise<void>(resolve => { releaseCommit = resolve })
     try {
-      const result = await queue.enqueue(mode, () => ctx.tools.execute(input))
+      const result = await queue.enqueue(mode, async () => {
+        agent.session.append('tool/code-dispatch-start', {
+          rootCallId,
+          parentCallId: exec.callId,
+          subCallId,
+          name: toolName,
+          arguments: argumentsValue as JsonValue,
+        })
+        return await ctx.tools.execute(input)
+      })
       await previousCommit
+      const content = await dispatchLogContent(ctx, {
+        exec,
+        agent,
+        subCallId,
+        name: toolName,
+        isError: result.isError,
+        content: result.content,
+      })
+      agent.session.append('tool/code-dispatch', {
+        rootCallId,
+        parentCallId: exec.callId,
+        subCallId,
+        name: toolName,
+        arguments: argumentsValue as JsonValue,
+        isError: result.isError,
+        content,
+      })
       forwardResult(exec, result)
       if (result.isError) throw new Error(result.error.message)
       const presentation = officialPresentation(result)

@@ -1,10 +1,70 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import {
+  defineTool,
+  type DiffCallView,
+  type DiffResultView,
+  type FileDiff,
+  type JsonValue,
+  type ToolResult,
+} from '@deepseek-ai/dsh-tools'
 import { executePatch } from './executor.js'
-import { PatchError } from './types.js'
+import { parsePatch } from './parser.js'
+import { PatchError, type ParsedPatch } from './types.js'
 
 export const APPLY_PATCH_TOOL_NAME = 'apply_patch'
+
+function parsedDiffs(parsed: ParsedPatch): FileDiff[] | undefined {
+  const diffs: FileDiff[] = []
+  for (const file of parsed.files) {
+    if (file.operation === 'delete' || (file.operation === 'update' && file.movePath !== null)) return undefined
+    if (file.operation === 'add') {
+      diffs.push({
+        path: file.path,
+        oldText: null,
+        newText: file.lines.length === 0 ? '' : `${file.lines.join('\n')}\n`,
+      })
+      continue
+    }
+    for (const hunk of file.hunks) {
+      diffs.push({
+        path: file.path,
+        oldText: hunk.oldLines.length === 0 ? null : hunk.oldLines.join('\n'),
+        newText: hunk.newLines.join('\n'),
+      })
+    }
+  }
+  return diffs.length === 0 ? undefined : diffs
+}
+
+function patchDiffs(patch: string): FileDiff[] | undefined {
+  try {
+    return parsedDiffs(parsePatch(patch))
+  } catch {
+    return undefined
+  }
+}
+
+function metaDiffs(meta: JsonValue | undefined): FileDiff[] | undefined {
+  if (typeof meta !== 'object' || meta === null || Array.isArray(meta) || !Array.isArray(meta.diffs)) return undefined
+  const diffs: FileDiff[] = []
+  for (const candidate of meta.diffs) {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return undefined
+    if (typeof candidate.path !== 'string'
+      || (candidate.oldText !== null && typeof candidate.oldText !== 'string')
+      || typeof candidate.newText !== 'string') return undefined
+    diffs.push({
+      path: candidate.path,
+      oldText: candidate.oldText as string | null,
+      newText: candidate.newText,
+    })
+  }
+  return diffs.length === 0 ? undefined : diffs
+}
+
+function locations(diffs: readonly FileDiff[]): { path: string }[] {
+  return [...new Set(diffs.map(diff => diff.path))].map(path => ({ path }))
+}
 
 /** Register the Realm-only composite patch capability. */
 export function registerApplyPatch(ctx: Context): void {
@@ -43,6 +103,10 @@ export function registerApplyPatch(ctx: Context): void {
         type: 'text',
         text: `Applied patch to ${value.files.length} file${value.files.length === 1 ? '' : 's'}.`,
       }],
+      presentationMeta: args => ({
+        diffs: (patchDiffs(args.patch) ?? [])
+          .map(({ path, oldText, newText }) => ({ path, oldText, newText })),
+      }),
     },
     async execute(args, exec) {
       try {
@@ -57,6 +121,22 @@ export function registerApplyPatch(ctx: Context): void {
         }
         throw error
       }
+    },
+    presentCall(args): DiffCallView | undefined {
+      const diffs = patchDiffs(args.patch)
+      if (diffs === undefined) return undefined
+      return {
+        card: 'diff',
+        title: 'Apply patch',
+        diffs,
+        locations: locations(diffs),
+      }
+    },
+    presentResult(args, result: ToolResult): DiffResultView | undefined {
+      if (result.isError) return undefined
+      const diffs = metaDiffs(result.meta) ?? patchDiffs(args.patch)
+      if (diffs === undefined) return undefined
+      return { card: 'diff', title: 'Apply patch', diffs }
     },
   }))
 }
