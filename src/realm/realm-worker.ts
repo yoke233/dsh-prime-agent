@@ -189,7 +189,7 @@ type BindingErrorConstructor = new (memberName: string, message: string) => Erro
 interface NamespaceHandle {
   global: string
   proxy: object
-  wrappers: Map<string, (args: unknown) => Promise<unknown>>
+  wrappers: Map<string, (...args: unknown[]) => Promise<unknown>>
   /** Members leased for the CURRENT run; emptied the moment a run settles. */
   allowed: Set<string>
   errorClass: BindingErrorConstructor | undefined
@@ -541,12 +541,47 @@ function bindingFailure(handle: NamespaceHandle, name: string, message: string):
  * forever, so a retained closure still resolves to the CURRENT run's host
  * implementation on a later run.
  */
-function wrapperFor(handle: NamespaceHandle, name: string): (args: unknown) => Promise<unknown> {
-  const cached = capturedReflectApply(capturedMapGet, handle.wrappers, [name]) as ((args: unknown) => Promise<unknown>) | undefined
+function wrapperFor(handle: NamespaceHandle, name: string): (...args: unknown[]) => Promise<unknown> {
+  const cached = capturedReflectApply(capturedMapGet, handle.wrappers, [name]) as ((...args: unknown[]) => Promise<unknown>) | undefined
   if (cached) return cached
-  const wrapper = (args: unknown): Promise<unknown> => callBinding(handle, name, args)
+  const wrapper = handle.global === 'refine'
+    ? (...args: unknown[]): Promise<unknown> => callRefineBinding(handle, name, args)
+    : (args: unknown): Promise<unknown> => callBinding(handle, name, args)
   capturedReflectApply(capturedMapSet, handle.wrappers, [name, wrapper])
   return wrapper
+}
+
+/** Model the packaged refine Skill's small script API over its private host binding. */
+function callRefineBinding(handle: NamespaceHandle, name: string, args: unknown[]): Promise<unknown> {
+  if (name === 'status') {
+    if (args.length !== 0) return Promise.reject(bindingFailure(handle, name, 'refine.status() accepts no arguments'))
+    return callBinding(handle, name, capturedObjectCreate(null))
+  }
+  if (name !== 'run') return Promise.reject(bindingFailure(handle, name, `unknown refine member ${capturedJsonStringify(name)}`))
+  if (args.length > 2) return Promise.reject(bindingFailure(handle, name, 'refine.run() accepts instructions and options'))
+  const instructions = args[0]
+  if (instructions !== undefined && typeof instructions !== 'string') {
+    return Promise.reject(bindingFailure(handle, name, 'refine.run() instructions must be a string'))
+  }
+  const options = args[1]
+  let scope: unknown
+  if (options !== undefined) {
+    if (typeof options !== 'object' || options === null || capturedArrayIsArray(options)) {
+      return Promise.reject(bindingFailure(handle, name, 'refine.run() options must be an object'))
+    }
+    const keys = capturedReflectOwnKeys(options)
+    if (keys.length > 1 || (keys.length === 1 && keys[0] !== 'scope')) {
+      return Promise.reject(bindingFailure(handle, name, 'refine.run() options accept only scope'))
+    }
+    scope = (options as { scope?: unknown }).scope
+    if (scope !== undefined && scope !== 'local' && scope !== 'global') {
+      return Promise.reject(bindingFailure(handle, name, 'refine.run() scope must be local or global'))
+    }
+  }
+  const request = capturedObjectCreate(null) as { instructions?: string; scope?: 'local' | 'global' }
+  if (instructions !== undefined) request.instructions = instructions
+  if (scope !== undefined) request.scope = scope as 'local' | 'global'
+  return callBinding(handle, name, request)
 }
 
 /** Validate the lease at CALL time, then bridge one call over the private port. */
@@ -590,7 +625,7 @@ function ensureHandle(global: string): NamespaceHandle {
   const handle: NamespaceHandle = {
     global,
     proxy: target,
-    wrappers: new CapturedMap<string, (args: unknown) => Promise<unknown>>(),
+    wrappers: new CapturedMap<string, (...args: unknown[]) => Promise<unknown>>(),
     allowed: new CapturedSet<string>(),
     errorClass: undefined,
   }

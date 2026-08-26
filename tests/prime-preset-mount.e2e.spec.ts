@@ -10,6 +10,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import LlmRuntime, { CallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -17,6 +18,7 @@ import * as primeRuntime from '../src/runtime.js'
 
 const PROJECT_ROOT = resolve(import.meta.dirname, '..')
 const PRIME_AGENT_URL = pathToFileURL(resolve(PROJECT_ROOT, 'lib/index.js')).href
+const REFINE_SKILL_URL = pathToFileURL(resolve(PROJECT_ROOT, 'lib/refine-skill-provider.js')).href
 const PACKAGED_COMPOSITION = join(PROJECT_ROOT, 'agent-presets/prime/agent.cordis.yml')
 const testSignal = new AbortController().signal
 
@@ -102,7 +104,8 @@ describe('Prime packaged preset realm rows', () => {
     if (start < 0) throw new Error('packaged Prime realm row is missing')
     const end = shipped.indexOf('# ── shell', start)
     const realmRows = shipped.slice(start, end < 0 ? undefined : end)
-      .replace('name: dsh-prime-agent', `name: ${PRIME_AGENT_URL}`)
+      .replace(/^  name: dsh-prime-agent$/m, `  name: ${PRIME_AGENT_URL}`)
+      .replace(/^  name: dsh-prime-agent\/refine-skill-provider$/m, `  name: ${REFINE_SKILL_URL}`)
     await writeFile(join(presetDir, 'agent.cordis.yml'), realmRows)
 
     ctx = new Context()
@@ -114,6 +117,7 @@ describe('Prime packaged preset realm rows', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SkillRegistry)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(AgentLoop, { agents: [] })
     await ctx.plugin(primeRuntime, { stateDirectory: join(home, 'prime-agent') })
@@ -134,6 +138,9 @@ describe('Prime packaged preset realm rows', () => {
     expect(ctx.agentPresets.composedPreset(handle.agent.ctx)).toBe('prime')
     const assembly = await ctx.systemPrompt.assemble({ scope: handle.agent, agent: handle.agent })
     expect(assembly.tools.map(tool => tool.name)).toEqual(['repl'])
+    expect(ctx.tools.get('refine', handle.agent)).toBeUndefined()
+    const refineSkill = await ctx.skills.get('refine', { scope: handle.agent })
+    expect(refineSkill?.content).toContain('await refine.run()')
 
     const first = await runRepl(
       handle.agent,

@@ -7,5 +7,5 @@ export interface ReplBindings {
     finish(): Promise<void>;
 }
 /** Build one cell's leased host capabilities from the calling Agent's catalog. */
-export declare function createReplBindings(ctx: Context, exec: ToolRunContext): ReplBindings;
+export declare function createReplBindings(ctx: Context, exec: ToolRunContext, extraBindings?: readonly CodeBindingNamespace[]): ReplBindings;
 //# sourceMappingURL=bridge.d.ts.map

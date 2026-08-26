@@ -219,11 +219,21 @@ describe('persistent REPL cells', () => {
     expect(realm.generation).toBe(1)
   })
 
-  it('does not pollute the namespace when a cell has a syntax error', async () => {
+  it('does not execute or pollute the namespace when a cell has a syntax error', async () => {
     const realm = createRealm()
-    await realm.run({ program: 'const beforeSyntaxFailure = "kept"\nbeforeSyntaxFailure', bindings: [] })
-    const failed = await realm.run({ program: 'const neverDeclared =', bindings: [] })
+    let calls = 0
+    await realm.run({
+      program: 'const beforeSyntaxFailure = "kept"\nbeforeSyntaxFailure',
+      bindings: [tools({ touch: async () => { calls++; return null } })],
+    })
+    const failed = await realm.run({
+      program: 'await globalThis.tools.touch({})\nconst neverDeclared =',
+      bindings: [tools({ touch: async () => { calls++; return null } })],
+    })
     expect(failed.error?.kind).toBe('exception')
+    expect(failed.error?.message).toContain('parse failed before execution')
+    expect(failed.error?.message).toContain('retry the cell')
+    expect(calls).toBe(0)
 
     const after = await realm.run({
       program: '({ before: beforeSyntaxFailure, missing: typeof neverDeclared })',

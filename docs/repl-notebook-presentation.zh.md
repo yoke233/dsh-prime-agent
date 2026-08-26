@@ -74,10 +74,12 @@ history 只在当前 Worker generation 内有效。hard kill、OOM、active abor
 
 Use `repl` to execute TypeScript cells. Top-level `await` works. Variables,
 functions, and objects remain available while the REPL stays active. The final
-expression is the cell result; top-level `return` is invalid.
+expression is the cell result; top-level `return` is invalid. A cell that fails to
+parse executes no code; correct its TypeScript syntax and retry it.
 
-Call tools through `tools.*`, `agents.*`, and `jobs.*`. Results are already
-parsed JavaScript values. Follow the provided TypeScript declarations; do not
+Call tools through `tools.*`, `agents.*`, and `jobs.*`. Pass arguments as
+TypeScript object literals. For identifier keys, write `key: 'value'`; never write a trailing quote after
+an unquoted key. Results are already parsed JavaScript values. Follow the provided TypeScript declarations; do not
 call `JSON.parse` on tool results or guess their fields. Assign values that you
 will reuse. If a value's shape is uncertain, inspect it with
 `Array.isArray(value)` and `Object.keys(value)`.

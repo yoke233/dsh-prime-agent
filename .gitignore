@@ -7,3 +7,4 @@ dist/
 
 # Runtime state belongs under DSH_HOME, never in the source repository.
 prime-agent-v2/
+prompt-dumps/

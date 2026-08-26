@@ -22,7 +22,6 @@ export const inject = ['tools', 'systemPrompt', 'primeRealmRuntime']
 /** Current configuration surface; removed legacy state and options are not accepted. */
 export interface Config {
   stateDirectory: string
-  refineToolName?: string
   allowGlobalRefinement?: boolean
   refinementMaxTokens?: number
   refinementMaxConversationChars?: number
@@ -33,7 +32,6 @@ export interface Config {
 /** Schemastery configuration for the control plane and secondary learning layer. */
 export const Config: z<Config> = z.object({
   stateDirectory: z.string().required(),
-  refineToolName: z.string().default('refine'),
   allowGlobalRefinement: z.boolean().default(false),
   refinementMaxTokens: z.natural().min(256).default(4096),
   refinementMaxConversationChars: z.natural().min(1000).default(80000),
@@ -69,14 +67,6 @@ const CONTINUAL_DEFAULTS: HarnessLimits = {
   maxPromptCharsPerScope: 16000,
 }
 
-function toolName(value: string | undefined, fallback: string, field: string): string {
-  const resolved = (value ?? fallback).trim()
-  if (!/^[a-z][a-z0-9_]*$/.test(resolved)) {
-    throw new Error(`dsh-prime-agent: ${field} must match /^[a-z][a-z0-9_]*$/`)
-  }
-  return resolved
-}
-
 function positiveLimits<T extends object>(defaults: T, partial: Partial<T> | undefined, label: string): T {
   const limits = { ...defaults, ...partial } as T
   for (const [key, value] of Object.entries(limits as Record<string, number>)) {
@@ -87,28 +77,29 @@ function positiveLimits<T extends object>(defaults: T, partial: Partial<T> | und
 
 const REPL_AGENT_PROMPT = `## Persistent TypeScript REPL
 
-Use \`repl\` to execute TypeScript cells. Top-level \`await\` works. Variables,
-functions, and objects remain available while the REPL stays active. The final
-expression is the cell result; top-level \`return\` is invalid.
+Call only \`repl\` directly. In the TypeScript code passed to \`repl\`, use the
+preloaded \`tools.*\`, \`agents.*\`, and \`jobs.*\` APIs. Follow each generated
+declaration and its comments. \`import\` and \`require\` are unavailable.
 
-Call tools through \`tools.*\`, \`agents.*\`, and \`jobs.*\`. Results are already
-parsed JavaScript values. Follow the provided TypeScript declarations; do not
-call \`JSON.parse\` on tool results or guess their fields. Assign values that you
-will reuse. If a value's shape is uncertain, inspect it with
-\`Array.isArray(value)\` and \`Object.keys(value)\`.
+Top-level \`await\` works; top-level \`return\` does not. Variables remain available
+while the REPL is active. A parse failure executes nothing; fix the cell and retry.
+Pass TypeScript object literals, writing identifier keys as \`key: 'value'\`, not
+\`key': 'value'\`. Tool results are parsed JavaScript values; do not call
+\`JSON.parse\` on them. Inspect uncertain shapes with \`Array.isArray(value)\` and
+\`Object.keys(value)\`.
 
-\`$_\` is the latest available cell result. Retrieve an older result with
-\`$out(id)\`. \`$out\` is a function, so call \`$out(id)\`; do not use
-\`$out.property\` or \`$out[id]\`.
+\`$_\` is the latest available result; call \`$out(id)\` for an older one. Continue
+from variables or these values instead of parsing shortened display text. Backslashes
+in JSON previews are notation, not extra characters. Prefer forward-slash Windows
+paths such as \`D:/work/project\`.
 
-Displayed cell output may be shortened. Continue computation from your
-variables, \`$_\`, or \`$out(id)\` instead of parsing or copying displayed text.
-Backslashes shown inside a JSON preview are JSON notation, not additional
-characters in the underlying string. When writing Windows paths yourself,
-prefer forward slashes such as \`D:/work/project\`.
+Keep large source material in files and only compact working state in the REPL.`
 
-Keep large source material in files. Keep only paths, compact indexes, helper
-functions, and task-relevant summaries in the REPL.`
+const TOOL_AGENT_GUIDANCE: Readonly<Record<string, string>> = {
+  edit: 'Read the current file before editing; after a stale-file error, read it again before retrying.',
+  grep: "The pattern is a ripgrep regex, not literal text. Escape metacharacters and double regex backslashes in TypeScript strings, for example `pattern: 'stream\\\\(options\\\\)'`. Prefer small patterns; fix parse errors before retrying.",
+  write: 'Use this for file creation or complete replacement; prefer edit for targeted changes. Read an existing file before overwriting it.',
+}
 
 const COMPLETION_INTRINSICS = `declare const $_: unknown
 
@@ -130,32 +121,13 @@ interface CapabilityAlias {
   member: string
   target: string
 }
-const CANONICAL_TOOLS_DECLARATION = `declare const tools: {
-  [K in ToolName]: (args: ToolArgsMap[K]) => Promise<ToolOutputMap[K]>;
-}`
-
-const PROJECTED_TOOLS_DECLARATION = `type ToolArguments<K extends ToolName> = K extends 'grep'
-  ? Omit<ToolArgsMap[K], 'pattern'> & { pattern: string | RegExp }
-  : ToolArgsMap[K]
-
-declare const tools: {
-  [K in ToolName]: (args: ToolArguments<K>) => Promise<ToolOutputMap[K]>;
-}`
 
 
 function namespaceDeclaration(global: string, aliases: CapabilityAlias[]): string | undefined {
   if (aliases.length === 0) return undefined
   const members = aliases.map(({ member, target }) =>
-    `  ${member}: (args: ToolArguments<${JSON.stringify(target)}>) => Promise<ToolOutputMap[${JSON.stringify(target)}]>;`)
+    `  ${member}: (args: ToolArgsMap[${JSON.stringify(target)}]) => Promise<ToolOutputMap[${JSON.stringify(target)}]>;`)
   return `declare const ${global}: {\n${members.join('\n')}\n}`
-}
-function projectToolDeclarations(declarations: string): string {
-  const first = declarations.indexOf(CANONICAL_TOOLS_DECLARATION)
-  const last = declarations.lastIndexOf(CANONICAL_TOOLS_DECLARATION)
-  if (first < 0 || first !== last) {
-    throw new Error('dsh-prime-agent: generated tools SDK has an unsupported tools declaration')
-  }
-  return declarations.replace(CANONICAL_TOOLS_DECLARATION, PROJECTED_TOOLS_DECLARATION)
 }
 
 
@@ -165,7 +137,11 @@ function sdkText(ctx: Context, agent: Agent): string {
     .map((schema) => {
       const definition = ctx.tools.get(schema.name, agent)
       if (definition === undefined) throw new Error(`dsh-prime-agent: capability disappeared during prompt assembly: ${schema.name}`)
-      return { ...schema, output: definition.output.schema }
+      const guidance = TOOL_AGENT_GUIDANCE[schema.name]
+      const description = guidance === undefined
+        ? schema.description
+        : `${schema.description}\n\n${guidance}`
+      return { ...schema, description, output: definition.output.schema }
     })
   const available = new Set(schemas.map(schema => schema.name))
   const agents = [
@@ -189,12 +165,12 @@ function sdkText(ctx: Context, agent: Agent): string {
     throw new Error('dsh-prime-agent: generated tools SDK has an unsupported shape')
   }
   const declarations = [
-    projectToolDeclarations(rendered.slice(declarationStart + '```ts\n'.length, declarationEnd)),
+    rendered.slice(declarationStart + '```ts\n'.length, declarationEnd),
     COMPLETION_INTRINSICS,
     namespaceDeclaration('agents', agents),
     namespaceDeclaration('jobs', jobs),
   ].filter((section): section is string => section !== undefined)
-  return `${REPL_AGENT_PROMPT}\n\nThe available capabilities:\n\n\`\`\`ts\n${declarations.join('\n\n')}\n\`\`\``
+  return `${REPL_AGENT_PROMPT}\n\nAvailable functions and values:\n\n\`\`\`ts\n${declarations.join('\n\n')}\n\`\`\``
 }
 
 export interface ReplExecutionResult {
@@ -253,9 +229,24 @@ export function renderReplResult(value: ReplExecutionResult): string {
 export function apply(ctx: Context, config: Config): void {
   const stateDirectory = config.stateDirectory.trim()
   if (stateDirectory.length === 0) throw new Error('dsh-prime-agent: stateDirectory must not be empty')
-  const refineToolName = toolName(config.refineToolName, 'refine', 'refineToolName')
   const continualLimits = positiveLimits(CONTINUAL_DEFAULTS, config.continual, 'continual')
   const identity = new RealmIdentityStore({ directory: join(stateDirectory, 'realm-identity') })
+  const allowGlobalRefinement = config.allowGlobalRefinement ?? false
+  const refinementMaxTokens = config.refinementMaxTokens ?? 4096
+  const refinementMaxConversationChars = config.refinementMaxConversationChars ?? 80000
+  const continual = registerContinual(ctx, {
+    stateDirectory: join(stateDirectory, 'continual'),
+    allowGlobal: allowGlobalRefinement,
+    limits: continualLimits,
+    maxTokens: refinementMaxTokens,
+    maxConversationChars: refinementMaxConversationChars,
+  })
+  registerRefineCommand(ctx, continual.store, {
+    allowGlobal: allowGlobalRefinement,
+    limits: continualLimits,
+    maxTokens: refinementMaxTokens,
+    maxConversationChars: refinementMaxConversationChars,
+  })
 
   ctx.tools.register(defineTool({
     name: REPL_TOOL_NAME,
@@ -314,7 +305,7 @@ export function apply(ctx: Context, config: Config): void {
       if (exec.agent === undefined) throw new Error('repl requires an owning agent session')
       let realmId: string
       try { realmId = await identity.resolve(String(exec.agent.id)) } catch { throw new Error('repl session identity is unavailable') }
-      const leased = createReplBindings(ctx, exec)
+      const leased = createReplBindings(ctx, exec, [continual.bindingFor(exec.agent)])
       try {
         const outcome = await ctx.primeRealmRuntime.run(realmId, { program: args.code, bindings: leased.bindings, signal: exec.signal })
         if (outcome.error !== undefined) {
@@ -332,15 +323,6 @@ export function apply(ctx: Context, config: Config): void {
 
   registerApplyPatch(ctx)
   registerPolicy(ctx, { requireOrchestrationTools: config.requireOrchestrationTools ?? true })
-  const allowGlobalRefinement = config.allowGlobalRefinement ?? false
-  const continualStore = registerContinual(ctx, { stateDirectory: join(stateDirectory, 'continual'), toolName: refineToolName, allowGlobal: allowGlobalRefinement, limits: continualLimits })
-  registerRefineCommand(ctx, continualStore, {
-    allowGlobal: allowGlobalRefinement,
-    limits: continualLimits,
-    maxTokens: config.refinementMaxTokens ?? 4096,
-    maxConversationChars: config.refinementMaxConversationChars ?? 80000,
-  })
-
   ctx.tools.guard(exec => exec.parent === undefined && exec.name !== REPL_TOOL_NAME ? 'use the repl tool for this session' : undefined)
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const result = await next()
@@ -348,6 +330,8 @@ export function apply(ctx: Context, config: Config): void {
     const repl = result.tools.find(tool => tool.name === REPL_TOOL_NAME)
     if (repl === undefined) throw new Error('dsh-prime-agent: repl tool is unavailable')
     result.tools = [repl]
+    result.sections = result.sections.filter(section =>
+      section.name !== 'harness:identity' && !section.name.startsWith('tool:'))
     const text = sdkText(ctx, context.agent)
     const sdk = result.sections.find(section => section.name === 'tools:sdk')
     if (sdk === undefined) result.sections.push({ name: 'tools:sdk', text })

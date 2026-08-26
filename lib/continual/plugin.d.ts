@@ -1,17 +1,26 @@
 /** Secondary continual-learning layer for the Prime RLM workspace. */
 import type { Context } from '@deepseek-ai/cordis';
+import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { CodeBindingNamespace } from '@deepseek-ai/dsh-code-runtime';
 import { HarnessStore } from './store.js';
 import type { HarnessLimits } from './types.js';
-/** Deployment configuration for persistence, refinement bounds, and prompt budgets. */
 export interface ContinualConfig {
-    /** Private directory that stores the global document and hashed per-session documents. */
     stateDirectory: string;
-    /** Whether model-authored transactions may modify deployment-global harness state. */
     allowGlobal: boolean;
-    /** Registered model-facing tool name. */
-    toolName: string;
     limits: HarnessLimits;
+    maxTokens: number;
+    maxConversationChars: number;
 }
-/** Register the tool plus static and replayable dynamic prompt contributions. */
-export declare function registerContinual(ctx: Context, config: ContinualConfig): HarnessStore;
+export interface RefineStatus {
+    pending: boolean;
+    in_flight: boolean;
+    scheduled?: boolean;
+    reason?: string;
+}
+export interface ContinualRuntime {
+    store: HarnessStore;
+    bindingFor(agent: Agent): CodeBindingNamespace;
+}
+/** Register replayable learning context, the packaged Skill provider, and its private Realm bridge. */
+export declare function registerContinual(ctx: Context, config: ContinualConfig): ContinualRuntime;
 //# sourceMappingURL=plugin.d.ts.map

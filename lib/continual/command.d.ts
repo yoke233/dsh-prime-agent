@@ -1,6 +1,7 @@
 /** Human-facing /refine command backed by the bounded continual harness store. */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { CommandResult } from '@deepseek-ai/dsh-commands';
 import { HarnessStore } from './store.js';
 import type { HarnessEdit, HarnessLimits, HarnessScope } from './types.js';
 export interface RefineCommandConfig {
@@ -27,6 +28,8 @@ export declare function parseRefineCommandOptions(rawInput: string): RefineComma
 export declare function parseRefinementProposal(output: string): RefinementProposal;
 /** Enforce the shared callable-entry policy for model tool and slash-command writes. */
 export declare function assertCallableReferences(ctx: Context, agent: Agent | undefined, scope: HarnessScope, edits: readonly HarnessEdit[]): void;
+/** Run one already-admitted refinement without claiming Agent maintenance ownership. */
+export declare function runRefinement(ctx: Context, store: HarnessStore, config: RefineCommandConfig, agent: Agent, options: RefineCommandOptions, signal: AbortSignal): Promise<CommandResult>;
 /** Register /refine when the host command service is composed. */
 export declare function registerRefineCommand(ctx: Context, store: HarnessStore, config: RefineCommandConfig): void;
 export {};

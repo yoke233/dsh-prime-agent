@@ -6,6 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -143,6 +144,7 @@ describe('Prime realm through the sole repl transport', () => {
     ctx = new Context()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SkillRegistry)
     await ctx.plugin(primeRuntime, { stateDirectory })
     registerFixtures(ctx)
     await ctx.plugin(primeAgent, { stateDirectory })
@@ -152,6 +154,12 @@ describe('Prime realm through the sole repl transport', () => {
 
     const assembly = await ctx.systemPrompt.assemble({ agent: alpha.agent })
     expect(assembly.tools.map(tool => tool.name)).toEqual(['repl'])
+    expect(assembly.sections.find(section => section.name === 'tools:sdk')?.text).not.toContain('refine:')
+    const refineStatus = await runRepl(alpha.agent, 'await refine.status()')
+    expect(refineStatus.result).toEqual({ pending: false, in_flight: false })
+    const refineRun = await runRepl(alpha.agent, "await refine.run('validated focus')")
+    expect(refineRun.result).toEqual({ pending: true, in_flight: false, scheduled: true })
+    expect(alpha.events.filter(event => event.type === 'tool/code-dispatch')).toEqual([])
 
     const first = await runRepl(alpha.agent, `
       const lookup = new Map([['a', { id: 'a' }]])
@@ -233,9 +241,11 @@ describe('Prime realm through the sole repl transport', () => {
       jobsAliases: true,
     })
 
-    // The bridge dispatches through the registry; no handshake or code-dispatch
-    // projection ever reaches the session log.
-    expect(alpha.events.filter(event => event.type === 'tool/code-dispatch')).toEqual([])
+    // Ordinary nested tools use official dispatch records; the private refine
+    // Skill bridge above did not manufacture a tool call.
+    const dispatches = alpha.events.filter(event => event.type === 'tool/code-dispatch')
+    expect(dispatches.length).toBeGreaterThan(0)
+    expect(JSON.stringify(dispatches)).not.toContain('refine')
     expect(beta.events.filter(event => event.type === 'tool/code-dispatch')).toEqual([])
   })
 })

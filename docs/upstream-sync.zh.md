@@ -100,6 +100,7 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 | `7787f074` | admission-first `rlm()`、子 Agent 显式汇报、可恢复 child handle | 适配 | continuable Subagent 返回持久 child id；DSH Session 负责恢复，child 通过 report 汇报 |
 | `7787f074` | 持久 IPython 是模型唯一可见控制面 | 适配 | `repl` 是唯一界面；Agent scope 用可信 `exec.agent.id` 解析 Realm identity，host `primeRealmRuntime` 服务把 Prime Session 准入 Persistent TypeScript Realm，普通 Session 保持官方 one-shot Runtime |
 | `7787f074` | local/global Continual Harness 与 refine/rollback | 适配 | `refine` 降为次级，基于证据、乐观并发、有界且冲突安全 |
+| `aacf04b4` | Agent-callable `refine` Python Skill 只安排 turn-end refinement，Host 拥有 planner/store 并恢复 Agent | 适配 | Prime 注册随包 DSH `refine` Skill provider；Realm 预加载、不进入工具 SDK 的 leased `refine.status/run` 客户端立即返回，`agent/turn-stopping` 执行同一 planner/store 并通过 `agent.steer()` 恢复；底层 CRUD 不进入模型 SDK |
 | `7787f074` | Host 拥有 Agent 生命周期、消息、Goal 和取消 | 采用 | 插件组合 DSH 服务，不创建 Worker registry 或第二套 Agent Loop |
 | `7787f074` | 默认开启自动 refinement | 暂缓 | 在自动模型写入前先设计明确 proposal/review/outcome 机制 |
 | `aacf04b4` | 长任务使用非阻塞控制循环、独立 worker 并行、root 主动汇报进度 | 适配 | policy 要求用 continuable child 或 Job 保存 id/结果位置，禁止 sleep 轮询和长阻塞 await；仅直接面向用户的 root 获得里程碑进度规则 |
@@ -123,8 +124,9 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 
 - Prime 的 child answer 可以进入 parent 仍在进行的计算。DSH 0.1.1-rc.2 已原生实现该不变量：官方 `tool-subagent-report` 默认使用 `next-step`，由 continuation manager 调用 `parent.steer()`，让运行中的 parent 在最近 step 消费并唤醒空闲 parent，同时维护唤醒记账以及 report-before-settlement FIFO。本插件直接组合该能力，不再替换 report row 或维护私有 adapter。
 - Prime 的 Python heap 能保存活对象和函数；当前适配用可信 `exec.agent.id` 解析的 Realm identity 选择 Persistent TypeScript Realm，在同一 Worker generation 中保留 TypeScript live objects。IPython 只用于参考行为与失败语义，不是产品 backend。
+- Prime preset 相比 shipped `code` preset 不重复注册 scoped `tool-skill`：Host 已有正式 catalog/loader；保留第二个同名注册会 shadow Host tool，使 visibility-matched pre-step hook 无法把合并后的 Skill 目录加入首个模型请求。preset 仍保留 scoped filesystem provider，以贡献项目与用户 Skill roots。
 - 当前跨 Agent 上下文使用共享工作区 handoff file。写后不改是 policy 约定，不存在独立 Capsule store、`share`/`mount` 或文件访问授权。
-- 手动 `/refine` 会生成有界 edits proposal，并通过现有 revision 检查 store 提交；它不会观察效果或自动触发。
+- 模型可加载 `refine` Skill 并主动安排 turn-end refinement，人类也可调用 `/refine`；两者复用同一个有界 planner 和 revision-checked store。interval/compaction auto-refine 与效果观察仍未启用。
 - Prime 可以为单个 child 选择 reasoning level；DSH 0.1.1-rc.2 的 Subagent 调用当前没有对应的 per-spawn 参数。
 - Prime compaction 会清理无法纳入有界快照的超大 Python 变量；DSH compaction 不遍历、快照或清理 Realm heap。spill 只在 backend 可用时 best-effort 约束模型 projection 与日志，失败时保留 inline 结果，其 artifact 生命周期由 DSH store/部署层负责。
 - Prime 的 MCP program 运行在 Kernel/ACP runtime；DSH 的对应能力属于 Host 工具注册表，只有 profile 显式安装的 MCP client/tools 才会进入 repl 单元的绑定。

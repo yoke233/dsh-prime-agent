@@ -65,7 +65,7 @@ runtime 启动时把随包 Prime preset 复制到 `$DSH_HOME/.agent-presets/prim
 
 ## 唯一模型控制面
 
-Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt assembly 先走完整流程，再在 next() 之后把 tools 列表过滤到只剩 `repl`；`refine`、Subagent、Jobs、文件系统、MCP 及其他工具不进入模型 schema，只作为 cell 内预加载的隐藏绑定出现。模型直接调用 `repl` 之外的任何工具都会被 guard 拒绝（提示 “use the repl tool for this session”）；组合不满足该不变量时，assembly 明确失败。
+Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt assembly 先走完整流程，再在 `next()` 之后把 tools 列表过滤到只剩 `repl`，同时删除固定 `harness:identity` 和名称以 `tool:` 开头的隐藏能力独立提示：identity 只陈述实现身份，不提供操作事实；工具提示按外层直接调用编写，会与 Prime 的唯一 `repl` 路由冲突。`refine`、Subagent、Jobs、文件系统、MCP 及其他工具不进入模型 schema，只作为 cell 内预加载的隐藏绑定出现，其生成 declaration/JSDoc 是模型使用能力的唯一工具级契约。模型直接调用 `repl` 之外的任何工具都会被 guard 拒绝（提示 “use the repl tool for this session”）；组合不满足该不变量时，assembly 明确失败。Prime preset 的 `prime-tool-restrictions.config.deny` 声明要排除的 base 全局工具，scope-local 通用插件只负责调用 `ctx.tools.restrict()`：当前排除的 `str_replace_editor` 和 `read`/`write`/`edit`/`apply_patch` 重叠，`workflow` 不作为 Prime 通用编排入口；`tool-ralph` 仍保留为显式 fresh-agent loop。
 
 `repl` 的参数是单个 `code` 字符串。插件把官方“一次 async 函数”说明改写成持久 REPL cell 说明：
 
@@ -73,10 +73,12 @@ Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt ass
 - cell 的末尾表达式是结果，顶层 `return` 无效。
 - 普通顶层 binding 留在同一 live namespace，供后续 cell 直接使用。
 - cell 内预加载三个绑定命名空间：`tools.*`（当前 Agent catalog 中除 `repl` 外的全部工具）、`agents.*`（`spawn`/`fork`/`list`/`send`/`interrupt` → `subagent`/`subagent_fork`/`list_agents`/`send_message`/`interrupt_agent`）、`jobs.*`（`list`/`output`/`kill` → `job_list`/`job_output`/`job_kill`）。程序始终得到 canonical value，SDK 从当前 catalog 生成真实 `ToolOutputMap`；对象结果若未经转换直接成为 completion，Worker 才用关联的官方 content 展示。SDK 同时声明 `$_`、`$out(id)`、`$out.list()/drop(id)/clear()`；这些能力不可作为外层工具直接调用。
-- 固定 Agent 文案只教授 persistent TypeScript、已解析工具值、生成返回类型、completion intrinsics、preview 不可解析、Windows 路径优先 `/` 与紧凑 live 工作集；不拼接用户聊天、具体任务、仓库路径、历史失败或可选工具名。
+- 固定 Agent 文案只教授唯一 `repl` 路由、cell 内预加载命名空间、declaration/JSDoc 的权威性、不可使用 `import`/`require`、persistent TypeScript、合法参数对象字面量、解析失败不执行、已解析工具值、completion intrinsics、preview 不可解析、Windows 路径优先 `/` 与紧凑 live 工作集；不重复具体工具 schema，不拼接用户聊天、具体任务、仓库路径、历史失败或可选工具名。
 - 必须跨 Worker 或 host 重启保存的进度写入工作区文件。
 
-Prime 不增加搜索 provider。源码发现仍调用 DSH 原生 `grep`；生成 SDK 只在 Realm interface 将 `grep.pattern` 扩展为 `string | RegExp`。Worker 使用启动时捕获的原生 getter 把无 flags 的真实 `RegExp` 投影为 `.source`，再按 lossless JSON 进入 Host binding seam；带 flags 或伪造的 exotic value 明确失败，DSH schema、授权、执行与日志路径不变。
+开发脚本 `scripts/dump-prime-prompt.mjs` 从空 root 应用已安装的 DSH base patch、本包 host patch 和随包 Prime preset，并通过一个隔离临时 `DSH_HOME` 创建真实 Agent scope 后调用 `assembleContextFor`。它把 `renderPrompt`、`renderContextSections`/`joinContextSections` 和 assembly tool schemas 渲染为分节纯文本，不调用模型。默认结果写到当前目录的 `prompt-dumps/prime-prompt.txt` 且 stdout 只返回路径，避免诊断本身制造超大终端工具块；`--stdout` 是显式 opt-in，`prompt-dumps/` 不进入版本控制。脚本移除只服务于开发热更新且要求特殊 Node 启动 flag 的 HMR row，不改变任何 prompt/tool contribution。
+
+Prime 不增加搜索 provider。源码发现仍调用 DSH 原生 `grep`；prompt assembly 按工具名复制 schema，只在 `edit`、`grep`、`write` 的原始 description 后追加 schema 尚未表达的使用约束，不修改 catalog 中共享定义。`edit` 说明首次修改和 stale retry 前读取当前文件，`write` 说明只用于创建或完整替换并优先用 `edit` 做局部变更，`grep` 说明 ripgrep regex、TypeScript 字符串双重转义与 parse-error 修正。生成 SDK 保持 DSH canonical `grep.pattern: string`，不改写 `ToolArgsMap`。Worker 使用启动时捕获的原生 getter 把无 flags 的真实 `RegExp` 兼容投影为 `.source`，再按 lossless JSON 进入 Host binding seam；带 flags 或伪造的 exotic value 明确失败，DSH schema、授权、执行与日志路径不变。
 
 MCP 同样不进入 Realm runtime。profile 显式安装 DSH Host MCP client 后，server tools 注册到统一 `ctx.tools` catalog，repl 单元自动获得对应 `tools.*` 绑定；连接、认证、重连、工具代际、子进程与清理由 Host 插件拥有。本插件不复制上游的 Python kernel-owned MCP 或 ACP MCP program。
 
@@ -186,17 +188,13 @@ handoff file 是写入时刻的快照；“写后不改”由 policy 约束，�
 
 ## Continual Harness
 
-`refine` 是控制面之后的次级学习层。模型侧显式工具接口包括：
+`refine` 是控制面之后的次级学习层。Prime scope 向 DSH Skill Registry 注册随包、model-invocable/user-non-invocable 的 `refine` provider，并增加 scoped filesystem provider；Host 唯一的 `dsh-tool-skill` 注册负责在首个模型请求前发布合并目录并按需加载 `skills/refine/SKILL.md`。Prime preset 不注册第二个同名 tool-skill，避免 scoped tool shadow 令 Host 的 visibility-matched pre-step hook 跳过目录。Skill 说明 Realm 预加载的 leased `refine.status()` / `refine.run(instructions?, options?)` 客户端。该 namespace 经 Realm 私有 Host binding 调度，不注册 DSH tool、不进入 `tools.*` 或生成 SDK，也不写入 `tool/code-dispatch`。模型不会获得 store 的 inspect/apply/rollback、revision、transaction 或 edit schema。
 
-- `inspect`：读取 scope 的 revision、entries 与近期 transactions。
-- `apply`：提交带 trigger、具体 evidence、可验证 expected outcome 与最小 edits 的事务。
-- `rollback`：在目标事务的所有输出都未漂移时恢复 before snapshots。
+`run` 将请求按 Agent 保存在内存中并立即返回；同一 turn 的后续调用覆盖待处理请求。`agent/turn-stopping` serial listener 取出请求，运行同一个无工具 refinement planner；成功、no-op 或失败结果都通过 `agent.steer()` 送回当前 Agent，使下一步使用重建后的 prompt。一次 refinement 恢复后的同 turn 重复调度被拒绝，Agent 进入 idle 后重新开放。插件卸载或 Session 消失时，WeakMap/WeakSet 不产生独立持久任务。
 
-apply 与 rollback 都要求调用方先 inspect，并携带 `expected_revision`；磁盘锁内再次检查 revision。每笔事务保存 before/after，历史有界保留。skill/subagent entry 必须引用调用时真实可见的工具，不能把 `repl` transport 当作 SDK member。
+人类侧 `/refine [--local|--global] [instructions]` 仍通过 DSH `ctx.commands.register` 注册。handler 使用 `Agent.runMaintenance` 与普通 turn 串行，按 `session.requestHeader()?.config`、再按 `agent.options` 复用 provider/model；它只向 `ctx.llm.stream()` 发送有界、图片已投影的文本会话尾部、当前 scope 摘要和可选指令，不开放工具。输出必须是 JSON proposal；截断、取消、非 stop、JSON/shape 错误或 revision 冲突全部 fail closed。空 edits 不落盘，非空 edits 走同一个 `HarnessStore.apply`。`/refine rollback <transaction-id> [--global]` 直接复用 `HarnessStore.rollback`。
 
-人类侧 `/refine [--local|--global] [instructions]` 通过 DSH `ctx.commands.register` 注册。handler 使用 `Agent.runMaintenance` 与普通 turn 串行，按 `session.requestHeader()?.config`、再按 `agent.options` 复用 provider/model；它只向 `ctx.llm.stream()` 发送有界、图片已投影的文本会话尾部、当前 scope 摘要和可选指令，不开放工具。输出必须是 JSON proposal；截断、取消、非 stop、JSON/shape 错误或 revision 冲突全部 fail closed。空 edits 不落盘，非空 edits 走同一个 `HarnessStore.apply`。`/refine rollback <transaction-id> [--global]` 直接复用 `HarnessStore.rollback`。插件卸载先注销命令，再 drain 已开始的调用。
-
-local state 以 Session id 的 SHA-256 摘要命名。`allowGlobalRefinement` 默认为 false，此时 global inspect 和 mutation 都拒绝；启用后使用单一 `global.json`。手动 `/refine` 会生成 proposal 并在校验后直接提交，没有单独的人类 review 阶段、自动效果观察或 global 人工批准流程；auto-refine 仍未启用。
+Host 内部 store 继续以显式 inspect/apply/rollback、`expected_revision`、磁盘锁内 revision 复查和 conflict-safe rollback 实现。每笔事务保存 before/after，历史有界保留；skill/subagent entry 必须引用调用时真实可见的工具，不能把 `repl` transport 当作 SDK member。local state 以 Session id 的 SHA-256 摘要命名。`allowGlobalRefinement` 默认为 false，此时所有显式 global refinement 都拒绝；启用后使用单一 `global.json`。模型 Skill 与人类 command 都没有效果观察或 global 人工批准流程；turn interval/compaction auto-refine 仍未启用。
 
 进入 prompt 的 entry 是有界、JSON 引用的非可信建议。它不能替代基础 system prompt，也不能覆盖当前 user 指令、权限、sandbox 或工具约束。任务数据、研究材料、执行进度和大上下文不属于 Continual Harness。
 
@@ -226,7 +224,6 @@ Agent-scope `dsh-prime-agent`：
 | 配置 | 默认值 | 作用 |
 | --- | --- | --- |
 | `stateDirectory` | 必填 | Realm identity 与 continual state 根目录。 |
-| `refineToolName` | `refine` | Continual Harness 工具名（可配置）。 |
 | `allowGlobalRefinement` | `false` | 是否允许 global harness 读取和写入。 |
 | `refinementMaxTokens` | `4096` | `/refine` 辅助模型请求的最大输出 token。 |
 | `refinementMaxConversationChars` | `80000` | `/refine` 会话尾部文本预算。 |

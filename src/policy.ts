@@ -32,7 +32,7 @@ function orchestrationPolicy(ctx: Context, agent: Agent | undefined, requireTool
     : ''
 
   return `Orchestration guidance:
-- Use the preloaded tools, agents, and jobs APIs described by the generated declarations. Keep a simple action simple; introduce loops, helpers, parallelism, agents, or jobs only when the task benefits.
+- Use the preloaded tools, agents, and jobs shown below. Keep a simple action simple; introduce loops, helpers, parallelism, agents, or jobs only when the task benefits.
 - Assign intermediate results you will reuse.
 - Parallelize independent read-only work. Run dependent steps in order, and serialize side-effecting mutations unless the underlying operation explicitly supports safe concurrency.
 - Use Promise.all only when every result is required. For independent best-effort probes, use Promise.allSettled or catch each ToolCallError individually; inspect failures and rethrow unexpected errors.
@@ -40,7 +40,7 @@ function orchestrationPolicy(ctx: Context, agent: Agent | undefined, requireTool
 - For slow or independently completing work, start an agent or job, retain its handle, continue only independent useful work, and inspect it after a report, completion notice, or later turn. Do not sleep or busy-poll.
 - Agent handles and job ids are different. Use agents for continuable conversations and jobs for one-shot background work.
 - Small, self-contained agent context belongs directly in its prompt. Use files for large material, structured snapshots, binary data, or information that must survive a restart.
-- The live session is not durable. Checkpoint irreplaceable progress and large source data to files, then keep only useful locators and summaries live.
+- Save irreplaceable progress and large source data to files; variables may be lost after a restart.
 - A failed call is a real outcome: determine whether a side effect happened before retrying or compensating. Never route around a denial or approval rejection.
 - After a restart notice, rebuild from files and verify external state before resuming mutations.${rootProgressPolicy}`
 }

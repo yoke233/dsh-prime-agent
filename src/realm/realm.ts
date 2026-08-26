@@ -790,7 +790,10 @@ export class PersistentRealm {
     } catch (error: unknown) {
       // A program that does not survive the type-strip never reaches the
       // worker, so it can neither disturb the live namespace nor cost a generation.
-      this.settle(entry, entry.ledger.failure([], { kind: 'exception', message: messageOf(error) }))
+      this.settle(entry, entry.ledger.failure([], {
+        kind: 'exception',
+        message: `TypeScript parse failed before execution: ${messageOf(error)}. Correct the syntax and retry the cell.`,
+      }))
       return
     }
 

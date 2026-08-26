@@ -41,6 +41,9 @@
   config:
     stateDirectory: !!js dshHomePath('prime-agent')
 
+- id: prime-refine-skill
+  name: dsh-prime-agent/refine-skill-provider
+
 # ── shell ───────────────────────────────────────────────────────────────────
 
 # `shell-env` stays in the HOST composition: `apps/cli/src/web.ts` injects it to
@@ -59,6 +62,15 @@
   disabled: !!js process.platform !== 'win32'
 
 # ── filesystem ──────────────────────────────────────────────────────────────
+
+# The base bundle exposes these globally. Keep the policy in the preset while
+# the small scoped plugin applies DSH's public tools.restrict() seam.
+- id: prime-tool-restrictions
+  name: dsh-prime-agent/tool-restrictions
+  config:
+    deny:
+      - str_replace_editor
+      - workflow
 
 # Both register into the host `tools` registry and provide nothing, so
 # they need no realm. The `fs` service and its policy stay in the host.
@@ -84,16 +96,13 @@
 
 # ── skills ──────────────────────────────────────────────────────────────────
 
-# The skill REGISTRY lives in the host composition and is layered per scope:
-# these rows register into THIS preset's layer of it, so they need no realm.
-# `skill-filesystem` contributes local-root discovery for agents on this preset, and
-# `tool-skill` gives them the catalog and loader; the merged catalog also
-# carries whatever the deployment registered globally (repository plugins).
+# The skill REGISTRY and tool-skill catalog/loader live in the host composition.
+# This scoped filesystem provider adds the preset's project/user roots to the
+# merged catalog. Do not shadow the host tool-skill registration here: its
+# visibility-matched pre-step hook must remain paired with the same host `skill`
+# tool resolved for this Agent, including when Prime exposes it through the REPL.
 - id: skill-filesystem
   name: '@deepseek-ai/dsh-skill-filesystem'
-
-- id: tool-skill
-  name: '@deepseek-ai/dsh-tool-skill'
 
 # ── goals ───────────────────────────────────────────────────────────────────
 
@@ -232,9 +241,6 @@
       name: '@deepseek-ai/dsh-workflow-worker-thread'
       config:
         provider: spawn
-
-    - id: tool-workflow
-      name: '@deepseek-ai/dsh-tool-workflow'
 
     - id: tool-ralph
       name: '@deepseek-ai/dsh-tool-ralph'

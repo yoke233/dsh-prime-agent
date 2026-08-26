@@ -96,7 +96,11 @@ export interface ReplBindings {
 }
 
 /** Build one cell's leased host capabilities from the calling Agent's catalog. */
-export function createReplBindings(ctx: Context, exec: ToolRunContext): ReplBindings {
+export function createReplBindings(
+  ctx: Context,
+  exec: ToolRunContext,
+  extraBindings: readonly CodeBindingNamespace[] = [],
+): ReplBindings {
   const agent = exec.agent
   if (agent === undefined) throw new Error('repl requires an owning agent session')
   const queue = new ReplDispatchQueue()
@@ -185,5 +189,6 @@ export function createReplBindings(ctx: Context, exec: ToolRunContext): ReplBind
   const jobs = namespace('jobs', { list: 'job_list', output: 'job_output', kill: 'job_kill' })
   if (agents !== undefined) bindings.push(agents)
   if (jobs !== undefined) bindings.push(jobs)
+  bindings.push(...extraBindings)
   return { bindings, async finish() { queue.close(); await queue.drain(); await commitTail } }
 }

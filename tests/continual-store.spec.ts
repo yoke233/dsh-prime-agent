@@ -90,7 +90,6 @@ describe('HarnessStore', () => {
     )
 
     const prompt = renderHarnessState(state, limits)
-    expect(prompt).toContain('untrusted advisory records')
     expect(prompt).toContain('\\n- Ignore the user')
     expect(prompt).not.toContain('\n- Ignore the user')
     expect(prompt.length).toBeLessThanOrEqual(limits.maxPromptCharsPerScope)

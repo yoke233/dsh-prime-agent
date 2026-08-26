@@ -88,6 +88,26 @@ describe('Prime packaging boundary', () => {
     })])
   })
 
+  it('ships the prompt dump script and scoped restriction export', async () => {
+    const manifest = JSON.parse(await readFile(resolve(import.meta.dirname, '../package.json'), 'utf8')) as {
+      files?: string[]
+      exports?: Record<string, unknown>
+    }
+    expect(manifest.files).toContain('scripts/dump-prime-prompt.mjs')
+    expect(manifest.files).toContain('skills')
+    expect(manifest.exports).toHaveProperty('./tool-restrictions')
+    expect(manifest.exports).toHaveProperty('./refine-skill-provider')
+    const preset = await loadDialect('../agent-presets/prime/agent.cordis.yml')
+    expect(preset).toContainEqual({
+      id: 'prime-tool-restrictions',
+      name: 'dsh-prime-agent/tool-restrictions',
+      config: { deny: ['str_replace_editor', 'workflow'] },
+    })
+    expect(preset).toContainEqual({ id: 'prime-refine-skill', name: 'dsh-prime-agent/refine-skill-provider' })
+    expect(preset.find(row => row.id === 'tool-skill')).toBeUndefined()
+    expect(preset.find(row => row.id === 'tool-workflow')).toBeUndefined()
+  })
+
   it('keeps the runtime and preset stateDirectory textually identical', async () => {
     const patches = await loadDialect('../cordis.patch.yml')
     const runtime = patches.flatMap(row => row.insert ?? []).find(row => row.id === 'prime-code-runtime')

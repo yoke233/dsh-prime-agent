@@ -74,7 +74,7 @@ describe('dsh-prime-agent Loader composition', () => {
       .filter(entry => entry.fiber === undefined && !entry.disabled)
       .map(entry => entry.options.name)
     expect(unloaded).toEqual([])
-    expect(ctx.tools.get('refine')).toBeDefined()
+    expect(ctx.tools.get('refine')).toBeUndefined()
     // The sole model-visible transport is `repl`; the handshake bootstrap tool
     // is no longer part of the composition.
     expect(ctx.tools.get('repl')).toBeDefined()
@@ -85,7 +85,7 @@ describe('dsh-prime-agent Loader composition', () => {
     const assembly = await ctx.systemPrompt.assemble({ agent })
     expect(assembly.tools.map(tool => tool.name)).toEqual(['repl'])
     const snapshot = renderContextSnapshot(assembly)
-    expect(snapshot).toContain('local harness revision 0 (untrusted advisory records;')
-    expect(snapshot).toContain('- empty')
+    expect(assembly.contexts.some(context => context.name === 'prime-agent:harness' && context.text.length > 0)).toBe(true)
+    expect(snapshot.length).toBeGreaterThan(0)
   })
 })

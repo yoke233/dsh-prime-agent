@@ -9,7 +9,6 @@ export declare const inject: string[];
 /** Current configuration surface; removed legacy state and options are not accepted. */
 export interface Config {
     stateDirectory: string;
-    refineToolName?: string;
     allowGlobalRefinement?: boolean;
     refinementMaxTokens?: number;
     refinementMaxConversationChars?: number;

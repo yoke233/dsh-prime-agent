@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CallId } from '@deepseek-ai/dsh-llm'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import * as primeAgent from '../src/index.js'
+import * as RefineSkillProvider from '../src/refine-skill-provider.js'
 import * as primeRuntime from '../src/runtime.js'
 
 const signal = new AbortController().signal
@@ -30,6 +32,34 @@ function registerOrchestrationFixtures(ctx: Context): void {
   }
 }
 
+function registerPromptGuidanceFixtures(ctx: Context): void {
+  for (const fixture of [
+    { name: 'grep', parameters: { pattern: { type: 'string' as const, required: true } } },
+    {
+      name: 'edit',
+      parameters: {
+        file_path: { type: 'string' as const, required: true },
+        old_string: { type: 'string' as const, required: true },
+        new_string: { type: 'string' as const, required: true },
+      },
+    },
+    {
+      name: 'write',
+      parameters: {
+        file_path: { type: 'string' as const, required: true },
+        content: { type: 'string' as const, required: true },
+      },
+    },
+  ]) {
+    ctx.tools.register(defineTool({
+      ...fixture,
+      description: `${fixture.name} fixture`,
+      output: { schema: { type: 'json' }, render: () => [] },
+      execute: () => Promise.resolve(null),
+    }))
+  }
+}
+
 let root: string | undefined
 let context: Context | undefined
 let callNumber = 0
@@ -47,8 +77,13 @@ async function bootPrime(config: Record<string, unknown> = {}): Promise<{ agent:
   context = new Context()
   await context.plugin(SystemPrompt, {})
   await context.plugin(ToolRuntime)
+  await context.plugin(SkillRegistry)
+  await context.plugin(RefineSkillProvider)
   await context.plugin(primeRuntime, { stateDirectory: join(root, 'state') })
+  context.systemPrompt.section({ name: 'tool:hidden-fixture', order: 109, text: 'hidden fixture guidance' })
+  context.systemPrompt.section({ name: 'fixture:retained', order: 109, text: 'retained fixture guidance' })
   registerOrchestrationFixtures(context)
+  registerPromptGuidanceFixtures(context)
   await context.plugin(primeAgent, { stateDirectory: join(root, 'state'), ...config })
   return {
     agent: { id: 'repl-agent', session: { append: () => {}, header: { cwd: root } } } as unknown as Agent,
@@ -70,19 +105,43 @@ describe('Prime REPL composition', () => {
     expect(sdk).toContain('function drop(id: number): boolean')
     expect(sdk).toContain('function clear(): void')
     expect(sdk).toContain('declare const agents')
-    expect(sdk).toContain("type ToolArguments<K extends ToolName> = K extends 'grep'")
-    expect(sdk).toContain('pattern: string | RegExp')
-    expect(sdk).toContain('[K in ToolName]: (args: ToolArguments<K>) => Promise<ToolOutputMap[K]>')
-    expect(sdk).toContain('spawn: (args: ToolArguments<"subagent">) => Promise<ToolOutputMap["subagent"]>')
+    expect(sdk).not.toContain('type ToolArguments')
+    expect(sdk).toContain('[K in ToolName]: (args: ToolArgsMap[K]) => Promise<ToolOutputMap[K]>')
+    expect(sdk).toContain('spawn: (args: ToolArgsMap["subagent"]) => Promise<ToolOutputMap["subagent"]>')
     expect(sdk).toContain('declare const jobs')
-    expect(sdk).toContain('output: (args: ToolArguments<"job_output">) => Promise<ToolOutputMap["job_output"]>')
+    expect(sdk).toContain('output: (args: ToolArgsMap["job_output"]) => Promise<ToolOutputMap["job_output"]>')
     expect(sdk).not.toContain('ToolResult')
     expect(sdk).toContain('apply_patch')
     expect(sdk).toContain('patch: string')
     const repl = initialAssembly.tools[0]
     expect(repl?.parameters.properties).toHaveProperty('code')
     expect(initialAssembly.sections.some(section => section.name === 'prime-agent:rlm-policy')).toBe(true)
+    expect(initialAssembly.sections.some(section => section.name.startsWith('tool:'))).toBe(false)
+    expect(initialAssembly.sections.some(section => section.name === 'harness:identity')).toBe(false)
+    expect(initialAssembly.sections.some(section => section.name === 'fixture:retained')).toBe(true)
   })
+
+  it('moves Prime-specific usage guidance next to tool declarations without mutating the catalog', async () => {
+    const { agent } = await bootPrime()
+
+    const assembly = await context!.systemPrompt.assemble({ agent })
+    const sdk = assembly.sections.find(section => section.name === 'tools:sdk')?.text
+    expect(sdk).toBeDefined()
+    if (sdk === undefined) throw new Error('tools SDK was not assembled')
+
+    for (const name of ['edit', 'grep', 'write']) {
+      const declaration = `  ${name}: {`
+      const declarationStart = sdk.indexOf(declaration)
+      expect(declarationStart).toBeGreaterThan(0)
+      const documentationStart = sdk.lastIndexOf('  /**', declarationStart)
+      expect(documentationStart).toBeGreaterThan(0)
+      expect(sdk.slice(documentationStart, declarationStart).length)
+        .toBeGreaterThan(`  /** ${name} fixture */\n`.length)
+      expect(context!.tools.schemas(agent).find(schema => schema.name === name)?.description)
+        .toBe(`${name} fixture`)
+    }
+  })
+
 
   it('fails closed on any model-direct call that is not repl', async () => {
     const { agent } = await bootPrime()
@@ -197,12 +256,15 @@ describe('Prime REPL composition', () => {
     expect(hookCalls).toBe(0)
   })
 
-  it('uses the resolved custom refine tool name in the SDK', async () => {
-    const { agent } = await bootPrime({ refineToolName: 'refine_rules' })
+  it('keeps refine out of the tool SDK and exposes it through the packaged Skill', async () => {
+    const { agent } = await bootPrime()
 
     const assembly = await context!.systemPrompt.assemble({ agent })
     const sdk = assembly.sections.find(section => section.name === 'tools:sdk')?.text
-    expect(sdk).toContain('refine_rules:')
-    expect(sdk).not.toContain('prime_refine:')
+    expect(sdk).not.toContain('refine:')
+    expect(sdk).not.toContain('expected_revision')
+    const skill = await context!.skills.get('refine', { scope: agent })
+    expect(skill?.invocation).toEqual({ modelInvocable: true, userInvocable: false })
+    expect(skill?.content).toContain('await refine.run()')
   })
 })
