@@ -1,15 +1,15 @@
 export declare const PATCH_ERROR_CODES: {
-    readonly invalidPatch: "INVALID_PATCH";
-    readonly invalidHunk: "INVALID_HUNK";
-    readonly invalidPath: "INVALID_PATH";
-    readonly unsupportedOperation: "UNSUPPORTED_OPERATION";
-    readonly snapshotMissing: "SNAPSHOT_MISSING";
-    readonly fileNotFound: "FILE_NOT_FOUND";
-    readonly contextNotFound: "CONTEXT_NOT_FOUND";
-    readonly capabilityUnavailable: "CAPABILITY_UNAVAILABLE";
-    readonly snapshotReadFailed: "SNAPSHOT_READ_FAILED";
-    readonly mutationFailed: "MUTATION_FAILED";
-    readonly partialApply: "PARTIAL_APPLY";
+    readonly invalidPatch: 'INVALID_PATCH';
+    readonly invalidHunk: 'INVALID_HUNK';
+    readonly invalidPath: 'INVALID_PATH';
+    readonly unsupportedOperation: 'UNSUPPORTED_OPERATION';
+    readonly snapshotMissing: 'SNAPSHOT_MISSING';
+    readonly fileNotFound: 'FILE_NOT_FOUND';
+    readonly contextNotFound: 'CONTEXT_NOT_FOUND';
+    readonly capabilityUnavailable: 'CAPABILITY_UNAVAILABLE';
+    readonly snapshotReadFailed: 'SNAPSHOT_READ_FAILED';
+    readonly mutationFailed: 'MUTATION_FAILED';
+    readonly partialApply: 'PARTIAL_APPLY';
 };
 export type PatchErrorCode = typeof PATCH_ERROR_CODES[keyof typeof PATCH_ERROR_CODES];
 export interface PatchErrorDetails {
