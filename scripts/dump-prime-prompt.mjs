@@ -10,6 +10,10 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 
 const PROJECT_ROOT = resolve(import.meta.dirname, '..')
 const BASE_PATCH = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-base/cordis.patch.yml'))
+const MONITOR_PATCH = join(
+  dirname(fileURLToPath(import.meta.resolve('dsh-tool-monitor/package.json'))),
+  'cordis.patch.yml',
+)
 const PRIME_PATCH = join(PROJECT_ROOT, 'cordis.patch.yml')
 const PRIME_PRESET = join(PROJECT_ROOT, 'agent-presets/prime')
 const PRIME_AGENT_URL = pathToFileURL(join(PROJECT_ROOT, 'lib/index.js')).href
@@ -177,6 +181,7 @@ async function main() {
       'dsh-prime-agent/runtime',
       PRIME_RUNTIME_URL,
     )
+    const monitorPatches = loadOverlayPatches('prime-prompt-dump', MONITOR_PATCH)
     const presetPatch = [{
       insert: [{
         id: 'agent-presets',
@@ -192,7 +197,7 @@ async function main() {
     ctx = await boot(
       'prime-prompt-dump',
       configPath,
-      [...basePatches, ...primePatches, ...presetPatch],
+      [...basePatches, ...monitorPatches, ...primePatches, ...presetPatch],
       undefined,
       import.meta.url,
     )

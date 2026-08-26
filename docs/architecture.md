@@ -19,6 +19,7 @@
 | Realm ownership lease | 一个 Realm 的跨进程 live-heap 所有权；不同 Realm 不互斥。 |
 | continuable child | 由 DSH 持久化、可接收后续消息并可冷恢复的子 Agent。其 id 不是 Job id。 |
 | Job | DSH 的通用后台任务。它有 `job_output`/`job_list`/`job_kill`；continuable child 不通过 Job 收集结果。 |
+| Terminal session | DSH 持有的 owner-isolated 持久 PTY；POSIX Prime 使用 Bash，Windows Prime 使用 PowerShell。后台 `terminal_send` 另产生可监控的 `pty-send-*` Job。 |
 | handoff file | 父子 Agent 在共享工作区传递大材料或结果的普通文件。只写一次是 policy 约定，不是文件系统授权。 |
 | harness entry | `refine` 注入 prompt 的一条有界、非可信建议记录。 |
 | refinement transaction | 对 harness entries 的一次 apply 或 rollback 审计记录。 |
@@ -29,7 +30,7 @@
 
 ```text
 DSH profile
-├─ cordis.patch.yml（纯插入）
+├─ dsh-prime-agent/cordis.patch.yml（纯插入）
 │  ├─ 官方 code-runtime row（原样保留）
 │  │  └─ 非 Prime 会话 ─────────────→ 官方 one-shot Worker
 │  ├─ dsh-prime-agent/runtime（prime-code-runtime）
@@ -37,9 +38,13 @@ DSH profile
 │  │     ├─ Realm identity ← 可信 exec.agent.id（Agent scope 解析）
 │  │     └─ Realm pool ──→ persistent Worker
 │  └─ 官方 tool-subagent-report（next-step）
+├─ dsh-tool-monitor/cordis.patch.yml（同行安装的独立 bundle）
+│  ├─ MonitorableJobRegistry 替换具体 jobs-local adapter
+│  └─ job_monitor（流式 Job 的逐行 JavaScript 正则订阅）
 │
 └─ Prime Agent scope
    ├─ agent-presets/prime（独立 agent-plane 组合）
+   │  └─ owner-isolated Terminal registry + Bash/Pwsh backend + terminal tools
    └─ dsh-prime-agent
       ├─ 唯一模型可见工具 repl（参数 { code }）
       ├─ cell 内隐藏绑定 tools / agents / jobs
@@ -55,17 +60,19 @@ DSH profile
 
 ## 安装与 preset
 
-随包 `cordis.patch.yml` 只执行一个操作：把 `dsh-prime-agent/runtime` 作为新 row 纯插入。官方 `code-runtime` row 原样保留——Prime 包不替换它、不携带也不挂载 one-shot fallback，非 Prime 会话继续由宿主官方 runtime 按官方语义处理。该 host row 注册唯一命名的 `primeRealmRuntime` 服务、监控直接父进程并在启动时落位 Prime preset。
+随包 `cordis.patch.yml` 只执行一个操作：把 `dsh-prime-agent/runtime` 作为新 row 纯插入。官方 `code-runtime` row 原样保留——Prime 包不替换它、不携带也不挂载 one-shot fallback，非 Prime 会话继续由宿主官方 runtime 按官方语义处理。该 host row 注册唯一命名的 `primeRealmRuntime` 服务、监控直接父进程并在启动时落位 Prime preset。标准安装命令把 `dsh-tool-monitor` 作为第二个 profile bundle 直接加入；不能把它仅作为 Prime 的传递依赖，因为 DSH 只把 profile 的直接依赖纳入有序 bundle patch 层。
 
 Subagent report 完全复用 DSH 0.1.1-rc.2 base bundle 的官方 `tool-subagent-report`。其默认 `next-step` 调度通过 `parent.steer()` 让运行中的 parent 在最近 step 消费报告，并唤醒空闲 parent；continuation manager 同时负责唤醒记账以及 report 先于后续 settled notice 的 FIFO 顺序。本包不再替换或复制该能力。
 
 runtime 启动时把随包 Prime preset 复制到 `$DSH_HOME/.agent-presets/prime`，仅在目标目录不存在时写入。已有目录永不覆盖；要采用新快照必须由操作者删除旧目录后重启。
 
+Prime preset 在独立 `terminals` realm 中装配官方 `dsh-terminal` registry、平台选择的 `dsh-terminal-bash` adapter 和 `dsh-tool-terminal`。Terminal session 按调用 Agent 隔离；backend 继续消费 Host sandbox policy 与 subprocess implementation。`job_monitor` 不订阅整个 Terminal scrollback，而是订阅后台 `terminal_send` 注册的单个流式 `pty-send-*` Job；独立输入始终走官方 `terminal_send`。
+
 默认 preset、默认 tools mode 与其他 preset 不会改变。
 
 ## 唯一模型控制面
 
-Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt assembly 先走完整流程，再在 `next()` 之后把 tools 列表过滤到只剩 `repl`，同时删除固定 `harness:identity` 和名称以 `tool:` 开头的隐藏能力独立提示：identity 只陈述实现身份，不提供操作事实；工具提示按外层直接调用编写，会与 Prime 的唯一 `repl` 路由冲突。`refine`、Subagent、Jobs、文件系统、MCP 及其他工具不进入模型 schema，只作为 cell 内预加载的隐藏绑定出现，其生成 declaration/JSDoc 是模型使用能力的唯一工具级契约。模型直接调用 `repl` 之外的任何工具都会被 guard 拒绝（提示 “use the repl tool for this session”）；组合不满足该不变量时，assembly 明确失败。Prime preset 的 `prime-tool-restrictions.config.deny` 声明要排除的 base 全局工具，scope-local 通用插件只负责调用 `ctx.tools.restrict()`：当前排除的 `str_replace_editor` 和 `read`/`write`/`edit`/`apply_patch` 重叠，`workflow` 不作为 Prime 通用编排入口；`tool-ralph` 仍保留为显式 fresh-agent loop。
+Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt assembly 先走完整流程，再在 `next()` 之后把 tools 列表过滤到只剩 `repl`，同时删除固定 `harness:identity` 和名称以 `tool:` 开头的隐藏能力独立提示：identity 只陈述实现身份，不提供操作事实；工具提示按外层直接调用编写，会与 Prime 的唯一 `repl` 路由冲突。`refine`、Subagent、Jobs、文件系统、MCP 及其他工具不进入模型 schema，只作为 cell 内预加载的隐藏绑定出现，其生成 declaration/JSDoc 是模型使用能力的唯一工具级契约。模型直接调用 `repl` 之外的任何工具都会被 guard 拒绝，并返回包含被拒工具名及对应 `tools.<name>(args)` 恢复路径的纠错消息；组合不满足该不变量时，assembly 明确失败。Prime preset 的 `prime-tool-restrictions.config.deny` 声明要排除的 base 全局工具，scope-local 通用插件只负责调用 `ctx.tools.restrict()`：当前排除的 `str_replace_editor` 和 `read`/`write`/`edit`/`apply_patch` 重叠，`workflow` 与 `ralph` 均不作为 Prime 编排入口；spawn/fork Subagent 仍复用内部 workflow provider，但该 backend 不向 Prime 暴露 `workflow` 工具。
 
 `repl` 的参数是单个 `code` 字符串。插件把官方“一次 async 函数”说明改写成持久 REPL cell 说明：
 
@@ -73,18 +80,18 @@ Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt ass
 - cell 的末尾表达式是结果，顶层 `return` 无效。
 - 普通顶层 binding 留在同一 live namespace，供后续 cell 直接使用。
 - cell 内预加载三个绑定命名空间：`tools.*`（当前 Agent catalog 中除 `repl` 外的全部工具）、`agents.*`（`spawn`/`fork`/`list`/`send`/`interrupt` → `subagent`/`subagent_fork`/`list_agents`/`send_message`/`interrupt_agent`）、`jobs.*`（`list`/`output`/`kill` → `job_list`/`job_output`/`job_kill`）。程序始终得到 canonical value，SDK 从当前 catalog 生成真实 `ToolOutputMap`；对象结果若未经转换直接成为 completion，Worker 才用关联的官方 content 展示。SDK 同时声明 `$_`、`$out(id)`、`$out.list()/drop(id)/clear()`；这些能力不可作为外层工具直接调用。
-- 固定 Agent 文案只教授唯一 `repl` 路由、cell 内预加载命名空间、declaration/JSDoc 的权威性、不可使用 `import`/`require`、persistent TypeScript、合法参数对象字面量、解析失败不执行、已解析工具值、completion intrinsics、preview 不可解析、Windows 路径优先 `/` 与紧凑 live 工作集；不重复具体工具 schema，不拼接用户聊天、具体任务、仓库路径、历史失败或可选工具名。
+- 固定 Agent 文案只教授唯一 `repl` 路由、cell 内预加载命名空间、declaration/JSDoc 的权威性、不可使用 `import`/`require`、persistent TypeScript、合法参数对象字面量、解析失败不执行、已解析工具值、completion intrinsics、preview 不可解析、Windows 路径优先 `/` 与紧凑 live 工作集；共享 orchestration guidance 另要求不确定路径先从已知父目录 `glob`，以及 package manager、formatter、build/codegen 后重新读取可能被重写的文件；不重复具体工具 schema，不拼接用户聊天、具体任务、仓库路径、历史失败或可选工具名。
 - 必须跨 Worker 或 host 重启保存的进度写入工作区文件。
 
-开发脚本 `scripts/dump-prime-prompt.mjs` 从空 root 应用已安装的 DSH base patch、本包 host patch 和随包 Prime preset，并通过一个隔离临时 `DSH_HOME` 创建真实 Agent scope 后调用 `assembleContextFor`。它把 `renderPrompt`、`renderContextSections`/`joinContextSections` 和 assembly tool schemas 渲染为分节纯文本，不调用模型。默认结果写到当前目录的 `prompt-dumps/prime-prompt.txt` 且 stdout 只返回路径，避免诊断本身制造超大终端工具块；`--stdout` 是显式 opt-in，`prompt-dumps/` 不进入版本控制。脚本移除只服务于开发热更新且要求特殊 Node 启动 flag 的 HMR row，不改变任何 prompt/tool contribution。
+开发脚本 `scripts/dump-prime-prompt.mjs` 从空 root 应用已安装的 DSH base patch、同行 Monitor patch、本包 host patch 和随包 Prime preset，并通过一个隔离临时 `DSH_HOME` 创建真实 Agent scope 后调用 `assembleContextFor`。它把 `renderPrompt`、`renderContextSections`/`joinContextSections` 和 assembly tool schemas 渲染为分节纯文本，不调用模型。默认结果写到当前目录的 `prompt-dumps/prime-prompt.txt` 且 stdout 只返回路径，避免诊断本身制造超大终端工具块；`--stdout` 是显式 opt-in，`prompt-dumps/` 不进入版本控制。脚本移除只服务于开发热更新且要求特殊 Node 启动 flag 的 HMR row，不改变任何 prompt/tool contribution。
 
-Prime 不增加搜索 provider。源码发现仍调用 DSH 原生 `grep`；prompt assembly 按工具名复制 schema，只在 `edit`、`grep`、`write` 的原始 description 后追加 schema 尚未表达的使用约束，不修改 catalog 中共享定义。`edit` 说明首次修改和 stale retry 前读取当前文件，`write` 说明只用于创建或完整替换并优先用 `edit` 做局部变更，`grep` 说明 ripgrep regex、TypeScript 字符串双重转义与 parse-error 修正。生成 SDK 保持 DSH canonical `grep.pattern: string`，不改写 `ToolArgsMap`。Worker 使用启动时捕获的原生 getter 把无 flags 的真实 `RegExp` 兼容投影为 `.source`，再按 lossless JSON 进入 Host binding seam；带 flags 或伪造的 exotic value 明确失败，DSH schema、授权、执行与日志路径不变。
+Prime 不增加搜索 provider。源码发现仍调用 DSH 原生 `grep`；prompt assembly 按工具名复制 schema，只在 `edit`、`grep`、`write` 的原始 description 后追加 schema 尚未表达的使用约束，不修改 catalog 中共享定义。`edit` 说明首次修改和 stale retry 前读取当前文件，`write` 说明只用于创建或完整替换并优先用 `edit` 做局部变更，`grep` 说明 ripgrep regex：简单搜索继续使用字符串；多个代码片段应在同一 cell 内并行运行独立的小型 `grep`，而不是拼成大型正则；只有确实需要正则语义时才使用无 flags 的真实 `RegExp` literal，并在 parse error 后显式简化或拆分。生成 SDK 保持 DSH canonical `grep.pattern: string`，不改写 `ToolArgsMap`。Worker 使用启动时捕获的原生 getter 把无 flags 的真实 `RegExp` 兼容投影为 `.source`，再按 lossless JSON 进入 Host binding seam；带 flags 或伪造的 exotic value 明确失败，DSH schema、授权、执行与日志路径不变。
 
 MCP 同样不进入 Realm runtime。profile 显式安装 DSH Host MCP client 后，server tools 注册到统一 `ctx.tools` catalog，repl 单元自动获得对应 `tools.*` 绑定；连接、认证、重连、工具代际、子进程与清理由 Host 插件拥有。本插件不复制上游的 Python kernel-owned MCP 或 ACP MCP program。
 
 ### 本地 `apply_patch` 组合能力
 
-`dsh-prime-agent` 在 Agent scope 注册 `apply_patch`，因此它会进入 Realm 自动生成的 `tools.*` SDK，但外层 prompt assembly 仍只暴露 `repl`。该工具不是新的文件系统 provider：parser 与 planner 在本地纯计算层对齐 Codex patch grammar 与默认 `NormalizeToLf` 文件更新算法；支持 marker 周边空白、heredoc wrapper、Environment ID、重复路径的顺序规划、EOF 和纯追加，并按 exact、忽略行尾空白、忽略首尾空白、Unicode 标点/空格归一化的顺序选择首个匹配。parser 只额外拒绝 NUL 路径；相对路径、绝对路径及包含 `..` 的路径均原样交给当前 Agent catalog 中正式的 DSH `read` / `write`，由 owning Session 的文件能力解析并授权。nested dispatch 通过 `ctx.tools.execute(...)` 转发 owning Agent、parent token、root call id 与取消信号，DSH 继续拥有 Session cwd、sandbox、approval、observation、日志和单文件原子发布。
+`dsh-prime-agent` 在 Agent scope 注册 `apply_patch`，因此它会进入 Realm 自动生成的 `tools.*` SDK，但外层 prompt assembly 仍只暴露 `repl`。该工具不是新的文件系统 provider：parser 与 planner 在本地纯计算层对齐 Codex patch grammar 与默认 `NormalizeToLf` 文件更新算法；支持 marker 周边空白、heredoc wrapper、Environment ID、重复路径的顺序规划、EOF 和纯追加，并按 exact、忽略行尾空白、忽略首尾空白、Unicode 标点/空格归一化的顺序选择首个匹配。parser 只额外拒绝 NUL 路径；相对路径、绝对路径及包含 `..` 的路径均原样交给当前 Agent catalog 中正式的 DSH `read` / `write`，由 owning Session 的文件能力解析并授权。模型可见 description 还要求 patch 内容含 backtick 或 `${...}` 时不要直接嵌入 template literal，而应改用 exact `edit`、拆分 patch 或安全构造字符串。nested dispatch 通过 `ctx.tools.execute(...)` 转发 owning Agent、parent token、root call id 与取消信号，DSH 继续拥有 Session cwd、sandbox、approval、observation、日志和单文件原子发布。
 
 当前组合层支持 `*** Add File` 与 `*** Update File`，且 Add 与 Codex 一样可覆盖已有文件；Delete/Move 在 planning 阶段明确失败。所有目标先完整读取并完成 Codex 风格 hunk 定位，之后才发生第一次 write，因此 parse、路径、读取或 planning 失败没有文件副作用。正式 `read` 的 canonical 行 DTO 不携带原始换行 metadata，executor 会把快照规范化为 LF；更新后的非空文件按 Codex 默认模式补齐末尾 LF。
 
@@ -192,7 +199,7 @@ handoff file 是写入时刻的快照；“写后不改”由 policy 约束，�
 
 `run` 将请求按 Agent 保存在内存中并立即返回；同一 turn 的后续调用覆盖待处理请求。`agent/turn-stopping` serial listener 取出请求，运行同一个无工具 refinement planner；成功、no-op 或失败结果都通过 `agent.steer()` 送回当前 Agent，使下一步使用重建后的 prompt。一次 refinement 恢复后的同 turn 重复调度被拒绝，Agent 进入 idle 后重新开放。插件卸载或 Session 消失时，WeakMap/WeakSet 不产生独立持久任务。
 
-人类侧 `/refine [--local|--global] [instructions]` 仍通过 DSH `ctx.commands.register` 注册。handler 使用 `Agent.runMaintenance` 与普通 turn 串行，按 `session.requestHeader()?.config`、再按 `agent.options` 复用 provider/model；它只向 `ctx.llm.stream()` 发送有界、图片已投影的文本会话尾部、当前 scope 摘要和可选指令，不开放工具。输出必须是 JSON proposal；截断、取消、非 stop、JSON/shape 错误或 revision 冲突全部 fail closed。空 edits 不落盘，非空 edits 走同一个 `HarnessStore.apply`。`/refine rollback <transaction-id> [--global]` 直接复用 `HarnessStore.rollback`。
+人类侧 `/refine [--local|--global] [instructions]` 仍通过 DSH `ctx.commands.register` 注册。命令注册表在 handler 开始前记录 `command/run`，settle 后以同一 `commandId` 记录 `command/done`，让 Web 与 TUI 的通用命令投影在聊天列表中先显示运行节点、再原地更新结果。handler 使用 `Agent.runMaintenance` 与普通 turn 串行，按 `session.requestHeader()?.config`、再按 `agent.options` 复用 provider/model；它只向 `ctx.llm.stream()` 发送有界、图片已投影的文本会话尾部、当前 scope 摘要和可选指令，不开放工具。输出必须是 JSON proposal；截断、取消、非 stop、JSON/shape 错误或 revision 冲突全部 fail closed。空 edits 不落盘，非空 edits 走同一个 `HarnessStore.apply`。`/refine rollback <transaction-id> [--global]` 直接复用 `HarnessStore.rollback`。
 
 Host 内部 store 继续以显式 inspect/apply/rollback、`expected_revision`、磁盘锁内 revision 复查和 conflict-safe rollback 实现。每笔事务保存 before/after，历史有界保留；skill/subagent entry 必须引用调用时真实可见的工具，不能把 `repl` transport 当作 SDK member。local state 以 Session id 的 SHA-256 摘要命名。`allowGlobalRefinement` 默认为 false，此时所有显式 global refinement 都拒绝；启用后使用单一 `global.json`。模型 Skill 与人类 command 都没有效果观察或 global 人工批准流程；turn interval/compaction auto-refine 仍未启用。
 

@@ -38,10 +38,17 @@ function response(text: string): StreamChunk[] {
 
 class QueueAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
-  constructor(private readonly outputs: string[]) { super() }
+  readonly requested: Promise<void>
+  private markRequested: () => void = () => {}
+
+  constructor(private readonly outputs: Array<string | Promise<string>>) {
+    super()
+    this.requested = new Promise(resolve => { this.markRequested = resolve })
+  }
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
-    const output = this.outputs.shift()
+    this.markRequested()
+    const output = await this.outputs.shift()
     if (output === undefined) throw new Error('missing test response')
     yield* response(output)
   }
@@ -114,6 +121,31 @@ describe('/refine command', () => {
     expect(rollback?.result).toMatchObject({ kind: 'success' })
     expect((await store.read('local', String(agent.id))).entries).toEqual([])
     expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('logs a running command node before the model review settles', async () => {
+    const proposal = JSON.stringify({ rationale: 'No stable lesson.', edits: [] })
+    let release: (value: string) => void = () => {}
+    const pendingOutput = new Promise<string>(resolve => { release = resolve })
+    const { agent, adapter } = await harness([pendingOutput])
+    const signal = new AbortController().signal
+
+    const execution = ctx!.commands.execute(agent, '/refine', [], signal)
+    await adapter.requested
+    try {
+      const running = agent.session.events.filter(event => event.type === 'command/run').at(-1)
+      expect(running).toMatchObject({ type: 'command/run', data: { name: 'refine' } })
+      expect(agent.session.events.some(event => event.type === 'command/done')).toBe(false)
+    } finally {
+      release(proposal)
+    }
+
+    const settled = await execution
+    const done = agent.session.events.filter(event => event.type === 'command/done').at(-1)
+    expect(done).toMatchObject({
+      type: 'command/done',
+      data: { commandId: settled?.commandId, kind: 'success' },
+    })
   })
 
   it('accepts a no-op proposal and rejects disabled global writes before calling the model', async () => {

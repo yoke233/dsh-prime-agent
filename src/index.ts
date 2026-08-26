@@ -97,7 +97,7 @@ Keep large source material in files and only compact working state in the REPL.`
 
 const TOOL_AGENT_GUIDANCE: Readonly<Record<string, string>> = {
   edit: 'Read the current file before editing; after a stale-file error, read it again before retrying.',
-  grep: "The pattern is a ripgrep regex, not literal text. Escape metacharacters and double regex backslashes in TypeScript strings, for example `pattern: 'stream\\\\(options\\\\)'`. Prefer small patterns; fix parse errors before retrying.",
+  grep: 'The pattern is a ripgrep regex, not literal text. Keep simple searches as strings. When searching for several code fragments, run separate grep calls in parallel instead of combining them into one large regex. Use a no-flags RegExp literal only when regex semantics are required. RegExp flags are unsupported; use grep arguments or inline regex syntax instead. After a regex parse error, simplify or split the pattern before retrying.',
   write: 'Use this for file creation or complete replacement; prefer edit for targeted changes. Read an existing file before overwriting it.',
 }
 
@@ -323,7 +323,9 @@ export function apply(ctx: Context, config: Config): void {
 
   registerApplyPatch(ctx)
   registerPolicy(ctx, { requireOrchestrationTools: config.requireOrchestrationTools ?? true })
-  ctx.tools.guard(exec => exec.parent === undefined && exec.name !== REPL_TOOL_NAME ? 'use the repl tool for this session' : undefined)
+  ctx.tools.guard(exec => exec.parent === undefined && exec.name !== REPL_TOOL_NAME
+    ? `Call repl directly. Inside its code, invoke tools.${exec.name}(args); ${exec.name} is not directly callable in this session.`
+    : undefined)
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const result = await next()
     if (context.agent === undefined) return result

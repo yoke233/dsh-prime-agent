@@ -70,7 +70,7 @@ function locations(diffs: readonly FileDiff[]): { path: string }[] {
 export function registerApplyPatch(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: APPLY_PATCH_TOOL_NAME,
-    description: 'Apply related Add/Update file changes described by *** Begin Patch text.',
+    description: 'Apply related Add/Update file changes described by *** Begin Patch text. If patch content contains backticks or ${...}, do not embed it directly in a template literal; prefer edit for one exact replacement, split the patch, or construct the string safely.',
     parameters: {
       patch: {
         type: 'string',

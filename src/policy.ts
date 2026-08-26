@@ -34,7 +34,8 @@ function orchestrationPolicy(ctx: Context, agent: Agent | undefined, requireTool
   return `Orchestration guidance:
 - Use the preloaded tools, agents, and jobs shown below. Keep a simple action simple; introduce loops, helpers, parallelism, agents, or jobs only when the task benefits.
 - Assign intermediate results you will reuse.
-- Parallelize independent read-only work. Run dependent steps in order, and serialize side-effecting mutations unless the underlying operation explicitly supports safe concurrency.
+- If a path is uncertain, glob the nearest known existing parent before read or grep; do not probe guessed layouts.
+- Parallelize independent read-only work. Run dependent steps in order, and serialize side-effecting mutations unless the underlying operation explicitly supports safe concurrency. Treat package managers, formatters, builds, and code generation as possible file rewrites; re-read affected files before editing them.
 - Use Promise.all only when every result is required. For independent best-effort probes, use Promise.allSettled or catch each ToolCallError individually; inspect failures and rethrow unexpected errors.
 - Use edit for one exact in-place replacement, apply_patch for related Add/Update changes, and write only when intentionally replacing a complete file. apply_patch writes files in order; after a failure, inspect which files changed before continuing.
 - For slow or independently completing work, start an agent or job, retain its handle, continue only independent useful work, and inspect it after a report, completion notice, or later turn. Do not sleep or busy-poll.

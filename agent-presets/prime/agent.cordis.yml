@@ -61,6 +61,38 @@
   name: '@deepseek-ai/dsh-tool-pwsh'
   disabled: !!js process.platform !== 'win32'
 
+# ── persistent terminal ─────────────────────────────────────────────────────
+
+# Terminal sessions need Agent-scoped ownership while their backend continues
+# to consume the Host sandbox policy and subprocess implementation. One private
+# registry serves the standing Prime mount and keys every session by owner; the
+# platform gate selects Bash on POSIX and PowerShell on Windows. Background
+# terminal_send operations remain ordinary Host Jobs, so job_monitor can tee
+# their output when the monitor bundle is installed alongside this package.
+- id: persistent-terminal
+  name: cordis:group
+  group: true
+  isolate:
+    terminals: true
+  config:
+    - id: terminal-registry
+      name: '@deepseek-ai/dsh-terminal'
+
+    - id: terminal-bash
+      name: '@deepseek-ai/dsh-terminal-bash'
+      disabled: !!js process.platform === 'win32'
+      config:
+        shellDialect: bash
+
+    - id: terminal-pwsh
+      name: '@deepseek-ai/dsh-terminal-bash'
+      disabled: !!js process.platform !== 'win32'
+      config:
+        shellDialect: pwsh
+
+    - id: tool-terminal
+      name: '@deepseek-ai/dsh-tool-terminal'
+
 # ── filesystem ──────────────────────────────────────────────────────────────
 
 # The base bundle exposes these globally. Keep the policy in the preset while
@@ -71,6 +103,7 @@
     deny:
       - str_replace_editor
       - workflow
+      - ralph
 
 # Both register into the host `tools` registry and provide nothing, so
 # they need no realm. The `fs` service and its policy stay in the host.
@@ -241,12 +274,6 @@
       name: '@deepseek-ai/dsh-workflow-worker-thread'
       config:
         provider: spawn
-
-    - id: tool-ralph
-      name: '@deepseek-ai/dsh-tool-ralph'
-      config:
-        subagentProvider: spawn
-        maxRounds: 64
 
 # ── remaining model-facing rows ─────────────────────────────────────────────
 

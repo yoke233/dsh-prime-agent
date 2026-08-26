@@ -155,7 +155,9 @@ describe('Prime REPL composition', () => {
         agent,
       })
       expect(denied.isError).toBe(true)
-      expect(denied.error.message).toBe('use the repl tool for this session')
+      expect(denied.error.message).toContain('Call repl directly')
+      expect(denied.error.message).toContain(`tools.${name}(args)`)
+      expect(denied.error.message).toContain(`${name} is not directly callable`)
     }
 
     // The one allowed direct call executes against the persistent realm.

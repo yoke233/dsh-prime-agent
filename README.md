@@ -30,7 +30,7 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
   <img src="./assets/readme/architecture.svg" width="100%" alt="repl {code} 经 Agent scope 用可信 exec.agent.id 解析 Realm identity,host primeRealmRuntime 服务准入持久 Realm Worker;官方 code-runtime row 未改动,非 Prime 会话继续官方 one-shot">
 </p>
 
-- 模型 catalog 只含 `repl`。其他 DSH 工具不直接可见：prompt assembly 把 tools 列表过滤到只剩 `repl`，并移除固定 Harness identity 与隐藏能力各自的 `tool:*` 独立提示；前者不提供操作事实，后者按外层直接工具编写，会与 Prime 路由冲突。生成 SDK 的 declaration/JSDoc 是 cell 内能力的唯一使用契约。直接调用其他工具会被 guard 拒绝，这些能力作为 cell 内预加载绑定出现；Prime preset 通过 `prime-tool-restrictions.config.deny` 明确排除重复的 `str_replace_editor` 和通用 `workflow`，通用 scoped 插件仅应用该配置；保留 `read`/`write`/`edit`/`apply_patch`、Ralph 及其他所需能力。`tools.*` 调用向 Realm 程序返回 canonical value；若对象结果未经转换直接成为 cell completion，则使用 DSH 官方 `result.content` 展示，避免把 `edit.before/after` 等大 DTO 展开进上下文。`agents.*`（spawn/fork/list/send/interrupt）与 `jobs.*`（list/output/kill）是 continuable child 与后台任务的薄适配。Agent 固定提示与具体对话、任务、仓库和历史错误无关。
+- 模型 catalog 只含 `repl`。其他 DSH 工具不直接可见：prompt assembly 把 tools 列表过滤到只剩 `repl`，并移除固定 Harness identity 与隐藏能力各自的 `tool:*` 独立提示；前者不提供操作事实，后者按外层直接工具编写，会与 Prime 路由冲突。生成 SDK 的 declaration/JSDoc 是 cell 内能力的唯一使用契约。直接调用其他工具会被 guard 拒绝，这些能力作为 cell 内预加载绑定出现；Prime preset 通过 `prime-tool-restrictions.config.deny` 明确排除重复的 `str_replace_editor`、通用 `workflow` 和 `ralph`，通用 scoped 插件仅应用该配置；保留 `read`/`write`/`edit`/`apply_patch` 及其他所需能力。`tools.*` 调用向 Realm 程序返回 canonical value；若对象结果未经转换直接成为 cell completion，则使用 DSH 官方 `result.content` 展示，避免把 `edit.before/after` 等大 DTO 展开进上下文。`agents.*`（spawn/fork/list/send/interrupt）与 `jobs.*`（list/output/kill）是 continuable child 与后台任务的薄适配。Agent 固定提示与具体对话、任务、仓库和历史错误无关。
 - 路由信任 Agent 执行上下文。`repl` 要求拥有 Agent 会话:插件用可信 `exec.agent.id` 从共享 `realm-identity` 存储解析该会话稳定的不透明 Realm id,再把程序、本轮租约绑定与取消信号交给 host 侧的 `ctx.primeRealmRuntime.run(...)`。没有握手、没有模型可见的身份工具;缺少可信执行上下文或无法解析 Realm id 时明确失败,绝不降级。
 - Host 服务与官方运行时并存。`cordis.patch.yml` 只是把 `dsh-prime-agent/runtime` 作为新 row 插入,官方 `code-runtime` row 原样保留;非 Prime 会话继续使用官方 one-shot 语义,不存在 fallback。
 - Realm 内的绑定经跨 run 稳定的 Proxy 与 per-run binding lease 调用:schema、审批、沙箱、日志、并发和取消仍由 DSH 执行,run 结束立即撤销授权。
@@ -38,6 +38,7 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
 - Prime 不封装搜索 provider：`tools.grep` 仍调用 DSH 正式 `grep`。提示词组装按工具名复制 schema，在 `edit`、`grep`、`write` 的原始 description 后只追加各自缺失的关键约束；`grep` 说明 `pattern` 是 ripgrep regex、TypeScript 字符串需要双重转义，并要求 parse error 后修正再重试。生成 SDK 保持 DSH canonical `pattern: string`，不扩展公开类型，也不修改 catalog 中共享定义。Realm 在 Host binding seam 前仍兼容把无 flags 的真实 `RegExp` 投影为 `.source`，Host 只接收 lossless JSON；带 flags 的 `RegExp` 明确拒绝。
 - Prime 额外注册本地组合能力 `tools.apply_patch({ patch })`：对齐 OpenAI Codex `apply_patch` 的 marker/heredoc parser、顺序 hunk、EOF/纯追加和 exact → rstrip → trim → Unicode 归一化匹配语义，并一次预检同文件多 hunk 或多文件 Add/Update；Add 与 Codex 一样允许覆盖已有目标。相对或绝对目标路径原样交给 Agent catalog 中正式的 DSH `read`/`write` nested calls，路径解析与授权、sandbox、approval、observation、日志、取消和单文件原子发布仍由 DSH 拥有。每个 REPL nested call 按官方 `tool/code-dispatch-start` / `tool/code-dispatch` 协议记录，因此官方 Web 与兼容 TUI 都能递归显示；`apply_patch` 投影标准 `card: 'diff'`，失败结果走 generic error fallback。`edit` 继续用于一次精确的原位替换；`apply_patch` 负责相关的多 hunk/多文件变更，两者不互相替代。
 - Profile 显式安装的 DSH Host MCP client 把 server tools 注册进统一 catalog，repl 单元自动获得对应 `tools.*` 绑定；Prime 不复制 Python kernel-owned MCP runtime。
+- Prime preset 挂载 DSH 官方持久 Terminal：POSIX 使用 Bash，Windows 使用 PowerShell；`terminal_open`/`terminal_send`/`terminal_read`/`terminal_signal`/`terminal_close`/`terminal_list` 通过 `tools.*` 调用。同行安装的 `dsh-tool-monitor` 可对后台 `terminal_send` 产生的 `pty-send-*` Job 做逐行 JavaScript 正则订阅。
 - `tools.*` 返回值始终遵循 canonical `ToolOutputMap`，可直接访问 `read.lines`、`edit.before/after` 等字段；对象结果直接成为 completion 时只改变模型展示为官方 content，不改变程序拿到的值。不要对返回值盲目再次 `JSON.parse`。notebook 结构化 preview 中的 `\\` 只是 JSON notation；模型自行编写 Windows 路径时优先使用 `D:/work/project` 形式，避免额外转义层。工具参数使用 TypeScript 对象字面量；完整 cell 会在执行前解析，语法失败不会执行其中任何代码或 tool call，修正后应重试。
 - Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值；`repl` 的外层 canonical value 仍是可程序化读取的 lossless JSON（`logs`、可选 `result` 与可信 presentation metadata），但模型只看到无类型外壳的 notebook 文本：logs 和字符串原样显示，结构化值只 pretty-print 一次，空结果返回空文本；renderer 不添加 `[repl result: ...]`、`[repl logs]` 或 Markdown fence。普通程序异常只保留可行动的异常消息，不把 Worker/V8 内部调用栈带进模型或界面。外层 notebook 文本超过展示预算时由 DSH 写入 artifact 并返回 locator；保存失败时保留完整 inline 成功结果并告警，不伪造 locator。
 - 完成值由 runtime 自动保留在 generation-local 的 completion history 中：`$_` 是最近已保留结果的首选入口，`$out(N)` 只用于较早结果；runtime-authored preview 由 nonce 验证后的 metadata 驱动，已保留 preview 明确教授这两个入口，未保留 preview 不显示 handle，opaque 值不做结构化渲染。用户主动返回旧 envelope 同形 JSON 时仍按普通 JSON 显示。
@@ -59,10 +60,10 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
 ```sh
 npm install
 npm run check:all
-dsh plugin --profile web add ./dsh-prime-agent
+dsh plugin --profile web add ./dsh-prime-agent https://github.com/yoke233/dsh-tool-monitor/archive/9b6aac3701560309ac4e3befcf646a1eca920e77.tar.gz
 ```
 
-`dsh plugin add` 即提供全部内容:随包 bundle patch 在官方 `code-runtime` row 旁纯插入 `dsh-prime-agent/runtime` host row(不替换、不停用官方运行时);随包 Prime preset 在启动时落位到 `$DSH_HOME/.agent-presets`(仅缺失时)。启用 Prime 模式只是为某个会话选中 Prime preset;默认 preset 与其他 preset 保持官方 one-shot 语义。落位后的 preset 不会被覆盖,删除 `$DSH_HOME/.agent-presets/prime` 并重启即可重新落位当前快照。
+安装命令同时加入两个独立 bundle：`dsh-prime-agent` 的 patch 仍只在官方 `code-runtime` row 旁纯插入 `dsh-prime-agent/runtime` host row；`dsh-tool-monitor` 的 patch 以兼容 Registry 替换 Host 的具体 `jobs-local` 实现并注册 `job_monitor`。Prime preset 在启动时落位到 `$DSH_HOME/.agent-presets`（仅缺失时），并挂载官方持久 Terminal。启用 Prime 模式只是为某个会话选中 Prime preset；默认 preset 与其他 preset 保持官方 one-shot 语义。落位后的 preset 不会被覆盖，删除 `$DSH_HOME/.agent-presets/prime` 并重启即可重新落位当前快照。
 
 Host runtime 会监控启动它的直接父进程。Windows 父 shell 被强制终止或 macOS/POSIX 子进程被重新托管时,插件会释放整个 Cordis tree、Realm Worker 与该进程持有的 Realm leases,随后退出;根级 dispose 未在 5 秒内结算时强制非零退出。它面向前台 `dsh` 生命周期,不支持把宿主有意脱离父进程作为 daemon 运行。
 
@@ -75,10 +76,10 @@ npm pack
 $primePackage = Get-ChildItem -Filter 'dsh-prime-agent-*.tgz' |
   Sort-Object LastWriteTime -Descending |
   Select-Object -First 1 -ExpandProperty FullName
-dsh plugin --profile tui add $primePackage
+dsh plugin --profile tui add $primePackage https://github.com/yoke233/dsh-tool-monitor/archive/9b6aac3701560309ac4e3befcf646a1eca920e77.tar.gz
 ```
 
-使用 `dsh --profile tui --dump-config` 核验组合结果中存在 `agent-presets`、`prime-code-runtime`、官方 `tool-subagent-report` 和 `tui`，然后运行 `dsh --profile tui`。
+使用 `dsh --profile tui --dump-config` 核验组合结果中存在 `agent-presets`、`prime-code-runtime`、`monitor-jobs`、`tool-monitor`、官方 `tool-subagent-report` 和 `tui`，然后运行 `dsh --profile tui`。
 
 ### Headless 运行
 
@@ -209,7 +210,7 @@ try {
 
 Prime preset 的 `subagent` 与 `subagent_fork` 默认创建 continuable child：调用在 child inbox 接受任务后返回持久 child id，父 Agent 随即继续。后续使用 `list_agents` 观察、`send_message` 投递新 turn、`interrupt_agent` 中断当前 turn；child 通过 `report` 主动回传选定结论。continuable child 不产生 Job result，详细过程保存在 child Session。
 
-Jobs 是独立的后台任务生命周期。后台 shell 或 one-shot background provider 返回 Job id，使用 `job_output`、`job_list`、`job_kill` 管理，不能与 continuable child id 混用。大材料和大结果通过共享工作区文件交接，prompt/report 只携带任务、摘要与路径。
+Jobs 是独立的后台任务生命周期。后台 shell、后台 `terminal_send` 或 one-shot background provider 返回 Job id，使用 `job_output`、`job_list`、`job_kill` 管理，不能与 continuable child id 混用。`job_monitor` 接受现有流式 Job id 和 JavaScript 正则；监控 Terminal 时传入后台 `terminal_send` 返回的 `pty-send-*`，它订阅该次发送操作的输出，而不是整个 Terminal session。独立输入继续调用官方 `terminal_send(sessionId, text)`。大材料和大结果通过共享工作区文件交接，prompt/report 只携带任务、摘要与路径。
 
 ## Prompt dump 脚本
 
@@ -230,7 +231,7 @@ npm run prompt:dump -- --stdout  # 明确需要直接打印时使用
 
 Prime 注册一个随包 `refine` Skill provider。Host 的正式 `dsh-tool-skill` 在首个模型请求前注入合并后的可用 Skill 目录；Prime preset 只增加 scoped filesystem provider，不再用同名 scoped tool shadow Host 的 catalog/loader。模型先通过 `tools.skill({ name: 'refine' })` 加载完整说明，再使用 Realm 预加载、按 cell lease 的 `refine.status()` / `refine.run(instructions?, options?)` 客户端。它不是 DSH tool，不出现在 `tools.*` 或生成 SDK 中，也不产生伪造的 tool dispatch 记录。`run` 只安排一次 turn-stopping refinement，并立即返回；同一 turn 再次调用只更新待处理的 scope/instructions。到停止边界时 Host 使用有界会话尾部与当前 harness 生成 proposal，经校验后提交，随后通过 `agent.steer(...)` 把结果交回 Agent，并用更新后的 prompt 继续。底层 `inspect/apply/rollback`、revision 和事务存储同样不进入模型 SDK。
 
-人类仍可直接使用 `/refine [--local|--global] [instructions]`；该命令在 Agent idle maintenance 阶段运行同一个 planner/store。`/refine rollback <transaction-id> [--global]` 保留冲突安全 rollback。自动 interval/compaction refine 与效果观察仍未启用，因此模型主动 Skill、人类 command、Host auto-refine 是三个独立入口。
+人类仍可直接使用 `/refine [--local|--global] [instructions]`；该命令在 Agent idle maintenance 阶段运行同一个 planner/store。命令开始时写入标准 `command/run`，结束时以同一 `commandId` 写入 `command/done`；Web 与 TUI 可据此在聊天列表插入一条运行中的命令行，并在完成后原地更新。`/refine rollback <transaction-id> [--global]` 保留冲突安全 rollback。自动 interval/compaction refine 与效果观察仍未启用，因此模型主动 Skill、人类 command、Host auto-refine 是三个独立入口。
 
 条目类型包括 `prompt`、`memory`、`skill` 与 `subagent`。skill/subagent 只能引用真实可见的工具；它们记录路由，不会创建能力或扩大权限。
 
