@@ -32,7 +32,6 @@ import type {
 const CapturedAbortController = AbortController
 const CapturedAbortSignal = AbortSignal
 const CapturedError = Error
-class BindingArgumentProjectionError extends CapturedError {}
 const CapturedMap = Map
 const CapturedSet = Set
 const CapturedWeakMap = WeakMap
@@ -59,8 +58,6 @@ const capturedObjectGetPrototypeOf = Object.getPrototypeOf
 const capturedObjectHasOwn = Object.hasOwn
 const capturedObjectIs = Object.is
 const capturedObjectPrototype = Object.prototype
-const capturedRegExpSource = Object.getOwnPropertyDescriptor(RegExp.prototype, 'source')?.get
-const capturedRegExpFlags = Object.getOwnPropertyDescriptor(RegExp.prototype, 'flags')?.get
 const capturedPropertyIsEnumerable = Object.prototype.propertyIsEnumerable
 const capturedReflectApply = Reflect.apply
 const capturedReflectDeleteProperty = Reflect.deleteProperty
@@ -596,12 +593,9 @@ function callBinding(handle: NamespaceHandle, name: string, args: unknown): Prom
   const run = active as ActiveRun
   let json: string
   try {
-    json = capturedJsonStringify(snapshotJson(args, handle.global === 'tools' && name === 'grep'))
-  } catch (error) {
-    const message = error instanceof BindingArgumentProjectionError
-      ? error.message
-      : 'binding arguments must be lossless JSON'
-    return Promise.reject(bindingFailure(handle, name, message))
+    json = capturedJsonStringify(snapshotJson(args))
+  } catch {
+    return Promise.reject(bindingFailure(handle, name, 'binding arguments must be lossless JSON'))
   }
   return new Promise<unknown>((resolve, reject) => {
     const id = run.nextCallId++
@@ -858,20 +852,17 @@ function projectKeyEntry(key: string): Record<string, unknown> {
 }
 
 /**
- * Validate and detach one boundary value as lossless JSON. For `tools.grep`,
- * a root `pattern` RegExp is projected to its source before validation.
- * Everything else that JSON would drop, coerce, or fail to round-trip throws:
- * non-finite numbers, negative zero, functions, symbols, bigints, exotic
- * prototypes, sparse or extra-propertied arrays, symbol/non-enumerable
- * properties, and cycles.
+ * Validate and detach one boundary value as lossless JSON. Values that JSON
+ * would drop, coerce, or fail to round-trip throw: non-finite numbers, negative
+ * zero, functions, symbols, bigints, exotic prototypes, sparse or
+ * extra-propertied arrays, symbol/non-enumerable properties, and cycles.
  */
-function snapshotJson(value: unknown, projectRootRegExpPattern = false): unknown {
+function snapshotJson(value: unknown): unknown {
   return snapshotValue(
     value,
     new CapturedSet<object>(),
     newCaptureStats(UNLIMITED, UNLIMITED, UNLIMITED),
     undefined,
-    projectRootRegExpPattern,
   )
 }
 
@@ -894,7 +885,6 @@ function snapshotValue(
   seen: Set<object>,
   stats: CaptureStats,
   slot: ProjectionSlot | undefined,
-  projectRootRegExpPattern = false,
 ): unknown {
   if (stats.aborted) return undefined
   stats.nodes += 1
@@ -1014,22 +1004,7 @@ function snapshotValue(
         capturedReflectApply(capturedArrayPush, entries, [entry])
       }
       const childValue = (source as Record<string, unknown>)[key]
-      let projectedValue = childValue
-      if (root && projectRootRegExpPattern && key === 'pattern'
-        && typeof childValue === 'object' && childValue !== null
-        && capturedRegExpSource !== undefined && capturedRegExpFlags !== undefined) {
-        try {
-          projectedValue = capturedReflectApply(capturedRegExpSource, childValue, []) as string
-          const flags = capturedReflectApply(capturedRegExpFlags, childValue, []) as string
-          if (flags !== '') {
-            throw new BindingArgumentProjectionError('grep RegExp pattern must not use flags; use grep arguments or inline regex syntax')
-          }
-        } catch (error) {
-          if (error instanceof BindingArgumentProjectionError) throw error
-          projectedValue = childValue
-        }
-      }
-      target[key] = snapshotValue(projectedValue, seen, stats, child)
+      target[key] = snapshotValue(childValue, seen, stats, child)
       if (child && entry && child.node !== undefined) entry.value = child.node
       if (stats.aborted) {
         visited = index + 1

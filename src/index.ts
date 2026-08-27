@@ -97,7 +97,7 @@ Keep large source material in files and only compact working state in the REPL.`
 
 const TOOL_AGENT_GUIDANCE: Readonly<Record<string, string>> = {
   edit: 'Read the current file before editing; after a stale-file error, read it again before retrying.',
-  grep: 'The pattern is a ripgrep regex, not literal text. Keep simple searches as strings. When searching for several code fragments, run separate grep calls in parallel instead of combining them into one large regex. Use a no-flags RegExp literal only when regex semantics are required. RegExp flags are unsupported; use grep arguments or inline regex syntax instead. After a regex parse error, simplify or split the pattern before retrying.',
+  grep: 'Use strings for plain text. For regex syntax, pass a no-flags literal `.source`, for example `pattern: /stream\\(options\\)/.source`. Run unrelated searches as separate parallel calls; simplify a rejected pattern before retrying.',
   write: 'Use this for file creation or complete replacement; prefer edit for targeted changes. Read an existing file before overwriting it.',
 }
 

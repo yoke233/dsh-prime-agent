@@ -140,6 +140,9 @@ describe('Prime REPL composition', () => {
       expect(context!.tools.schemas(agent).find(schema => schema.name === name)?.description)
         .toBe(`${name} fixture`)
     }
+
+    const grep = context!.tools.schemas(agent).find(schema => schema.name === 'grep')
+    expect(grep?.parameters.properties.pattern).toMatchObject({ type: 'string' })
   })
 
 

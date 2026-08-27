@@ -195,29 +195,16 @@ describe('Prime realm through the sole repl transport', () => {
     const mixedPresentation = await runRepl(alpha.agent, `await tools.mixed_content_probe({})`)
     expect(mixedPresentation.result).toBe('Image metadata: 1x1')
 
-    const regexpPattern = await runRepl(
+    const regexpSourcePattern = await runRepl(
       alpha.agent,
-      String.raw`await tools.grep({ pattern: /output\.render|\.render\(/, path: '.' })`,
+      String.raw`await tools.grep({ pattern: /constructor\(/.source, path: '.' })`,
     )
-    expect(regexpPattern.result).toEqual({ pattern: String.raw`output\.render|\.render\(` })
-
-    const capturedRegExpGetter = await runRepl(alpha.agent, `
-      const originalSourceDescriptor = Object.getOwnPropertyDescriptor(RegExp.prototype, 'source')!
-      let safelyProjected
-      try {
-        Object.defineProperty(RegExp.prototype, 'source', { configurable: true, get: () => 'forged' })
-        safelyProjected = await tools.grep({ pattern: /actual/, path: '.' })
-      } finally {
-        Object.defineProperty(RegExp.prototype, 'source', originalSourceDescriptor)
-      }
-      safelyProjected
-    `)
-    expect(capturedRegExpGetter.result).toEqual({ pattern: 'actual' })
+    expect(regexpSourcePattern.result).toEqual({ pattern: String.raw`constructor\(` })
 
     await expect(runRepl(
       alpha.agent,
-      `await tools.grep({ pattern: /flagged/i, path: '.' })`,
-    )).rejects.toThrow('grep RegExp pattern must not use flags')
+      `await tools.grep({ pattern: /constructor\\(/, path: '.' })`,
+    )).rejects.toThrow('binding arguments must be lossless JSON')
 
     // No handshake bootstrap exists in the realm: the identity binding is gone,
     // `repl` itself is not re-exposed, and the bridge supplies the delegation

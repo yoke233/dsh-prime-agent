@@ -26,7 +26,7 @@ Prime REPL 分为三个独立层次。
 
 Host 与 Realm 之间只传 lossless JSON：
 
-- Host binding seam 上的 arguments 必须是 lossless JSON；Realm interface 仅为 `tools.grep.pattern` 接受无 flags 的真实 `RegExp`，并在跨 seam 前通过启动时捕获的原生 getter 投影为 `.source`；
+- Host binding seam 上的 arguments 必须是 lossless JSON；`tools.grep.pattern` 在 generated SDK 与 Realm interface 中均为 string，正则 literal 必须由调用方通过 `.source` 转成 canonical string 后再跨 seam；
 - `tools.*` 成功调用以内部 `{ value, presentation }` 传输，Worker 立即解包并只把 canonical `value` 返回给程序；
 - object/array value 与非空 text presentation 通过 Worker 私有 WeakMap 按 identity 关联；image content 仍由 deferred context 转发；
 - 工具失败在 cell 中抛对应的 typed error。
