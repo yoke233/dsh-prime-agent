@@ -36,7 +36,7 @@ DSH 的对应物是 `repl`：它是模型唯一可见工具，普通 DSH 工具�
 
 DSH 适配保留的核心行为是：continuable Subagent 在 child inbox 接受初始消息后返回持久 child id，父 Agent 随即可继续；后续通过 `send_message`、`list_agents`、`interrupt_agent` 和 child `report` 协作。child 详细过程保存在自己的 Session，不被包装成 Job result。Jobs 只承载 one-shot background provider 和其他通用后台任务。
 
-前台独立子任务仍可在 repl 程序内使用 `Promise.all`，但它表达的是“本轮需要 fan-in 的并发工作”，不是 admission-first 的长期 child 协作。
+前台并发子任务仍可在 repl 程序内 fan-in：只有任一失败会让全部成功结果都失去用途时使用 `Promise.all`；相互独立的读取、搜索和探测使用 `Promise.allSettled` 或逐项捕获失败。两者都不同于 admission-first 的长期 child 协作。
 
 ### 模型接口与权威状态必须分离
 
@@ -102,7 +102,7 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 | 持久 IPython 控制面 | 唯一 `repl` 工具 + Persistent TypeScript Realm；IPython 仅作语义参考 |
 | Python 变量/文件上下文 | Realm live namespace + 共享工作区 handoff/result files |
 | `rlm()` admission handle | continuable Subagent id；inbox acceptance 后立即返回 |
-| foreground independent work | repl 程序内 `Promise.all` 调用真实工具/Subagent |
+| foreground concurrent work | repl 程序内按失败语义选择 `Promise.all` 或 `Promise.allSettled` 调用真实工具/Subagent |
 | child 显式 reply | child `report`；DSH 0.1.1-rc.2 官方 next-step 调度在父忙时进入最近 step、父闲时唤醒 |
 | list/follow-up/cancel child | `list_agents` / `send_message` / `interrupt_agent` |
 | delete child | 当前无对应操作；持久 child Session 不由插件删除 |

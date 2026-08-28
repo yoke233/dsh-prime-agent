@@ -149,7 +149,7 @@ Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分�
 
 工具调用的 canonical value、官方 content、日志与 spill locator 仍由 DSH 工具层管理。Prime binding 始终把 canonical value 返回给程序；非空官方 content 只与对象 identity 关联，并仅在该对象直接成为 completion 时替代其模型展示。提取字段、spread 或其他转换产生的新值继续走普通 completion 路径；primitive canonical value 保持原值。Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值，超过预算时 spill artifact 保存完整 notebook renderer 文本并按需读取。store 缺失、保存失败或 notice 无法放进预算时，策略保留完整 inline 成功结果并告警，不伪造 locator。这个预算不限制 Realm heap，也不等于上游 IPython 的 snapshot pruning；Realm 不复制 DSH 的 spill 或工具日志存储。
 
-控制面 policy 只在全部结果都必需时建议 `Promise.all`；独立 best-effort 探测使用 `Promise.allSettled` 或逐项捕获 `ToolCallError`，同时检查失败并重新抛出意外错误。这些是模型侧编排约定，不改变 DSH 工具失败或 Realm partial-commit 语义。
+控制面 policy 只在任一失败会让全部成功结果都失去用途时建议 `Promise.all`；相互独立的读取、搜索和探测即使希望拿到全部答案，也使用 `Promise.allSettled` 或逐项捕获 `ToolCallError`，保留成功结果、检查失败并只重试失败项。这些是模型侧编排约定，不改变 DSH 工具失败或 Realm partial-commit 语义。
 
 ### 失败与换代
 
