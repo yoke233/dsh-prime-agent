@@ -204,7 +204,7 @@ try {
 
 ## 编排工作流
 
-控制面 policy 引导模型在一个程序里组合读取、工具与子 Agent：中间值留在 live namespace；只有全部结果都必需时才用 `Promise.all`，独立 best-effort 探测改用 `Promise.allSettled` 或逐项捕获 `ToolCallError`，检查失败并重新抛出意外错误；副作用型 mutation 顺序执行。大结果不需要模型自己归约——runtime 会把超过 64 KiB 的完成值换成有界引用 envelope，cell 仍然成功，原值留在 Realm 内可用 envelope 里给出的 `$out(N)` 继续计算。
+控制面 policy 引导模型在一个程序里组合读取、工具与子 Agent：不确定的文件路径从已知父目录 `glob`，不确定的目录路径通过 `pwsh` 检查父目录；中间值留在 live namespace；只有全部结果都必需时才用 `Promise.all`，独立 best-effort 探测改用 `Promise.allSettled` 或逐项捕获 `ToolCallError`，检查失败并重新抛出意外错误；副作用型 mutation 顺序执行。大结果不需要模型自己归约——runtime 会把超过 64 KiB 的完成值换成有界引用 envelope，cell 仍然成功，原值留在 Realm 内可用 envelope 里给出的 `$out(N)` 继续计算。
 
 慢任务使用非阻塞控制循环：交给 managed Job 或 continuable child，保存 id/输出位置后继续独立工作，或结束当前 turn 等待通知；不使用 sleep 轮询或长阻塞 `await` 占住交互。多回合或多 child 工作由直接面向用户的 root 在有意义里程碑简洁汇报结果、阻塞和下一步。
 

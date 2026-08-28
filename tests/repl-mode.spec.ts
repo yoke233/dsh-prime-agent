@@ -34,6 +34,13 @@ function registerOrchestrationFixtures(ctx: Context): void {
 
 function registerPromptGuidanceFixtures(ctx: Context): void {
   for (const fixture of [
+    {
+      name: 'glob',
+      parameters: {
+        pattern: { type: 'string' as const, required: true },
+        path: { type: 'string' as const },
+      },
+    },
     { name: 'grep', parameters: { pattern: { type: 'string' as const, required: true } } },
     {
       name: 'edit',
@@ -41,6 +48,13 @@ function registerPromptGuidanceFixtures(ctx: Context): void {
         file_path: { type: 'string' as const, required: true },
         old_string: { type: 'string' as const, required: true },
         new_string: { type: 'string' as const, required: true },
+      },
+    },
+    {
+      name: 'pwsh',
+      parameters: {
+        command: { type: 'string' as const, required: true },
+        description: { type: 'string' as const, required: true },
       },
     },
     {
@@ -129,7 +143,7 @@ describe('Prime REPL composition', () => {
     expect(sdk).toBeDefined()
     if (sdk === undefined) throw new Error('tools SDK was not assembled')
 
-    for (const name of ['edit', 'grep', 'write']) {
+    for (const name of ['edit', 'glob', 'grep', 'pwsh', 'write']) {
       const declaration = `  ${name}: {`
       const declarationStart = sdk.indexOf(declaration)
       expect(declarationStart).toBeGreaterThan(0)

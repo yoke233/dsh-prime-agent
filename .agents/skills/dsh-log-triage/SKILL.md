@@ -9,7 +9,7 @@ Find the errors the user actually saw. Prime REPL failures are nested inside oth
 
 ## Analyzer
 
-Run the bundled Node.js analyzer first:
+For an explicit single-project scope, run the bundled Node.js analyzer first:
 
 ```powershell
 node .agents/skills/dsh-log-triage/scripts/analyze-dsh-logs.mjs --project D:/project/dsh-prime-agent --hours 2
@@ -17,17 +17,19 @@ node .agents/skills/dsh-log-triage/scripts/analyze-dsh-logs.mjs --project D:/pro
 
 Use `--since <local-iso>` with optional `--until <local-iso>` for a fixed window, `--json` for machine-readable evidence, and `--examples 0` for counts only. The analyzer requires Node.js with `node:zlib.zstdDecompressSync` support. Its output is the baseline; inspect matching event records only when classification needs deeper context.
 
+The analyzer handles one project cwd per invocation. For an unqualified time-window request such as “今天的日志,” first enumerate session artifacts modified in the window, read each session's cwd, and run the analyzer once per distinct cwd. Aggregate those reports; a current-project-only invocation can produce a false zero while other active DSH sessions contain the reported errors.
+
 ## 1. Freeze scope
 
 Extract from the request:
 
 - exact time window; use it without widening;
-- project cwd; default to the current cwd only when the user names no project;
+- project scope: an explicit project or “this project” means that cwd; an unqualified DSH time-window request means every project represented by session artifacts in the window;
 - requested symptom, such as `ToolCallError`, provider failure, timeout, or all call errors.
 
-Resolve `~/.dsh/sessions` from the current user's home directory. Candidate files are `session.jsonl.zstd`. Select candidates by modification time, then read each file's `session` event and retain only sessions whose normalized `cwd` equals the scoped project. Filter individual events by their millisecond `time`/`time0`; do not treat session mtime as the error timestamp.
+Resolve `~/.dsh/sessions` from the current user's home directory. Candidate files are `session.jsonl.zstd`. Select candidates by modification time, then read each file's `session` event. For explicit-project scope, retain only sessions whose normalized `cwd` equals that project; for unqualified time-window scope, group all candidates by normalized cwd. Filter individual events by their millisecond `time`/`time0`; do not treat session mtime as the error timestamp.
 
-Completion criterion: every session overlapping the requested project and time window is included, and no older or other-project session is included.
+Completion criterion: every session overlapping the requested time window and chosen project scope is included, with per-project counts visible when more than one cwd is in scope.
 
 ## 2. Decode without leaking secrets
 
@@ -103,7 +105,20 @@ Use evidence-backed categories:
 
 Distinguish protection working as designed from a defect. A rejected invalid regex, stale edit, or forbidden path is normally correct enforcement. A tool declaration that omits a required constraint is a prompt/schema contract gap. A provider or harness error must have a matching structured turn/error event or exact nested payload; do not infer it from generic red UI.
 
-## 6. Deliver the short answer first
+## 6. Assess prompt responsibility
+
+When the user asks whether prompting caused the failures, compare the reconstructed argument with the final assembled model-visible prompt and tool declaration, not only the source constant. Assign one responsibility:
+
+- **contract gap** when the required action is absent, ambiguous, contradicted elsewhere, or placed away from the decision it governs;
+- **model noncompliance** when the declaration gives the exact positive action and a usable example, but the call does something else;
+- **interface friction** when a common valid intent requires fragile multi-layer escaping or cannot be expressed directly;
+- **expected enforcement** when a precondition rejects stale or inexact state and the retry guidance is actionable.
+
+Inspect successful retries after each representative failure. A retry that succeeds after simplifying a regex, changing quotes, re-reading a file, or narrowing a path proves both the immediate cause and the useful recovery action. Rank improvements by observed category count: fix contradictory or ambiguous contracts first, then add a safer interface for recurring fragile inputs, and only then add more general prose.
+
+Completion criterion: every prompt-related recommendation cites the failing argument, the exact model-visible instruction available at that turn, and a successful retry or other observable validation. Do not label a batch “prompt quality” from error text alone.
+
+## 7. Deliver the short answer first
 
 Lead with:
 
@@ -112,4 +127,4 @@ Lead with:
 3. 3–7 representative timestamped errors;
 4. ranked category counts and concrete next fix.
 
-State selector limitations. If the reported error is absent, say exactly which planes and files were checked; explain that pre-session or unflushed failures may not be persisted. Never report “zero errors” until the nested `isError` traversal has also returned zero.
+State selector limitations. If the reported error is absent, say exactly which planes and files were checked; explain that pre-session or unflushed failures may not be persisted. Never report “zero errors” until the nested `isError` traversal has returned zero and the session-artifact enumeration confirms that no in-window project scope was omitted. When a zero is disputed, compare all in-window project scopes and validate the suspicious count with an independent complete-frame scan before blaming the analyzer.
