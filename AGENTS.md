@@ -39,6 +39,8 @@ npm run test:model
 
 `npm test` 与 `npm run check` 运行快速单元测试；`npm run check`（typecheck + build + unit）是代码变更的默认最终验证。迭代和局部测试清理优先运行覆盖变更的 focused test；需要 Realm/Worker、组合服务或多进程行为时，运行对应 integration 文件，例如 `npx vitest run --config vitest.integration.config.ts tests/<name>.spec.ts`。`npm run test:integration` 运行完整 integration suite；`npm run check:all`（typecheck + unit + integration）只用于发布、跨多个 integration 领域的广泛变更或用户明确要求。`npm run test:model` 设置 `DSH_RUN_MODEL_E2E=1`，且还需要 `DEEPSEEK_API_KEY`。
 
+本仓库中，用户未另行限定地说“安装”时，默认指构建并 `npm pack` 当前包，再按 `README.md` 的 TUI 安装命令把新生成的 `.tgz` 安装到本机 `tui` profile；安装后核对 profile 内实际包版本并运行 `dsh --profile tui --dump-config` 验证组合。不要把“安装”仅解释为安装开发依赖。
+
 ## 模型可见文案
 
 ### 操作事实

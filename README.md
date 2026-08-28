@@ -204,9 +204,11 @@ try {
 
 ## 编排工作流
 
-控制面 policy 引导模型在一个程序里组合读取、工具与子 Agent：不确定的文件路径从已知父目录 `glob`，不确定的目录路径通过 `pwsh` 检查父目录；中间值留在 live namespace；只有任一失败会让全部成功结果都失去用途时才用 `Promise.all`，相互独立的读取、搜索和探测即使希望拿到全部答案也改用 `Promise.allSettled` 或逐项捕获 `ToolCallError`，保留成功结果并只重试失败项；副作用型 mutation 顺序执行。大结果不需要模型自己归约——runtime 会把超过 64 KiB 的完成值换成有界引用 envelope，cell 仍然成功，原值留在 Realm 内可用 envelope 里给出的 `$out(N)` 继续计算。
+控制面 policy 引导模型把 REPL 当作 live notebook：命名的工具结果和跨 cell 继续收敛的工作值优先使用 `let` 留在 live namespace，重复工具调用前先复用、重赋值或转换已有 binding；不确定的文件路径从已知父目录 `glob`，不确定的目录路径通过 `pwsh` 检查父目录；只有任一失败会让全部成功结果都失去用途时才用 `Promise.all`，相互独立的读取、搜索和探测即使希望拿到全部答案也改用 `Promise.allSettled` 或逐项捕获 `ToolCallError`，保留成功结果并只重试失败项；副作用型 mutation 顺序执行。大结果不需要模型自己归约——runtime 会把超过 64 KiB 的完成值换成有界引用 envelope，cell 仍然成功，原值留在 Realm 内可用 envelope 里给出的 `$out(N)` 继续计算。
 
 慢任务使用非阻塞控制循环：交给 managed Job 或 continuable child，保存 id/输出位置后继续独立工作，或结束当前 turn 等待通知；不使用 sleep 轮询或长阻塞 `await` 占住交互。多回合或多 child 工作由直接面向用户的 root 在有意义里程碑简洁汇报结果、阻塞和下一步。
+
+`todo_write` 只用于需要用户可见状态跟踪的长流程或真实并行工作；普通单回合编辑、构建、测试与安装留在 live notebook 中，不创建任务列表。使用任务列表时只在有意义的阶段边界更新，并合并同一阶段内发现的状态变化。
 
 Prime preset 的 `subagent` 与 `subagent_fork` 默认创建 continuable child：调用在 child inbox 接受任务后返回持久 child id，父 Agent 随即继续。后续使用 `list_agents` 观察、`send_message` 投递新 turn、`interrupt_agent` 中断当前 turn；child 通过 `report` 主动回传选定结论。continuable child 不产生 Job result，详细过程保存在 child Session。
 

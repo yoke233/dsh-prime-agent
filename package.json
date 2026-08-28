@@ -1,6 +1,6 @@
 {
   "name": "dsh-prime-agent",
-  "version": "0.5.4",
+  "version": "0.5.6",
   "description": "Persistent TypeScript REPL control plane for DeepSeek Harness",
   "repository": {
     "type": "git",

@@ -58,6 +58,12 @@ function registerPromptGuidanceFixtures(ctx: Context): void {
       },
     },
     {
+      name: 'todo_write',
+      parameters: {
+        todos: { type: 'array' as const, items: { type: 'string' as const }, required: true },
+      },
+    },
+    {
       name: 'write',
       parameters: {
         file_path: { type: 'string' as const, required: true },
@@ -143,7 +149,7 @@ describe('Prime REPL composition', () => {
     expect(sdk).toBeDefined()
     if (sdk === undefined) throw new Error('tools SDK was not assembled')
 
-    for (const name of ['edit', 'glob', 'grep', 'pwsh', 'write']) {
+    for (const name of ['edit', 'glob', 'grep', 'pwsh', 'todo_write', 'write']) {
       const declaration = `  ${name}: {`
       const declarationStart = sdk.indexOf(declaration)
       expect(declarationStart).toBeGreaterThan(0)
