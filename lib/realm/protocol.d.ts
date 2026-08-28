@@ -20,7 +20,6 @@ export type ReplPresentation = {
     kind: 'retained-preview';
     valueType: string;
     serializedBytes?: number;
-    handle: number;
 } | {
     kind: 'unretained-preview';
     valueType: string;
@@ -30,7 +29,6 @@ export type ReplPresentation = {
 } | {
     kind: 'opaque-reference';
     valueType: string;
-    handle: number;
 };
 /** Realm run result plus optional trusted presentation metadata. */
 export interface PrimeRunResult extends CodeRunResult {
@@ -41,80 +39,38 @@ export interface PrimeRunResult extends CodeRunResult {
  * hard cap never has to truncate its own failure message.
  */
 export declare const MIN_OUTPUT_BYTES = 256;
-/**
- * Program-visible name of the runtime's completion-expiry rejection class. It is
- * installed as an immutable worker global, so no binding namespace or injected
- * error class may claim it; the host refuses such a declaration as caller misuse
- * rather than letting the worker fail to install its own intrinsic.
- */
-export declare const COMPLETION_EXPIRED_ERROR = "CompletionExpiredError";
-/**
- * The two model-visible completion-history intrinsics, reserved on the same
- * terms. Neither currently survives the host's identifier test for a binding
- * global, but that is an accident of the character set rather than a decision:
- * naming them here is what actually reserves them.
- */
-export declare const COMPLETION_HISTORY_GLOBAL = "$out";
+/** Model-visible automatic last-completion intrinsic reserved by the runtime. */
 export declare const LAST_RESULT_GLOBAL = "$_";
 /**
- * Per-realm ceilings on the runtime-owned completion history.
+ * Per-realm ceilings on the one runtime-owned retained completion.
  *
- * Both `Bytes` fields and the node budget are ADMISSION APPROXIMATIONS taken
- * when a value was captured, not heap guarantees. The history retains the
- * program's own object, so later in-place mutation drifts the accounting — the
- * Checked-in measurements under `bench/results/` found estimate drift up to
- * 11.8x upward and down to zero; 16 MiB of legal JSON can correspond to a
- * 341 MiB live object graph. The only hard heap boundary is still the worker's
- * `maxOldGenerationSizeMb`, which is why these defaults sit far below it.
- */
-export interface RealmCompletionHistoryLimits {
-    /** Retained completions one realm generation may hold at once. */
-    maxCompletionHistoryEntries: number;
-    /** Combined capture-time serialized bytes across every retained completion. */
-    maxCompletionHistoryEstimatedBytes: number;
-    /** Combined object-graph nodes across every retained completion. */
-    maxCompletionHistoryNodes: number;
-    /** Capture-time serialized bytes one single completion may occupy. */
-    maxCompletionHistoryEntryBytes: number;
-}
-/**
- * Per-realm ceilings on the runtime-owned history of NON-JSON live values.
+ * JSON and opaque values use independent admission ceilings because their
+ * capture measurements have different meanings. A lossless-JSON completion is
+ * charged its exact serialized bytes and completed object-graph walk. An opaque
+ * completion is never serialized or walked again after classification (doing so
+ * could invoke program code), so it is charged only what the bounded
+ * classification walk accounted before refusing the JSON path.
  *
- * This is an INDEPENDENT budget: a flood of Map/function/bigint/cyclic
- * completions may neither evict lossless-JSON slots nor be evicted by them.
- * Each class is charged against its own entries/nodes/bytes ceilings and
- * evicted FIFO within the class.
+ * These are admission approximations, not heap guarantees. The retained value
+ * is the program's original object, so later in-place mutation can drift every
+ * capture-time measurement. The worker's `maxOldGenerationSizeMb` remains the
+ * only hard heap boundary.
  */
-export interface RealmCompletionOpaqueLimits {
-    /** Retained NON-JSON completions one realm generation may hold at once. */
-    maxCompletionOpaqueEntries: number;
-    /**
-     * Combined capture-walk charge across every retained opaque completion.
-     *
-     * An opaque value is never serialized and its graph is deliberately never
-     * walked for measurement (walking fires user getters), so the charge is what
-     * the CLASSIFICATION walk accounted for before it threw: a lower bound on
-     * the explored part of the value, bounded by the capture ceiling. Like the
-     * JSON-side byte accounting it is an admission approximation, not a heap
-     * guarantee; the worker's maxOldGenerationSizeMb stays the only hard
-     * heap boundary.
-     */
-    maxCompletionOpaqueEstimatedBytes: number;
-    /** Combined capture-walk node charge across every retained opaque completion. */
+export interface RealmCompletionRetentionLimits {
+    /** Exact serialized bytes one lossless-JSON completion may occupy. */
+    maxCompletionRetainedBytes: number;
+    /** Object-graph nodes one lossless-JSON completion may occupy. */
+    maxCompletionRetainedNodes: number;
+    /** Classification-walk byte charge one opaque completion may occupy. */
+    maxCompletionOpaqueBytes: number;
+    /** Classification-walk nodes one opaque completion may occupy. */
     maxCompletionOpaqueNodes: number;
 }
 /**
  * Benchmark-backed defaults, restated in `realm-worker.ts`, which cannot import
  * this module at runtime.
  */
-export declare const DEFAULT_COMPLETION_HISTORY_LIMITS: RealmCompletionHistoryLimits;
-/**
- * The opaque store's decided defaults: a quarter of the JSON store's totals,
- * because opaque charges are classification-walk lower bounds and the same
- * absolute numbers would be a looser guarantee for values whose graphs are
- * never measured.
- */
-export declare const DEFAULT_COMPLETION_OPAQUE_LIMITS: RealmCompletionOpaqueLimits;
+export declare const DEFAULT_COMPLETION_RETENTION_LIMITS: RealmCompletionRetentionLimits;
 /**
  * Per-realm ceilings on what a completion may put in FRONT OF THE MODEL, which
  * is a different budget from what the realm may retain.
@@ -136,9 +92,9 @@ export interface RealmCompletionProjectionLimits {
      * Serialized bytes one RICH envelope may occupy — the rung that carries a
      * projection of the value.
      *
-     * It deliberately does not bound the minimal reference below it. That rung is
+     * It deliberately does not bound the minimal preview below it. That rung is
      * bounded by the wire budget alone, because a projection ceiling small enough
-     * to reject the typed minimal reference would make the last rung of the chain
+     * to reject the typed minimal preview would make the last rung of the chain
      * unreachable and put an oversized completion back to failing.
      */
     maxCompletionProjectionBytes: number;
@@ -151,16 +107,15 @@ export interface RealmCompletionProjectionLimits {
  */
 export declare const DEFAULT_COMPLETION_PROJECTION_LIMITS: RealmCompletionProjectionLimits;
 /**
- * Exact byte ceiling for the largest legal minimal retained envelope.
+ * Exact byte ceiling for the largest legal minimal envelope.
  *
- * The worst case is an opaque `function` at `Number.MAX_SAFE_INTEGER`: the
- * handle appears twice and the safe completion type and opaque marker remain
- * present. At 105 bytes it fits comfortably in the completion space left by
- * {@link MIN_OUTPUT_BYTES}, including the two bytes charged for empty logs.
+ * The worst case is an unretained opaque `function`. At 67 bytes it fits
+ * comfortably in the completion space left by {@link MIN_OUTPUT_BYTES},
+ * including the two bytes charged for empty logs.
  */
-export declare const MINIMAL_ENVELOPE_BYTES = 105;
+export declare const MINIMAL_ENVELOPE_BYTES = 67;
 /** Fill in whatever a caller left blank, then reject anything unusable. */
-export declare function resolveCompletionHistoryLimits(overrides: Partial<RealmCompletionHistoryLimits> | undefined): RealmCompletionHistoryLimits;
+export declare function resolveCompletionRetentionLimits(overrides: Partial<RealmCompletionRetentionLimits> | undefined): RealmCompletionRetentionLimits;
 /**
  * Fill in whatever a caller left blank, then reject anything unusable.
  *
@@ -169,55 +124,35 @@ export declare function resolveCompletionHistoryLimits(overrides: Partial<RealmC
  * completion projected is free to set the first below the second.
  */
 export declare function resolveCompletionProjectionLimits(overrides: Partial<RealmCompletionProjectionLimits> | undefined): RealmCompletionProjectionLimits;
-/** Fill in whatever a caller left blank, then reject anything unusable. */
-export declare function resolveCompletionOpaqueLimits(overrides: Partial<RealmCompletionOpaqueLimits> | undefined): RealmCompletionOpaqueLimits;
-/**
- * What one run may spend on the completion history.
- *
- * The handle is allocated HOST-side, one per dispatched run, from a counter that
- * is monotonic for the whole runtime process. A run produces at most one
- * completion, so one candidate handle per run is sufficient, and the worker
- * simply leaves it unspent when the value it completed with is already retained.
- * Allocating host-side is what makes the identifier unforgeable across worker
- * generations: a hard-killed generation cannot have consumed a number the next
- * one will hand out, so a handle the model saw before a restart is guaranteed to
- * be ABSENT from the new store rather than to name a different value.
- */
+/** What one run may spend on retaining and presenting its completion. */
 export interface RealmCompletionPlan {
-    /** The handle this run may consume if its completion opens a new slot. */
-    id: number;
-    limits: RealmCompletionHistoryLimits;
+    retention: RealmCompletionRetentionLimits;
     projection: RealmCompletionProjectionLimits;
-    opaque: RealmCompletionOpaqueLimits;
 }
 /**
- * The bounded reference a large completion crosses as, instead of its value.
+ * The bounded preview a large completion crosses as, instead of its value.
  *
- * The handle, safe completion type and `truncated` marker are always retained
- * when the chain reaches its minimal rung. Rich envelopes additionally carry
- * retention state, capture size, a bounded projection, or a refusal reason.
- * The SHAPE never conveys authenticity — a program can return an object of
- * exactly this form, and it travels as an ordinary completion. The `projected`
- * marker on the terminal message is the only discriminator.
+ * The safe completion type and `truncated` marker are always retained when the
+ * chain reaches its minimal rung. Rich envelopes additionally carry retention
+ * state, capture size, a bounded projection, or a refusal reason. The SHAPE
+ * never conveys authenticity — a program can return an object of exactly this
+ * form, and it travels as an ordinary completion. The `projected` marker on the
+ * terminal message is the only discriminator.
  */
 export interface RealmCompletionEnvelope {
-    /** The handle the value was retained under; absent when it was not retained. */
-    $out?: number;
-    /** A copyable expression that reaches the value, e.g. `$out(17)`. */
-    use?: string;
-    retained?: boolean;
+    /** Whether the original value remains reachable as `$_`. */
+    retained: boolean;
     /** Safe completion classification such as `object`, `array` or `function`. */
     type: string;
     /** Exact serialized bytes, present only when the capture walk measured them. */
     serializedBytesAtCapture?: number;
     /**
      * Set only on the fixed envelope of a NON-JSON completion: the value never
-     * crossed the wire in any form, `$out(id)` is the only way back to it, and
-     * nothing about its contents was read to render the envelope. Never set on
-     * a projection of a lossless-JSON value.
+     * crossed the wire in any form. Never set on a projection of a lossless-JSON
+     * value.
      */
     opaque?: true;
-    /** The bounded projection of the value; absent on a minimal reference. */
+    /** The bounded projection of the value; absent on a minimal preview. */
     projection?: CodeJsonValue;
     /** Why the value was not retained, present only alongside `retained: false`. */
     reason?: string;
@@ -308,7 +243,7 @@ export type RealmToHost = {
      *
      * The marker and its proof are one field on purpose. Presence answers "is
      * this a projection", which the envelope's shape cannot: model code may
-     * return an object with a `$out` key and a `use` string, and that value
+     * return an object with `retained` and `truncated` fields, and that value
      * travels the ordinary completion path with this field absent. The value
      * answers "did the worker say so", which matters because the field is the
      * only thing that makes the host treat a completion as runtime-authored
@@ -317,43 +252,19 @@ export type RealmToHost = {
      * marker is stripped from the wire before the value is handed on.
      */
     projected?: string;
-    /**
-     * This run's contribution to the realm's bounded metrics. Absent when the run
-     * had nothing to report, and NEVER carrying content: only counts, sizes and
-     * the resulting history levels.
-     */
+    /** This run's content-free completion capture and admission metrics. */
     metrics?: RealmRunMetrics;
 };
-/**
- * One run's completion-history bookkeeping, reported once at settlement.
- *
- * Counts are per-run DELTAS rather than generation totals so the host can simply
- * add them: a hard kill takes the worker's counters with it, and a host that
- * accumulated snapshots would either lose a generation's activity or count it
- * twice. The two `history*` fields are the exception — they are levels, not
- * deltas, and describe the store as it stood when the run settled.
- */
+/** One run's completion capture and single-slot admission bookkeeping. */
 export interface RealmRunMetrics {
     /** Exact serialized bytes of the completion, when the capture walk measured them. */
     captureBytes?: number;
     /** Object-graph nodes the capture walk counted, when it ran to completion. */
     captureNodes?: number;
-    /** Whether the completion opened a slot or reused one by identity. */
+    /** Whether the non-undefined completion replaced the retained slot. */
     retained?: boolean;
-    /** Whether a completion was refused admission to the history. */
+    /** Whether retention refused a non-undefined completion. */
     rejected?: boolean;
-    /** Slots evicted to make room for this run's completion. */
-    evicted?: number;
-    /** Opaque slots the history held when the run settled, a level not a delta. */
-    historyOpaqueEntries?: number;
-    /** Opaque capture-bytes charge the history held when the run settled, a level. */
-    historyOpaqueBytes?: number;
-    /** Handles this run asked for and did not get, because they had expired. */
-    expired?: number;
-    /** History accesses refused for running outside their own cell. */
-    refused?: number;
-    historyEntries?: number;
-    historyBytes?: number;
 }
 /**
  * One run's combined outer-output ledger: the serialized log array plus the

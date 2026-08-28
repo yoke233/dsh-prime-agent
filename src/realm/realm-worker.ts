@@ -20,9 +20,8 @@ import { workerData } from 'node:worker_threads'
 import type { MessagePort } from 'node:worker_threads'
 import type {
   HostToRealm,
-  RealmCompletionHistoryLimits,
-  RealmCompletionOpaqueLimits,
   RealmCompletionProjectionLimits,
+  RealmCompletionRetentionLimits,
   RealmNamespaceSpec,
   RealmProgramFailure,
   RealmRunMetrics,
@@ -39,7 +38,6 @@ const capturedAsyncLocalStorageGetStore = AsyncLocalStorage.prototype.getStore
 const capturedAsyncLocalStorageRun = AsyncLocalStorage.prototype.run
 const capturedAbortSignalAny = AbortSignal.any
 const capturedArrayPush = Array.prototype.push
-const capturedArraySplice = Array.prototype.splice
 const capturedArrayIsArray = Array.isArray
 const capturedBufferByteLength = Buffer.byteLength
 const capturedJsonParse = JSON.parse
@@ -50,10 +48,8 @@ const capturedMapForEach = Map.prototype.forEach
 const capturedMapGet = Map.prototype.get
 const capturedMapSet = Map.prototype.set
 const capturedNumberIsFinite = Number.isFinite
-const capturedNumberIsSafeInteger = Number.isSafeInteger
 const capturedObjectCreate = Object.create
 const capturedObjectDefineProperty = Object.defineProperty
-const capturedObjectFreeze = Object.freeze
 const capturedObjectGetPrototypeOf = Object.getPrototypeOf
 const capturedObjectHasOwn = Object.hasOwn
 const capturedObjectIs = Object.is
@@ -203,11 +199,6 @@ interface ActiveRun {
   id: number
   /** The host's single-use secret for this run; quoted on every outbound message. */
   nonce: string
-  /**
-   * The completion handle the host reserved for this run, spent only if the run
-   * completes with a value that opens a NEW history slot.
-   */
-  completionId: number
   logs: LogBuffer
   pending: Map<number, PendingCall>
   nextCallId: number
@@ -691,7 +682,7 @@ interface CaptureStats {
   nodeLimit: number
   /**
    * Set the moment the walk crosses `nodeLimit`, which permanently disqualifies
-   * the value from the history.
+   * the value from retention.
    *
    * It is written INLINE rather than derived from a finished snapshot, and that
    * is the only way the answer can be right: `seen` is a path set (deleted on
@@ -705,9 +696,7 @@ interface CaptureStats {
    * serialization stays small — the expanding DAG above is exactly that shape —
    * and for those the full JSON still crosses, unretained. Abandoning the walk
    * there would abandon the serialization with it and turn a successful cell
-   * into `invalid-output`. Guarded by "refuses a shared subgraph whose expansion
-   * the walk counted, without abandoning the walk" in
-   * `tests/completion-history.spec.ts`.
+   * into `invalid-output`.
    */
   overNodeLimit: boolean
   /**
@@ -719,27 +708,24 @@ interface CaptureStats {
    */
   bytes: number
   /**
-   * The point past which the walk gives up: the higher of the per-slot admission
-   * ceiling and the full-value threshold, so crossing it proves the value can
-   * neither be retained nor sent whole.
+   * The point past which the walk gives up: the higher of the retained-value
+   * byte ceiling and the full-value threshold, so crossing it proves the value
+   * can neither be retained nor sent whole.
    *
    * Placing the early exit at the ADMISSION ceiling rather than at the
    * projection threshold is what keeps exact accounting exact. A walk that
-   * finishes inside this bound yields a real byte count and node count, which
-   * the history needs to charge a slot. A walk that crosses it belongs to a
-   * value that could never have been retained, so the projection uses what the
-   * walk already gathered. Capture cost is therefore bounded independently of
-   * value size.
+   * finishes inside this bound yields a real byte count and node count for the
+   * retention decision. A walk that crosses it belongs to a value that could
+   * never have been retained, so the projection uses what the walk already
+   * gathered. Capture cost is therefore bounded independently of value size.
    */
   byteLimit: number
   /** The size past which a completion is projected rather than sent whole. */
   fullLimit: number
   /** Set when `overCaptureCeiling` ended the walk; the snapshot is then partial. */
   aborted: boolean
-  /** Container nesting, so root metadata can be taken without a second look. */
+  /** Container nesting, used to bound projection sampling depth. */
   depth: number
-  /** Own key total of a root OBJECT, recorded for the slot that retains it. */
-  rootKeyCount: number
   /** Projection nodes materialized so far, against `PROJECTION_NODES`. */
   projectionNodes: number
 }
@@ -757,7 +743,6 @@ function newCaptureStats(nodeLimit: number, byteLimit: number, fullLimit: number
   stats.fullLimit = fullLimit
   stats.aborted = false
   stats.depth = 0
-  stats.rootKeyCount = 0
   stats.projectionNodes = 0
   return stats
 }
@@ -770,7 +755,7 @@ function newCaptureStats(nodeLimit: number, byteLimit: number, fullLimit: number
  * neither be retained nor sent whole, so nothing is lost by stopping. Past
  * `fullLimit` it can no longer be sent whole either, but stopping is only
  * justified once the node budget has ALSO been blown — otherwise the walk would
- * abandon a value the history was still willing to take.
+ * abandon a value retention was still willing to take.
  */
 function chargeCapture(stats: CaptureStats, bytes: number): void {
   stats.bytes += bytes
@@ -922,7 +907,6 @@ function snapshotValue(
   const source = value as object
   if (capturedReflectApply(capturedSetHas, seen, [source])) throw new CapturedError('value is not lossless JSON')
   capturedReflectApply(capturedSetAdd, seen, [source])
-  const root = stats.depth === 0
   stats.depth += 1
   // Children are sampled only while the container itself sits inside the depth
   // budget; deeper containers still report their size, just not their contents.
@@ -968,7 +952,6 @@ function snapshotValue(
     if (prototype !== null && prototype !== capturedObjectPrototype) throw new CapturedError('value is not lossless JSON')
     const target = capturedObjectCreate(null) as Record<string, unknown>
     const keys = capturedReflectOwnKeys(source)
-    if (root) stats.rootKeyCount = keys.length
     chargeCapture(stats, keys.length > 0 ? keys.length + 1 : 2)
     const entries: Record<string, unknown>[] | undefined = sampling ? [] : undefined
     if (slot) {
@@ -1030,64 +1013,29 @@ function snapshotValue(
 }
 
 /**
- * One retained completion. `value` is the program's ORIGINAL object, not a copy:
- * the checked-in retention measurements under `bench/results/` show the
- * null-prototype snapshot copy at 1.7x-2.8x the heap of the original whenever a
- * user binding holds it too, and 3.1x on the worst measured legal shape. Keeping
- * the identity is also what makes `$out.drop(id)` release the history's claim
- * WITHOUT touching a binding the program declared over the same object.
+ * The latest retained completion. This is the program's ORIGINAL value, not a
+ * copy: retaining a snapshot would duplicate the live graph and would also lose
+ * exact object identity. `undefined` means there is no retained completion;
+ * successful undefined completions deliberately leave this slot unchanged.
  */
-interface CompletionSlot {
-  id: number
-  value: unknown
-  /** Serialized bytes at CAPTURE time; in-place mutation drifts this, by design. */
-  bytes: number
-  nodes: number
-  type: string
-  /**
-   * Own key total of a root object. The keys THEMSELVES are never stored: the
-   * projection is generated inline during the capture traversal and travels with
-   * that run's envelope, so a stored sample would be held by every slot and read
-   * by nobody. It is also deliberately absent from `$out.list()` because sixteen
-   * 20,000-character keys across sixteen rows would make a quarter-megabyte
-   * metadata answer.
-   */
-  keyCount: number
-  /**
-   * Whether this slot holds a NON-JSON live value. Opaque slots are charged
-   * against their own entries/nodes/bytes budgets, evicted FIFO within their
-   * own class, and their rows in `$out.list()` carry `opaque: true` so the
-   * byte/node numbers there are read as capture-walk charges rather than as
-   * serialized sizes.
-   */
-  opaque: boolean
-}
+let latestCompletion: unknown
 
-/** Model-visible intrinsics this runtime owns; see `protocol.ts` for the reserved name. */
-const COMPLETION_HISTORY_GLOBAL = '$out'
+/** Model-visible automatic last-completion intrinsic; see `protocol.ts`. */
 const LAST_RESULT_GLOBAL = '$_'
-const COMPLETION_EXPIRED_ERROR = 'CompletionExpiredError'
 
-/** Emitted once, when the program takes `$_` for itself; Node's REPL rule for `_`. */
+/** Emitted once when the program takes the runtime-owned name for itself. */
 const LAST_RESULT_CLAIMED_NOTICE = `[prime-realm] ${LAST_RESULT_GLOBAL} is now a program variable, `
-  + `so automatic last-result tracking is off; use ${COMPLETION_HISTORY_GLOBAL}(id) to reach retained results`
+  + 'so automatic last-result tracking is off; save important results to named variables before running another value-producing cell'
 
 /**
- * Restates `DEFAULT_COMPLETION_HISTORY_LIMITS` in `./protocol.ts`, which this
- * module cannot import at runtime. Only a placeholder: the host sends the
- * realm's real limits with every run, before any completion can be captured.
+ * Restates `DEFAULT_COMPLETION_RETENTION_LIMITS` in `./protocol.ts`, which this
+ * module cannot import at runtime. The host sends the realm's real limits with
+ * every run, before any completion can be captured.
  */
-let completionLimits: RealmCompletionHistoryLimits = {
-  maxCompletionHistoryEntries: 16,
-  maxCompletionHistoryEstimatedBytes: 33_554_432,
-  maxCompletionHistoryNodes: 1_000_000,
-  maxCompletionHistoryEntryBytes: 8_388_608,
-}
-
-/** Restates `DEFAULT_COMPLETION_OPAQUE_LIMITS`, on the same terms. */
-let opaqueLimits: RealmCompletionOpaqueLimits = {
-  maxCompletionOpaqueEntries: 8,
-  maxCompletionOpaqueEstimatedBytes: 8_388_608,
+let retentionLimits: RealmCompletionRetentionLimits = {
+  maxCompletionRetainedBytes: 8_388_608,
+  maxCompletionRetainedNodes: 1_000_000,
+  maxCompletionOpaqueBytes: 8_388_608,
   maxCompletionOpaqueNodes: 262_144,
 }
 
@@ -1107,36 +1055,14 @@ let projectionLimits: RealmCompletionProjectionLimits = {
  */
 let runMetrics: RealmRunMetrics = {}
 
-/** History accesses refused since the last settlement, whoever attempted them. */
-let refusedAccesses = 0
-
-/**
- * Retained completions in FIFO order, oldest first. Generation-local by
- * construction. Lossless-JSON and opaque slots share ONE store — handles,
- * `$_` and `$out.list()` are a single namespace — while the budgets behind
- * them stay independent: each class is charged and evicted on its own.
- */
-const completionSlots: CompletionSlot[] = []
 /** Official tool text keyed by the exact canonical object returned to model code. */
 const completionPresentations = new CapturedWeakMap<object, string>()
-let retainedBytes = 0
-let retainedNodes = 0
-/** Opaque-store totals, kept apart from the JSON store's for the same reason. */
-let opaqueBytes = 0
-let opaqueNodes = 0
-/**
- * The slot the LAST completion landed in, which is not the newest slot: an
- * identity hit reuses an older slot and deliberately keeps its FIFO position, so
- * reading `$_` off the tail would answer with somebody else's value.
- */
-let lastRetainedId: number | undefined
 
 /**
- * How `$out.list()` names a value, without rendering any of its content.
+ * Classify a completion without consulting its rendering hooks.
  *
  * `Array.isArray` is the one call here that can throw — a revoked proxy — and
- * the opaque path reaches it with values the walk already refused, so the
- * throw is answered with the safe `typeof` verdict instead of escaping.
+ * the opaque path answers with the safe `typeof` verdict instead.
  */
 function completionType(value: unknown): string {
   if (value === null) return 'null'
@@ -1148,333 +1074,54 @@ function completionType(value: unknown): string {
   return typeof value
 }
 
-function findCompletionSlot(id: number): CompletionSlot | undefined {
-  for (let index = 0; index < completionSlots.length; index++) {
-    const slot = completionSlots[index] as CompletionSlot
-    if (slot.id === id) return slot
-  }
-  return undefined
-}
-
-/** Lossless-JSON slots currently held, whatever the shared store's total length. */
-function jsonEntryCount(): number {
-  let count = 0
-  for (let index = 0; index < completionSlots.length; index++) {
-    if (!(completionSlots[index] as CompletionSlot).opaque) count += 1
-  }
-  return count
-}
-
-/** Opaque slots currently held, whatever the shared store's total length. */
-function opaqueEntryCount(): number {
-  let count = 0
-  for (let index = 0; index < completionSlots.length; index++) {
-    if ((completionSlots[index] as CompletionSlot).opaque) count += 1
-  }
-  return count
-}
-
-/** Drop the oldest LOSSLESS-JSON slot, releasing the history's claim on its value. */
-function evictOldestCompletion(): void {
-  for (let index = 0; index < completionSlots.length; index++) {
-    const slot = completionSlots[index] as CompletionSlot
-    if (slot.opaque) continue
-    capturedReflectApply(capturedArraySplice, completionSlots, [index, 1])
-    retainedBytes -= slot.bytes
-    retainedNodes -= slot.nodes
-    runMetrics.evicted = (runMetrics.evicted ?? 0) + 1
-    return
-  }
-}
-
-/** Drop the oldest OPAQUE slot, leaving every lossless-JSON slot untouched. */
-function evictOldestOpaqueCompletion(): void {
-  for (let index = 0; index < completionSlots.length; index++) {
-    const slot = completionSlots[index] as CompletionSlot
-    if (!slot.opaque) continue
-    capturedReflectApply(capturedArraySplice, completionSlots, [index, 1])
-    opaqueBytes -= slot.bytes
-    opaqueNodes -= slot.nodes
-    runMetrics.evicted = (runMetrics.evicted ?? 0) + 1
-    return
-  }
-}
-
-/** Whether one more JSON entry of this size fits inside all three JSON budgets. */
-function completionHistoryFits(bytes: number, nodes: number): boolean {
-  return jsonEntryCount() + 1 <= completionLimits.maxCompletionHistoryEntries
-    && retainedBytes + bytes <= completionLimits.maxCompletionHistoryEstimatedBytes
-    && retainedNodes + nodes <= completionLimits.maxCompletionHistoryNodes
-}
-
-/** Whether one more opaque entry of this charge fits inside all three opaque budgets. */
-function opaqueHistoryFits(bytes: number, nodes: number): boolean {
-  return opaqueEntryCount() + 1 <= opaqueLimits.maxCompletionOpaqueEntries
-    && opaqueBytes + bytes <= opaqueLimits.maxCompletionOpaqueEstimatedBytes
-    && opaqueNodes + nodes <= opaqueLimits.maxCompletionOpaqueNodes
+/**
+ * Replace the single retained slot with one lossless-JSON completion.
+ *
+ * A refused non-undefined completion clears the former value: keeping it would
+ * make `$_` claim to be the latest completion when the actual latest value was
+ * not retained. Returning the same object simply assigns that identical object
+ * again; single-slot replacement needs no identity-deduplication path.
+ */
+function retainCompletion(value: unknown, bytes: number, stats: CaptureStats): boolean {
+  const retained = !stats.overNodeLimit
+    && bytes <= retentionLimits.maxCompletionRetainedBytes
+    && stats.nodes <= retentionLimits.maxCompletionRetainedNodes
+  latestCompletion = retained ? value : undefined
+  return retained
 }
 
 /**
- * Whether this value could be retained AT ALL, in an empty history.
+ * Replace the single retained slot with one NON-JSON live completion.
  *
- * Asked before anything is evicted, because a value that cannot fit on its own
- * will not fit after the store is emptied either — and emptying it would trade
- * every handle the model still holds for nothing.
+ * The opaque budget uses only the bounded classification walk's charge; the
+ * value is never serialized or traversed a second time.
  */
-function completionFitsAlone(bytes: number, nodes: number): boolean {
-  return bytes <= completionLimits.maxCompletionHistoryEntryBytes
-    && bytes <= completionLimits.maxCompletionHistoryEstimatedBytes
-    // Already implied by the walk's own node budget; restated so this test
-    // stands on its own rather than on that coupling.
-    && nodes <= completionLimits.maxCompletionHistoryNodes
+function retainOpaqueCompletion(value: unknown, stats: CaptureStats): boolean {
+  const retained = stats.bytes <= retentionLimits.maxCompletionOpaqueBytes
+    && stats.nodes <= retentionLimits.maxCompletionOpaqueNodes
+  latestCompletion = retained ? value : undefined
+  return retained
 }
 
 /**
- * Admit one successful run's completion into the history.
+ * Refuse an intrinsic access from outside the cell that owns the caller.
  *
- * Identity first: an OBJECT already retained keeps its slot, its handle and its
- * FIFO position, and costs nothing. The checked-in recirculation measurements
- * under `bench/results/` show per-slot billing flushing the history in two of
- * three traces, and failing in the worst possible shape — the object still in
- * the store under a new id while the handle the model was holding had expired.
- * The completion-history tests exercise the retained behavior.
- *
- * Primitives are excluded from that scan on purpose. `Object.is` on two strings
- * compares CONTENT, so two independently computed equal strings are not the same
- * result in any sense the model would recognize, and folding them together would
- * park the newer one at the older one's FIFO position. The comparison is also
- * O(length) per slot, which a run returning long strings would pay on every
- * capture.
+ * Without this fence, a continuation parked by an earlier cell could read or
+ * claim a later cell's retained value.
  */
-function retainCompletion(value: unknown, bytes: number, stats: CaptureStats): number | undefined {
-  // The identity scan is scoped to the JSON class. The same object can be
-  // retained once as JSON and later, mutated, again as opaque: each capture is
-  // charged to the class that admitted it, so a JSON hit must not reuse an
-  // opaque slot (or vice versa) and quietly move a value between budgets.
-  if (typeof value === 'object' && value !== null) {
-    for (let index = 0; index < completionSlots.length; index++) {
-      const slot = completionSlots[index] as CompletionSlot
-      if (slot.opaque) continue
-      if (capturedObjectIs(slot.value, value)) {
-        lastRetainedId = slot.id
-        return slot.id
-      }
-    }
-  }
-  const run = active
-  /* c8 ignore next -- capture runs inside its own run, so the slot is always held here. */
-  if (run === undefined) return undefined
-  // Refused outright rather than evicted for: one oversized result must not cost
-  // the model every earlier handle it still holds.
-  if (stats.overNodeLimit || !completionFitsAlone(bytes, stats.nodes)) return undefined
-  while (jsonEntryCount() > 0 && !completionHistoryFits(bytes, stats.nodes)) evictOldestCompletion()
-  /* c8 ignore next 2 -- unreachable: the value fits an empty store and the entry budget is a positive integer, so an emptied store always has room. */
-  if (!completionHistoryFits(bytes, stats.nodes)) return undefined
-  const slot = capturedObjectCreate(null) as CompletionSlot
-  slot.id = run.completionId
-  slot.value = value
-  slot.bytes = bytes
-  slot.nodes = stats.nodes
-  slot.type = completionType(value)
-  slot.keyCount = stats.rootKeyCount
-  slot.opaque = false
-  capturedReflectApply(capturedArrayPush, completionSlots, [slot])
-  retainedBytes += bytes
-  retainedNodes += stats.nodes
-  lastRetainedId = slot.id
-  return slot.id
-}
-
-/**
- * Admit one successful run's NON-JSON completion into the opaque history.
- *
- * Reached only from the catch arm of the classification walk, so the value's
- * graph was deliberately never measured: the slot is charged what the walk
- * accounted for before it threw, against the OPAQUE budgets alone. Identity
- * reuse follows the JSON rule with one extension — functions are scanned too,
- * because `Object.is` on a function is an identity test with no content cost,
- * and a function is the most common live value a model recirculates. The
- * refused-oversized rule is the same: a charge that cannot fit an EMPTY
- * opaque store never clears the store for it.
- */
-function retainOpaqueCompletion(value: unknown, stats: CaptureStats): number | undefined {
-  const kind = typeof value
-  if (kind === 'object' || kind === 'function') {
-    for (let index = 0; index < completionSlots.length; index++) {
-      const slot = completionSlots[index] as CompletionSlot
-      if (!slot.opaque) continue
-      if (capturedObjectIs(slot.value, value)) {
-        lastRetainedId = slot.id
-        return slot.id
-      }
-    }
-  }
-  const run = active
-  /* c8 ignore next -- capture runs inside its own run, so the slot is always held here. */
-  if (run === undefined) return undefined
-  const bytes = stats.bytes
-  const nodes = stats.nodes
-  if (bytes > opaqueLimits.maxCompletionOpaqueEstimatedBytes
-    || nodes > opaqueLimits.maxCompletionOpaqueNodes) return undefined
-  while (opaqueEntryCount() > 0 && !opaqueHistoryFits(bytes, nodes)) evictOldestOpaqueCompletion()
-  /* c8 ignore next 2 -- unreachable: the charge fits an empty store and the entry budget is a positive integer, so an emptied store always has room. */
-  if (!opaqueHistoryFits(bytes, nodes)) return undefined
-  const slot = capturedObjectCreate(null) as CompletionSlot
-  slot.id = run.completionId
-  slot.value = value
-  slot.bytes = bytes
-  slot.nodes = nodes
-  slot.type = completionType(value)
-  slot.keyCount = 0
-  slot.opaque = true
-  capturedReflectApply(capturedArrayPush, completionSlots, [slot])
-  opaqueBytes += bytes
-  opaqueNodes += nodes
-  lastRetainedId = slot.id
-  return slot.id
-}
-
-/**
- * The rejection a stale handle gets. Installed as an immutable global through
- * the same mechanism as a namespace's binding-error class, so a program can
- * branch on it by identity, and the host reserves the name so no binding
- * declaration can collide with it.
- */
-const CompletionExpiredError = class CompletionExpiredError extends CapturedError {
-  constructor(message: string) {
-    super(message)
-    defineBindingErrorField(this, 'name', COMPLETION_EXPIRED_ERROR)
-  }
-}
-capturedObjectFreeze(CompletionExpiredError.prototype)
-capturedObjectFreeze(CompletionExpiredError)
-installReadonlyGlobal(COMPLETION_EXPIRED_ERROR, CompletionExpiredError)
-
-/**
- * Refuse any history access from outside its own run.
- *
- * The history is runtime-owned state reachable from model code, so it takes the
- * same fencing a leased binding does: without it a continuation an earlier run
- * parked could read — or clear — whatever the CURRENT run has retained.
- */
-function requireCompletionRun(intrinsic: string): void {
+function requireCompletionRun(): void {
   if (leasedRunId() === undefined) {
-    // Counted OUTSIDE any run's report and drained by the next settlement: the
-    // refusals worth counting are exactly the ones that happen when no run owns
-    // the caller, including those that land between two runs.
-    refusedAccesses += 1
-    throw new CapturedError(`${intrinsic} is only reachable while its own cell is running`)
+    throw new CapturedError(`${LAST_RESULT_GLOBAL} is only reachable while its own cell is running`)
   }
-}
-
-function requireCompletionHandle(id: unknown): number {
-  if (typeof id !== 'number' || !capturedNumberIsSafeInteger(id)) {
-    throw new CapturedError(`${COMPLETION_HISTORY_GLOBAL}(id) takes an integer completion handle`)
-  }
-  return id
 }
 
 /**
- * Retrieve one retained completion, or say plainly that it is gone.
- *
- * An arrow rather than a declaration, here and below: a function declaration
- * carries a `prototype` object, which would hand model code a mutable surface
- * hanging off a frozen intrinsic and would let `new $out()` mean something.
+ * Hand the intrinsic name over to the program, as an ordinary global assignment
+ * would leave it. The retained slot stays runtime-owned but is no longer
+ * model-reachable in this worker generation.
  */
-const completionHandle = (id: unknown): unknown => {
-  requireCompletionRun(COMPLETION_HISTORY_GLOBAL)
-  const handle = requireCompletionHandle(id)
-  const slot = findCompletionSlot(handle)
-  // A handle from a previous generation lands here too: ids are never reused, so
-  // an old one is simply absent and can never name a value it did not create.
-  if (slot === undefined) {
-    runMetrics.expired = (runMetrics.expired ?? 0) + 1
-    throw new CompletionExpiredError(`result ${handle} was evicted; recompute it`)
-  }
-  return slot.value
-}
-
-/** Bounded metadata for every retained completion, in creation order. */
-const completionList = (): unknown[] => {
-  requireCompletionRun(COMPLETION_HISTORY_GLOBAL)
-  const rows: unknown[] = []
-  for (let index = 0; index < completionSlots.length; index++) {
-    const slot = completionSlots[index] as CompletionSlot
-    const row = capturedObjectCreate(null) as Record<string, unknown>
-    row.id = slot.id
-    row.type = slot.type
-    // For an opaque slot these are the classification walk's CHARGE, not a
-    // serialized size — the `opaque: true` marker is what tells the two apart.
-    row.serializedBytesAtCapture = slot.bytes
-    row.nodes = slot.nodes
-    // The COUNT, never the keys themselves. It is one small integer whatever
-    // the value's shape, which is what separates it from the names: sixteen
-    // 20,000-character keys across sixteen rows would make a quarter-megabyte
-    // metadata answer. Opaque values are never walked for their keys, so their
-    // count is always zero.
-    row.keyCount = slot.keyCount
-    if (slot.opaque) row.opaque = true
-    capturedReflectApply(capturedArrayPush, rows, [row])
-  }
-  return rows
-}
-
-/** Release one retained completion. Idempotent: an unknown handle answers `false`. */
-const completionDrop = (id: unknown): boolean => {
-  requireCompletionRun(COMPLETION_HISTORY_GLOBAL)
-  const handle = requireCompletionHandle(id)
-  for (let index = 0; index < completionSlots.length; index++) {
-    const slot = completionSlots[index] as CompletionSlot
-    if (slot.id !== handle) continue
-    capturedReflectApply(capturedArraySplice, completionSlots, [index, 1])
-    if (slot.opaque) {
-      opaqueBytes -= slot.bytes
-      opaqueNodes -= slot.nodes
-    } else {
-      retainedBytes -= slot.bytes
-      retainedNodes -= slot.nodes
-    }
-    if (lastRetainedId === handle) lastRetainedId = undefined
-    return true
-  }
-  return false
-}
-
-/** Release the whole history, answering how many slots that was. */
-const completionClear = (): number => {
-  requireCompletionRun(COMPLETION_HISTORY_GLOBAL)
-  const released = completionSlots.length
-  completionSlots.length = 0
-  retainedBytes = 0
-  retainedNodes = 0
-  opaqueBytes = 0
-  opaqueNodes = 0
-  lastRetainedId = undefined
-  return released
-}
-
-/** The value of the most recent retained completion, or `undefined`. */
-function lastRetainedValue(): unknown {
-  if (lastRetainedId === undefined) return undefined
-  return findCompletionSlot(lastRetainedId)?.value
-}
-
-/** Attach one immutable method to the program-visible `$out` function. */
-function defineIntrinsicMethod(target: object, name: string, value: unknown): void {
-  capturedObjectDefineProperty(target, name, { value, enumerable: true, writable: false, configurable: false })
-}
-defineIntrinsicMethod(completionHandle, 'list', completionList)
-defineIntrinsicMethod(completionHandle, 'drop', completionDrop)
-defineIntrinsicMethod(completionHandle, 'clear', completionClear)
-capturedObjectFreeze(completionHandle)
-
-/**
- * Hand one intrinsic name over to the program, as an ordinary global assignment
- * would leave it. Nothing is lost that the runtime needs: the history stays
- * runtime-owned and the next generation reinstalls the accessor.
- */
-function claimIntrinsicName(name: string, assigned: unknown): void {
-  capturedObjectDefineProperty(globalThis, name, {
+function claimLastResultName(assigned: unknown): void {
+  capturedObjectDefineProperty(globalThis, LAST_RESULT_GLOBAL, {
     value: assigned,
     enumerable: true,
     writable: true,
@@ -1483,35 +1130,23 @@ function claimIntrinsicName(name: string, assigned: unknown): void {
 }
 
 /**
- * Install the two model-visible intrinsics.
+ * Build the configurable `$_` accessor.
  *
- * CONFIGURABLE on purpose. A non-configurable own global makes a top-level
- * `const $out` fail the whole cell with `Identifier has already been declared`,
- * and `tests/completion-contracts.spec.ts` pins that declaration as legal today.
- * Configurable accessors let a lexical declaration shadow them the way Node's
- * REPL lets a user shadow `_`; the function object itself is frozen, so the
- * program can lose its own access to the history but can never reshape it.
- *
- * Both accessors are fenced on BOTH sides. A getter that answered outside its
- * run would leak a later run's values to a parked continuation; a setter that
- * answered would let that continuation retire an intrinsic the CURRENT run is
- * relying on. Refusing the write is not a loss for the program either: an
- * assignment nobody is running to observe had no legitimate reader.
+ * Configurability lets a lexical declaration shadow it with the same semantics
+ * as Node's REPL `_`. Both getter and setter are fenced against detached
+ * continuations. Assignment retires the accessor for this generation, which
+ * also makes the namespace notice single-shot.
  */
-function completionIntrinsicDescriptor(name: string): PropertyDescriptor {
+function lastResultDescriptor(): PropertyDescriptor {
   const descriptor = capturedObjectCreate(null) as PropertyDescriptor
-  descriptor.get = name === COMPLETION_HISTORY_GLOBAL
-    ? (): unknown => completionHandle
-    : (): unknown => {
-        requireCompletionRun(LAST_RESULT_GLOBAL)
-        return lastRetainedValue()
-      }
-  // Assignment retires the accessor for this generation, which is what makes the
-  // `$_` notice single-shot: the setter no longer exists to fire a second time.
+  descriptor.get = (): unknown => {
+    requireCompletionRun()
+    return latestCompletion
+  }
   descriptor.set = (assigned: unknown): void => {
-    requireCompletionRun(name)
-    claimIntrinsicName(name, assigned)
-    if (name === LAST_RESULT_GLOBAL) emit(LAST_RESULT_CLAIMED_NOTICE)
+    requireCompletionRun()
+    claimLastResultName(assigned)
+    emit(LAST_RESULT_CLAIMED_NOTICE)
   }
   descriptor.enumerable = false
   descriptor.configurable = true
@@ -1519,33 +1154,15 @@ function completionIntrinsicDescriptor(name: string): PropertyDescriptor {
 }
 
 /**
- * Install both intrinsics, and reinstall either one the program DELETED.
- *
- * Deletion and assignment are different acts and get different answers. An
- * assignment leaves a data property the program is now using, and reviving the
- * accessor over it would take a live variable away mid-namespace; a deletion
- * leaves the name free, and nothing is served by making the model live without
- * the history for the rest of the generation over one stray `delete`. Testing
- * for the name's ABSENCE tells the two apart without tracking any extra state,
- * and running it at the start of every run also repairs a deletion issued from a
- * detached continuation, which no run could otherwise undo.
- *
- * A convenience, NOT a security boundary — do not build one on it. A program
- * that deletes the name and defines its own in the same cell reaches exactly the
- * end state an ordinary assignment would, and keeps it: that is the same
- * acceptable self-harm, reached by a longer route. What actually protects the
- * history is that the store is reachable only through closures, never through
- * this global.
+ * Install `$_`, or reinstall it after the program deleted it. An assignment
+ * leaves a data property and is intentionally respected for this generation.
  */
-function installCompletionIntrinsics(): void {
-  if (!capturedObjectHasOwn(globalThis, COMPLETION_HISTORY_GLOBAL)) {
-    capturedObjectDefineProperty(globalThis, COMPLETION_HISTORY_GLOBAL, completionIntrinsicDescriptor(COMPLETION_HISTORY_GLOBAL))
-  }
+function installCompletionIntrinsic(): void {
   if (!capturedObjectHasOwn(globalThis, LAST_RESULT_GLOBAL)) {
-    capturedObjectDefineProperty(globalThis, LAST_RESULT_GLOBAL, completionIntrinsicDescriptor(LAST_RESULT_GLOBAL))
+    capturedObjectDefineProperty(globalThis, LAST_RESULT_GLOBAL, lastResultDescriptor())
   }
 }
-installCompletionIntrinsics()
+installCompletionIntrinsic()
 
 /** The terminal fragment of one run, without its envelope fields. */
 type DoneFragment = { json?: string; error?: RealmProgramFailure }
@@ -1569,18 +1186,17 @@ function boundedFailure(kind: 'exception' | 'invalid-output', message: string, r
 let projectedCompletion = false
 
 /**
- * Render one bounded reference to a completion the model is not being shown.
+ * Render one bounded preview of a completion the model is not being shown.
  *
  * The chain is `rich -> minimal -> output-limit`, and both rungs are tested
  * against the SAME two ceilings: the projection budget, which bounds what a
  * completion may cost the conversation, and the wire budget left after logs,
- * which bounds what the protocol can carry. A handle appears only for a value
- * that was retained; a dead handle is worse than none because the `use`
- * expression is written to be copied and would immediately fail.
+ * which bounds what the protocol can carry. Retention state is content-free and
+ * tells the model whether the original value remains reachable as `$_`.
  */
 function projectCompletion(
   value: unknown,
-  id: number | undefined,
+  retained: boolean,
   bytes: number | undefined,
   projection: unknown,
   remaining: number,
@@ -1591,27 +1207,20 @@ function projectCompletion(
     : remaining
   const type = completionType(value)
   const rich = capturedObjectCreate(null) as Record<string, unknown>
-  if (id !== undefined) {
-    rich[COMPLETION_HISTORY_GLOBAL] = id
-    rich.use = `${COMPLETION_HISTORY_GLOBAL}(${id})`
-  }
-  rich.retained = id !== undefined
+  rich.retained = retained
   rich.type = type
   // Reported whenever the walk MEASURED it. A capture the ceiling cut short
   // never learned the real size, and a lower bound reported as an exact number
   // would be a measurement nobody took.
   if (bytes !== undefined) rich.serializedBytesAtCapture = bytes
   if (projection !== undefined) rich.projection = projection
-  if (id === undefined) rich.reason = bytes === undefined ? 'too large to capture' : 'too large to retain'
+  if (!retained) rich.reason = bytes === undefined ? 'too large to capture' : 'too large to retain'
   rich.truncated = true
   const richJson = capturedJsonStringify(rich)
   if (capturedBufferByteLength(richJson, 'utf8') <= budget) return { json: richJson }
 
   const minimal = capturedObjectCreate(null) as Record<string, unknown>
-  if (id !== undefined) {
-    minimal[COMPLETION_HISTORY_GLOBAL] = id
-    minimal.use = `${COMPLETION_HISTORY_GLOBAL}(${id})`
-  }
+  minimal.retained = retained
   minimal.type = type
   minimal.truncated = true
   const minimalJson = capturedJsonStringify(minimal)
@@ -1623,18 +1232,15 @@ function projectCompletion(
  * The FIXED envelope a NON-JSON completion crosses as, whatever it was.
  *
  * The value itself never serializes, and rendering it would mean calling the
- * program's own hooks — toJSON, toString, inspect, or any proxy trap — so
- * the envelope deliberately carries no contents at all: a handle when the value
- * was retained, the safe typeof-grade type, and the 'opaque: true' marker
- * that tells the model this is a live value to reach through $out(id), not a
- * projection of something serializable. The chain is the same
- * rich -> minimal -> output-limit as the JSON projector's, and the rich rung
- * is already small enough that the minimal one exists only for the most
- * starved wire budgets.
+ * program's own hooks — toJSON, toString, inspect, or any proxy trap — so the
+ * envelope deliberately carries no contents: only retention state, the safe
+ * typeof-grade type, and the `opaque: true` marker. A retained value remains
+ * reachable as `$_`. The chain is the same rich -> minimal -> output-limit as
+ * the JSON projector's.
  */
 function projectOpaqueCompletion(
   value: unknown,
-  id: number | undefined,
+  retained: boolean,
   remaining: number,
   maxOutputBytes: number,
 ): DoneFragment {
@@ -1643,25 +1249,18 @@ function projectOpaqueCompletion(
     : remaining
   const type = completionType(value)
   const rich = capturedObjectCreate(null) as Record<string, unknown>
-  if (id !== undefined) {
-    rich[COMPLETION_HISTORY_GLOBAL] = id
-    rich.use = `${COMPLETION_HISTORY_GLOBAL}(${id})`
-  }
-  rich.retained = id !== undefined
+  rich.retained = retained
   rich.type = type
   rich.opaque = true
   // The value was never measured (measuring it would run the program's own
   // code), so there is no capture size to report and no reason to invent one.
-  if (id === undefined) rich.reason = 'opaque history budget exceeded'
+  if (!retained) rich.reason = 'opaque retention budget exceeded'
   rich.truncated = true
   const richJson = capturedJsonStringify(rich)
   if (capturedBufferByteLength(richJson, 'utf8') <= budget) return { json: richJson }
 
   const minimal = capturedObjectCreate(null) as Record<string, unknown>
-  if (id !== undefined) {
-    minimal[COMPLETION_HISTORY_GLOBAL] = id
-    minimal.use = `${COMPLETION_HISTORY_GLOBAL}(${id})`
-  }
+  minimal.retained = retained
   minimal.type = type
   minimal.opaque = true
   minimal.truncated = true
@@ -1671,37 +1270,29 @@ function projectOpaqueCompletion(
 }
 
 /**
- * Prepare the program's completion value; only lossless JSON crosses, whole when
- * it is small enough and as a bounded reference when it is not. This is also the
- * one place the history can retain from: it holds the live value, its exact
- * serialized size and its node count at once, and it runs before the run's
- * Inspector object group is released. Reached only from the SUCCESS arm of the
- * boundary, so an exception, abort, timeout, cancellation or output overflow
- * never opens a slot.
+ * Prepare a program completion. Small lossless JSON crosses whole; large JSON
+ * crosses as a bounded preview; non-JSON live values cross as opaque metadata.
+ * Every successful non-undefined completion decides the single retained slot
+ * before the run's Inspector object group is released. A rejected completion
+ * clears the previous slot, while `undefined` deliberately leaves it untouched.
  *
- * A value the walk refuses is NOT a failed cell: it is a live object whose
- * generation-local retention the opaque budgets decide, answered with a fixed
- * envelope. The one walk does double duty — it classifies, and it charges the
- * opaque slot with what it accounted for before refusing — so a second pass that
- * could fire user getters again is never taken.
- *
- * Validity is judged over the part the bounded walk reached. A value whose tail
- * lies past the capture ceiling is never read, so a bigint hiding there is never
- * found and the run succeeds with a projection rather than failing. This avoids
- * serializing 64 MiB merely to discover it was unusable and costs the model
- * nothing real: the history retains the original object, not the snapshot, so
- * `$out(id)` still returns the exact value. The completion-projection tests pin
- * that observable boundary.
+ * The one bounded walk classifies the value and gathers the applicable admission
+ * charge. It is never repeated because another traversal could invoke program
+ * getters again. Retained values are always the program's originals, preserving
+ * exact identity through `$_`.
  */
 function prepareCompletion(value: unknown, remaining: number, maxOutputBytes: number): DoneFragment {
   if (value === undefined) return {}
   // The walk may stop only once the value is beyond BOTH uses it could still be
-  // put to. Taking the retention ceiling alone would let a deployment that
-  // retains little turn ordinary mid-sized results into references, which is a
-  // model-visible contract decided by an unrelated knob.
+  // put to. A small retention ceiling must not turn an otherwise ordinary
+  // mid-sized result into a preview.
   const full = projectionLimits.maxCompletionFullBytes
-  const entry = completionLimits.maxCompletionHistoryEntryBytes
-  const stats = newCaptureStats(completionLimits.maxCompletionHistoryNodes, entry > full ? entry : full, full)
+  const retainedBytes = retentionLimits.maxCompletionRetainedBytes
+  const stats = newCaptureStats(
+    retentionLimits.maxCompletionRetainedNodes,
+    retainedBytes > full ? retainedBytes : full,
+    full,
+  )
   const slot = capturedObjectCreate(null) as ProjectionSlot
   slot.node = undefined
   let snapshot: unknown
@@ -1709,31 +1300,21 @@ function prepareCompletion(value: unknown, remaining: number, maxOutputBytes: nu
     snapshot = snapshotValue(value, new CapturedSet<object>(), stats, slot)
   } catch {
     // NON-JSON live value: retain it under the opaque budgets and answer with
-    // the fixed envelope. The walk already stopped at the first thing it would
-    // not render — a bigint, a function, a non-plain prototype, a getter that
-    // threw, a revoked proxy — and none of the program's own hooks were needed
-    // to say so. The cell is a SUCCESS either way.
+    // fixed metadata. The walk already stopped at the first thing it would not
+    // render, so no program hook is consulted merely to present the result.
     projectedCompletion = true
-    const id = retainOpaqueCompletion(value, stats)
-    runMetrics.retained = id !== undefined
-    runMetrics.rejected = id === undefined
-    runMetrics.historyEntries = jsonEntryCount()
-    runMetrics.historyBytes = retainedBytes
-    runMetrics.historyOpaqueEntries = opaqueEntryCount()
-    runMetrics.historyOpaqueBytes = opaqueBytes
-    return projectOpaqueCompletion(value, id, remaining, maxOutputBytes)
+    const retained = retainOpaqueCompletion(value, stats)
+    runMetrics.retained = retained
+    runMetrics.rejected = !retained
+    return projectOpaqueCompletion(value, retained, remaining, maxOutputBytes)
   }
   projectedCompletion = true
   if (stats.aborted) {
-    // Past the admission ceiling: unmeasurable without finishing a walk that was
-    // abandoned for good reason, and unretainable whatever the measurement would
-    // have said.
+    // Past the capture ceiling: exact measurement and retention are both
+    // impossible without resuming a walk that was deliberately bounded.
+    latestCompletion = undefined
     runMetrics.rejected = true
-    runMetrics.historyEntries = jsonEntryCount()
-    runMetrics.historyBytes = retainedBytes
-    runMetrics.historyOpaqueEntries = opaqueEntryCount()
-    runMetrics.historyOpaqueBytes = opaqueBytes
-    return projectCompletion(value, undefined, undefined, slot.node, remaining, maxOutputBytes)
+    return projectCompletion(value, false, undefined, slot.node, remaining, maxOutputBytes)
   }
   let json: string
   try {
@@ -1743,20 +1324,16 @@ function prepareCompletion(value: unknown, remaining: number, maxOutputBytes: nu
     return boundedFailure('invalid-output', 'program completion must be lossless JSON', remaining, maxOutputBytes)
   }
   const bytes = capturedBufferByteLength(json, 'utf8')
-  const id = retainCompletion(value, bytes, stats)
+  const retained = retainCompletion(value, bytes, stats)
   runMetrics.captureBytes = bytes
   runMetrics.captureNodes = stats.nodes
-  runMetrics.retained = id !== undefined
-  runMetrics.rejected = id === undefined
-  runMetrics.historyEntries = jsonEntryCount()
-  runMetrics.historyBytes = retainedBytes
-  runMetrics.historyOpaqueEntries = opaqueEntryCount()
-  runMetrics.historyOpaqueBytes = opaqueBytes
+  runMetrics.retained = retained
+  runMetrics.rejected = !retained
   if (bytes <= projectionLimits.maxCompletionFullBytes && bytes <= remaining) {
     projectedCompletion = false
     return { json }
   }
-  return projectCompletion(value, id, bytes, slot.node, remaining, maxOutputBytes)
+  return projectCompletion(value, retained, bytes, slot.node, remaining, maxOutputBytes)
 }
 
 /** Prepare a thrown program value as one concise diagnostic; internal stacks are not model-actionable. */
@@ -1914,7 +1491,6 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
   const run: ActiveRun = {
     id: message.runId,
     nonce: message.nonce,
-    completionId: message.completion.id,
     logs: new LogBuffer(message.maxOutputBytes, message.runId, message.nonce),
     pending: new CapturedMap<number, PendingCall>(),
     nextCallId: 1,
@@ -1933,15 +1509,14 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
   try {
     // Inside the guard with the rest of the setup: a malformed run message must
     // still reach a terminal, not strand the host waiting out its wall clock.
-    completionLimits = message.completion.limits
+    retentionLimits = message.completion.retention
     projectionLimits = message.completion.projection
-    opaqueLimits = message.completion.opaque
-    installCompletionIntrinsics()
+    installCompletionIntrinsic()
     installNamespaces(message.namespaces)
     const parameters: ReplEvaluateParameters = {
-      // The directive and the program's first line deliberately share a
-      // physical line, so every later source line keeps its original number.
-      expression: `'use strict';${message.code}\n//# sourceURL=dsh-prime-cell-${run.id}.mjs`,
+      // Keep the directive and neutral completion on the program's first physical
+      // line so declarations yield undefined without shifting later source lines.
+      expression: `'use strict';void 0;${message.code}\n//# sourceURL=dsh-prime-cell-${run.id}.mjs`,
       objectGroup,
       includeCommandLineAPI: false,
       silent: true,
@@ -2000,10 +1575,6 @@ async function startRun(message: Extract<HostToRealm, { type: 'run' }>): Promise
   // program: a completion the model built to look like an envelope travels the
   // ordinary path and arrives without it. Set only alongside a value — a chain
   // that ran out of budget ends in `output-limit`, which is not a projection.
-  if (refusedAccesses > 0) {
-    runMetrics.refused = refusedAccesses
-    refusedAccesses = 0
-  }
   const projected = projectedCompletion && done.json !== undefined ? { projected: run.nonce } : {}
   post({ type: 'done', runId: run.id, nonce: run.nonce, ...done, ...projected, metrics: runMetrics })
 }

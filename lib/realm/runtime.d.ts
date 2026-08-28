@@ -16,7 +16,7 @@
 import { Service } from '@deepseek-ai/cordis';
 import type { Context } from '@deepseek-ai/cordis';
 import type { CodeRunRequest } from '@deepseek-ai/dsh-code-runtime';
-import type { PrimeRunResult, RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits } from './protocol.js';
+import type { PrimeRunResult, RealmCompletionProjectionLimits, RealmCompletionRetentionLimits } from './protocol.js';
 import type { RealmBudgets, RealmMetrics } from './realm.js';
 /** Everything the runtime needs that is not a per-run input. */
 export interface PrimeRealmRuntimeOptions {
@@ -29,20 +29,15 @@ export interface PrimeRealmRuntimeOptions {
     stateDirectory: string;
     /** Per-run ceilings handed to every realm this runtime creates. */
     budgets: RealmBudgets;
-    /** Completion-history ceilings for every realm this runtime creates. Blank
-     * fields take the runtime defaults.
-     */
-    completionHistory?: Partial<RealmCompletionHistoryLimits>;
     /**
-     * Opaque (non-JSON) history ceilings for every realm this runtime creates.
-     * Blank fields take the runtime defaults; the opaque store is an independent
-     * budget from {@link completionHistory}.
+     * Single-slot completion retention ceilings for every realm this runtime
+     * creates. Blank fields take the runtime defaults.
      */
-    completionOpaque?: Partial<RealmCompletionOpaqueLimits>;
+    completionRetention?: Partial<RealmCompletionRetentionLimits>;
     /**
      * Projection ceilings for every realm this runtime creates: the size past
-     * which a completion is referenced rather than shown, and how much a reference
-     * may itself cost. Blank fields take the runtime defaults.
+     * which a completion is projected rather than shown verbatim, and how much a
+     * bounded envelope may itself cost. Blank fields take the runtime defaults.
      */
     completionProjection?: Partial<RealmCompletionProjectionLimits>;
     /** Realms that may hold a worker at once; admission past it reclaims or refuses. */
@@ -58,14 +53,13 @@ export interface PrimeRealmRuntimeOptions {
  */
 export declare class PrimeRealmRuntime extends Service {
     private readonly budgets;
-    private readonly completionHistory;
-    private readonly completionOpaque;
+    private readonly completionRetention;
     private readonly completionProjection;
     /**
      * Counters inherited from realms this runtime has already retired, so the
      * totals describe the whole process rather than only the realms still pooled.
-     * A retired realm holds nothing, so its history LEVELS are dropped here rather
-     * than carried forward.
+     * A retired realm holds nothing, so its latest-completion LEVELS are dropped
+     * here rather than carried forward.
      */
     private readonly retiredMetrics;
     /** The deployment's full output cap, which a pre-worker failure may use whole. */

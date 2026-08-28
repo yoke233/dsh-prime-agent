@@ -4,7 +4,7 @@
 // questions with numbers:
 //   1. Is projection cost bounded by the BUDGET rather than by the value size?
 //      (It must be, or large completions stay expensive after Phase 2.)
-//   2. What does a rich projection and a minimal reference envelope actually
+//   2. What does a rich projection and a minimal handle-free envelope actually
 //      cost in wire bytes, so maxCompletionProjectionBytes has a floor?
 //
 // Usage: node --expose-gc bench/projection-bench.mjs
@@ -67,12 +67,10 @@ function project(value, limits, budget, depth = 0) {
 
 const typeOf = (value) => (value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value)
 
-/** Rich projection envelope (plan §4.3). */
-function richEnvelope(id, value, captureBytes, limits) {
+/** Rich handle-free envelope for the latest retained completion. */
+function richEnvelope(value, captureBytes, limits) {
   const budget = { nodes: limits.maxNodes }
   return {
-    $out: id,
-    use: `$out(${id})`,
     retained: true,
     type: typeOf(value),
     serializedBytesAtCapture: captureBytes,
@@ -81,17 +79,17 @@ function richEnvelope(id, value, captureBytes, limits) {
   }
 }
 
-/** Minimal reference envelope — the last rung before output-limit (plan §6.1). */
-function minimalEnvelope(id, value, captureBytes, retained = true) {
-  return { $out: id, use: `$out(${id})`, retained, type: typeOf(value), serializedBytesAtCapture: captureBytes }
+/** Minimal handle-free envelope — the last rung before output-limit. */
+function minimalEnvelope(value, captureBytes, retained = true) {
+  return { retained, type: typeOf(value), serializedBytesAtCapture: captureBytes, truncated: true }
 }
 
 const out = { node: process.version, limits: LIMITS, rows: [], envelopeFloor: {} }
 
-// Worst-case constants for the minimal envelope: largest plausible id and bytes.
+// Worst-case constants for the minimal envelope: longest type and byte count.
 out.envelopeFloor = {
-  minimalSmallestBytes: utf8Bytes(stringify(minimalEnvelope(1, [], 2))),
-  minimalWorstCaseBytes: utf8Bytes(stringify(minimalEnvelope(999999999, {}, 9007199254740991, false))),
+  minimalSmallestBytes: utf8Bytes(stringify(minimalEnvelope([], 2))),
+  minimalWorstCaseBytes: utf8Bytes(stringify(minimalEnvelope(() => {}, Number.MAX_SAFE_INTEGER, false))),
   richLimitsUsed: LIMITS,
 }
 
@@ -103,7 +101,7 @@ for (const size of [1, 8, 16, 64]) {
     const runs = []
     for (let iteration = 0; iteration < 7; iteration++) {
       const t0 = performance.now()
-      const envelope = richEnvelope(17, fixture, captureBytes, LIMITS)
+      const envelope = richEnvelope(fixture, captureBytes, LIMITS)
       const json = stringify(envelope)
       runs.push({ ms: performance.now() - t0, bytes: utf8Bytes(json) })
     }
@@ -113,7 +111,7 @@ for (const size of [1, 8, 16, 64]) {
       mib: size,
       captureBytes,
       richProjectionBytes: fastest.bytes,
-      minimalBytes: utf8Bytes(stringify(minimalEnvelope(17, fixture, captureBytes))),
+      minimalBytes: utf8Bytes(stringify(minimalEnvelope(fixture, captureBytes))),
       projectMinMs: ms(fastest.ms),
       reductionRatio: Math.round((captureBytes / fastest.bytes) * 10) / 10,
     }

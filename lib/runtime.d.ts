@@ -36,17 +36,17 @@ export interface Config {
     maxHostCallsPerRun?: number;
     /** Host binding calls one run may have in flight at once. */
     maxParallelHostCallsPerRun?: number;
-    /** Retained completions one Prime realm generation may hold at once. */
-    maxCompletionHistoryEntries?: number;
-    /** Combined capture-time serialized bytes across a realm's retained completions. */
-    maxCompletionHistoryEstimatedBytes?: number;
-    /** Combined object-graph nodes across a realm's retained completions. */
-    maxCompletionHistoryNodes?: number;
-    /** Capture-time serialized bytes one single retained completion may occupy. */
-    maxCompletionHistoryEntryBytes?: number;
+    /** Exact serialized bytes the latest lossless-JSON completion may occupy. */
+    maxCompletionRetainedBytes?: number;
+    /** Object-graph nodes the latest lossless-JSON completion may occupy. */
+    maxCompletionRetainedNodes?: number;
+    /** Classification-walk byte charge the latest opaque completion may occupy. */
+    maxCompletionOpaqueBytes?: number;
+    /** Classification-walk nodes the latest opaque completion may occupy. */
+    maxCompletionOpaqueNodes?: number;
     /** Serialized bytes a completion may occupy and still reach the model verbatim. */
     maxCompletionFullBytes?: number;
-    /** Serialized bytes one bounded completion reference may occupy. */
+    /** Serialized bytes one bounded completion envelope may occupy. */
     maxCompletionProjectionBytes?: number;
 }
 export declare const Config: z<Config>;

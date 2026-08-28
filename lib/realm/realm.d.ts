@@ -12,15 +12,15 @@
  * @module dsh-prime-agent/realm/realm
  */
 import type { CodeRunRequest } from '@deepseek-ai/dsh-code-runtime';
-import type { PrimeRunResult, RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits } from './protocol.js';
-export type { RealmCompletionHistoryLimits, RealmCompletionOpaqueLimits, RealmCompletionProjectionLimits, } from './protocol.js';
+import type { PrimeRunResult, RealmCompletionProjectionLimits, RealmCompletionRetentionLimits } from './protocol.js';
+export type { RealmCompletionProjectionLimits, RealmCompletionRetentionLimits, } from './protocol.js';
 /**
  * Bounded counters for one realm's completion traffic.
  *
- * Deliberately content-free: sizes, counts and the resulting history levels, and
- * nothing that could identify a value, a path, a credential or a session. The
- * reduction ratio `projectionBytes / captureBytes` is left to the reader rather
- * than stored, so the two numbers it comes from stay independently checkable.
+ * Deliberately content-free: sizes and counts, with nothing that could identify
+ * a value, path, credential or session. The reduction ratio
+ * `projectionBytes / captureBytes` is left to the reader rather than stored, so
+ * the two numbers it comes from stay independently checkable.
  */
 export interface RealmMetrics {
     /** Completions the model received verbatim. */
@@ -37,25 +37,10 @@ export interface RealmMetrics {
     projectionBytes: number;
     completionsRetained: number;
     completionsRejected: number;
-    slotsEvicted: number;
-    /** Handles asked for and refused because they had expired. */
-    handlesExpired: number;
-    /** History accesses refused for running outside their own cell. */
-    accessesRefused: number;
-    /** Slots and capture bytes the LOSSLESS-JSON history held at last settlement. */
-    historyEntries: number;
-    historyBytes: number;
-    /** Opaque slots and capture-walk bytes the opaque history held at last settlement. */
-    historyOpaqueEntries: number;
-    historyOpaqueBytes: number;
 }
 /** A zeroed counter set, and the shape every accumulator here starts from. */
 export declare function emptyRealmMetrics(): RealmMetrics;
-/**
- * Fold one realm's counters into a running total. The `history*` pair are LEVELS
- * rather than deltas, so they are summed across realms — the total is what the
- * pool holds — but never accumulated over time within one realm.
- */
+/** Fold one realm's counters into a running total. */
 export declare function addRealmMetrics(total: RealmMetrics, part: RealmMetrics): RealmMetrics;
 /** Per-run resource ceilings. Every field is an increment for ONE run, not a realm lifetime total. */
 export interface RealmBudgets {
@@ -104,8 +89,7 @@ export declare class PersistentRealm {
     /** Opaque routing identity; never rendered into a result or diagnostic. */
     readonly realmId: string;
     private readonly budgets;
-    private readonly completionHistory;
-    private readonly completionOpaque;
+    private readonly completionRetention;
     private readonly completionProjection;
     private readonly counters;
     private readonly queue;
@@ -123,10 +107,8 @@ export declare class PersistentRealm {
     constructor(options: {
         realmId: string;
         budgets: RealmBudgets;
-        /** Completion-history ceilings; every blank field takes its runtime default. */
-        completionHistory?: Partial<RealmCompletionHistoryLimits>;
-        /** Opaque (non-JSON) history ceilings; every blank field takes its runtime default. */
-        completionOpaque?: Partial<RealmCompletionOpaqueLimits>;
+        /** Single-slot completion retention ceilings; every blank field takes its runtime default. */
+        completionRetention?: Partial<RealmCompletionRetentionLimits>;
         /** Projection ceilings; every blank field takes its runtime default. */
         completionProjection?: Partial<RealmCompletionProjectionLimits>;
     });

@@ -16,7 +16,8 @@ import z from '@deepseek-ai/schemastery'
 import { PrimeRealmRuntime } from './realm/runtime.js'
 import { watchHostParent } from './realm/host-parent.js'
 import { installPrimePreset } from './realm/preset-install.js'
-import type { RealmBudgets, RealmCompletionHistoryLimits, RealmCompletionProjectionLimits } from './realm/realm.js'
+import { DEFAULT_COMPLETION_RETENTION_LIMITS } from './realm/protocol.js'
+import type { RealmBudgets, RealmCompletionProjectionLimits, RealmCompletionRetentionLimits } from './realm/realm.js'
 
 export const name = 'prime-code-runtime'
 
@@ -46,30 +47,20 @@ const OFFICIAL_DEFAULTS = {
 } as const
 
 /**
- * Completion-history ceilings are backed by the checked-in measurements under
- * `bench/results/` and restated here so the schema can publish them.
- * `DEFAULT_COMPLETION_HISTORY_LIMITS` in
- * `src/realm/protocol.ts` is the single source these must track.
+ * Single-slot completion retention fields, whose defaults come directly from
+ * `src/realm/protocol.ts`.
  */
-const COMPLETION_HISTORY_DEFAULTS = {
-  maxCompletionHistoryEntries: 16,
-  maxCompletionHistoryEstimatedBytes: 33_554_432,
-  maxCompletionHistoryNodes: 1_000_000,
-  maxCompletionHistoryEntryBytes: 8_388_608,
-} as const
-
-/** Config fields that make up one realm's completion-history limits. */
-const COMPLETION_HISTORY_FIELDS = [
-  'maxCompletionHistoryEntries',
-  'maxCompletionHistoryEstimatedBytes',
-  'maxCompletionHistoryNodes',
-  'maxCompletionHistoryEntryBytes',
+const COMPLETION_RETENTION_FIELDS = [
+  'maxCompletionRetainedBytes',
+  'maxCompletionRetainedNodes',
+  'maxCompletionOpaqueBytes',
+  'maxCompletionOpaqueNodes',
 ] as const
 
 /**
- * Completion projection ceilings, restated here on the same terms as the
- * history defaults above. `DEFAULT_COMPLETION_PROJECTION_LIMITS` in
- * `src/realm/protocol.ts` is the single source these must track.
+ * Completion projection ceilings, restated here so the host schema can publish
+ * the defaults from `DEFAULT_COMPLETION_PROJECTION_LIMITS` in
+ * `src/realm/protocol.ts`.
  */
 const COMPLETION_PROJECTION_DEFAULTS = {
   maxCompletionFullBytes: 65_536,
@@ -110,17 +101,17 @@ export interface Config {
   maxHostCallsPerRun?: number
   /** Host binding calls one run may have in flight at once. */
   maxParallelHostCallsPerRun?: number
-  /** Retained completions one Prime realm generation may hold at once. */
-  maxCompletionHistoryEntries?: number
-  /** Combined capture-time serialized bytes across a realm's retained completions. */
-  maxCompletionHistoryEstimatedBytes?: number
-  /** Combined object-graph nodes across a realm's retained completions. */
-  maxCompletionHistoryNodes?: number
-  /** Capture-time serialized bytes one single retained completion may occupy. */
-  maxCompletionHistoryEntryBytes?: number
+  /** Exact serialized bytes the latest lossless-JSON completion may occupy. */
+  maxCompletionRetainedBytes?: number
+  /** Object-graph nodes the latest lossless-JSON completion may occupy. */
+  maxCompletionRetainedNodes?: number
+  /** Classification-walk byte charge the latest opaque completion may occupy. */
+  maxCompletionOpaqueBytes?: number
+  /** Classification-walk nodes the latest opaque completion may occupy. */
+  maxCompletionOpaqueNodes?: number
   /** Serialized bytes a completion may occupy and still reach the model verbatim. */
   maxCompletionFullBytes?: number
-  /** Serialized bytes one bounded completion reference may occupy. */
+  /** Serialized bytes one bounded completion envelope may occupy. */
   maxCompletionProjectionBytes?: number
 }
 
@@ -134,10 +125,10 @@ export const Config: z<Config> = z.object({
   maxIdleMs: z.natural().min(1).default(DEFAULT_MAX_IDLE_MS),
   maxHostCallsPerRun: z.natural().min(1).default(DEFAULT_MAX_HOST_CALLS_PER_RUN),
   maxParallelHostCallsPerRun: z.natural().min(1).default(DEFAULT_MAX_PARALLEL_HOST_CALLS_PER_RUN),
-  maxCompletionHistoryEntries: z.natural().min(1).default(COMPLETION_HISTORY_DEFAULTS.maxCompletionHistoryEntries),
-  maxCompletionHistoryEstimatedBytes: z.natural().min(1).default(COMPLETION_HISTORY_DEFAULTS.maxCompletionHistoryEstimatedBytes),
-  maxCompletionHistoryNodes: z.natural().min(1).default(COMPLETION_HISTORY_DEFAULTS.maxCompletionHistoryNodes),
-  maxCompletionHistoryEntryBytes: z.natural().min(1).default(COMPLETION_HISTORY_DEFAULTS.maxCompletionHistoryEntryBytes),
+  maxCompletionRetainedBytes: z.natural().min(1).default(DEFAULT_COMPLETION_RETENTION_LIMITS.maxCompletionRetainedBytes),
+  maxCompletionRetainedNodes: z.natural().min(1).default(DEFAULT_COMPLETION_RETENTION_LIMITS.maxCompletionRetainedNodes),
+  maxCompletionOpaqueBytes: z.natural().min(1).default(DEFAULT_COMPLETION_RETENTION_LIMITS.maxCompletionOpaqueBytes),
+  maxCompletionOpaqueNodes: z.natural().min(1).default(DEFAULT_COMPLETION_RETENTION_LIMITS.maxCompletionOpaqueNodes),
   maxCompletionFullBytes: z.natural().min(1).default(COMPLETION_PROJECTION_DEFAULTS.maxCompletionFullBytes),
   maxCompletionProjectionBytes: z.natural().min(1).default(COMPLETION_PROJECTION_DEFAULTS.maxCompletionProjectionBytes),
 }) as unknown as z<Config>
@@ -184,11 +175,11 @@ function realmBudgets(config: Config): RealmBudgets {
   }
 }
 
-/** One realm's completion-history ceilings, defaulted field by field. */
-function completionHistoryLimits(config: Config): RealmCompletionHistoryLimits {
-  const limits = {} as Record<(typeof COMPLETION_HISTORY_FIELDS)[number], number>
-  for (const field of COMPLETION_HISTORY_FIELDS) {
-    limits[field] = config[field] ?? COMPLETION_HISTORY_DEFAULTS[field]
+/** One realm's latest-completion retention ceilings, defaulted field by field. */
+function completionRetentionLimits(config: Config): RealmCompletionRetentionLimits {
+  const limits = {} as Record<(typeof COMPLETION_RETENTION_FIELDS)[number], number>
+  for (const field of COMPLETION_RETENTION_FIELDS) {
+    limits[field] = config[field] ?? DEFAULT_COMPLETION_RETENTION_LIMITS[field]
   }
   return limits
 }
@@ -231,7 +222,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   new PrimeRealmRuntime(ctx, {
     stateDirectory,
     budgets: realmBudgets(config),
-    completionHistory: completionHistoryLimits(config),
+    completionRetention: completionRetentionLimits(config),
     completionProjection: completionProjectionLimits(config),
     maxActiveRealms: config.maxActiveRealms ?? DEFAULT_MAX_ACTIVE_REALMS,
     maxIdleMs: config.maxIdleMs ?? DEFAULT_MAX_IDLE_MS,

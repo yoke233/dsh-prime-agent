@@ -45,7 +45,7 @@
     <rect x="862" y="84" width="290" height="100" rx="12" fill="#FDF6EC" stroke="#C97B22" stroke-width="1.5"/>
     <text x="1007" y="118" font-size="20" fill="#20262E" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">持久 Realm Worker</text>
     <text x="1007" y="146" font-size="17" fill="#4A5262" text-anchor="middle">live namespace &#183; cells</text>
-    <text x="1007" y="172" font-size="15" fill="#8A8FA0" text-anchor="middle">completion history（$_ &#183; $out(N)）</text>
+    <text x="1007" y="172" font-size="15" fill="#8A8FA0" text-anchor="middle">single latest completion（$_）</text>
 
     <!-- official lane -->
     <rect x="564" y="246" width="250" height="100" rx="12" fill="#FFFFFF" stroke="#DDD7C6" stroke-width="1.5"/>

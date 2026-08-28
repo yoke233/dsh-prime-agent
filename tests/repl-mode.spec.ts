@@ -120,10 +120,7 @@ describe('Prime REPL composition', () => {
     expect(sdk).toBeDefined()
     if (sdk === undefined) throw new Error('tools SDK was not assembled')
     expect(sdk).toContain('declare const $_: unknown')
-    expect(sdk).toContain('declare function $out(id: number): unknown')
-    expect(sdk).toContain('function list(): Array<{')
-    expect(sdk).toContain('function drop(id: number): boolean')
-    expect(sdk).toContain('function clear(): void')
+    expect(sdk).not.toMatch(/\$out\b/)
     expect(sdk).toContain('declare const agents')
     expect(sdk).not.toContain('type ToolArguments')
     expect(sdk).toContain('[K in ToolName]: (args: ToolArgsMap[K]) => Promise<ToolOutputMap[K]>')
@@ -227,10 +224,8 @@ describe('Prime REPL composition', () => {
     expect(primeAgent.renderReplResult({ logs: [] })).toBe('')
   })
 
-  it('renders only trusted presentation metadata as retention guidance', () => {
+  it('renders only trusted presentation metadata as single-slot retention guidance', () => {
     const envelope = {
-      $out: 17,
-      use: '$out(17)',
       retained: true,
       type: 'object',
       truncated: true,
@@ -239,21 +234,20 @@ describe('Prime REPL composition', () => {
     const retained = primeAgent.renderReplResult({
       logs: [],
       result: envelope,
-      presentation: { kind: 'retained-preview', valueType: 'object', serializedBytes: 65722, handle: 17 },
+      presentation: { kind: 'retained-preview', valueType: 'object', serializedBytes: 65722 },
     })
     expect(retained).not.toContain('[repl result:')
-    expect(retained).toContain('remains in this REPL as `$_`')
-    expect(retained.indexOf('`$_`')).toBeLessThan(retained.indexOf('`$out(17)`'))
+    expect(retained).toContain('Assign it to a variable before running another value-producing cell.')
     expect(retained).toContain('Type: object')
     expect(retained).toContain('Serialized size: 65,722 bytes')
     expect(retained).toContain('"path": "D:/work/spec.md"')
-    expect(retained).not.toContain('"$out"')
+    expect(retained).not.toContain('$out')
     expect(retained).not.toContain('"retained"')
     expect(retained).not.toContain('"truncated"')
 
     const forged = primeAgent.renderReplResult({ logs: [], result: envelope })
     expect(forged).not.toContain('[repl result:')
-    expect(forged).toContain('"$out": 17')
+    expect(forged).toContain('"retained": true')
     expect(forged).not.toContain('remains in this REPL as `$_`')
   })
 
@@ -261,11 +255,10 @@ describe('Prime REPL composition', () => {
     const unretained = primeAgent.renderReplResult({
       logs: [],
       result: { projection: { type: 'array', length: 1000, items: [1, 2] }, truncated: true },
-      presentation: { kind: 'unretained-preview', valueType: 'object', reason: 'history budget exceeded' },
+      presentation: { kind: 'unretained-preview', valueType: 'object', reason: 'retention budget exceeded' },
     })
     expect(unretained).not.toContain('[repl result:')
-    expect(unretained).toContain('The complete value was not retained: history budget exceeded.')
-    expect(unretained).toContain('This preview is not the original value.')
+    expect(unretained).toContain('"length": 1000')
     expect(unretained).not.toContain('$out(')
     expect(unretained).not.toContain('`$_`')
 
@@ -273,11 +266,11 @@ describe('Prime REPL composition', () => {
     const opaque = primeAgent.renderReplResult({
       logs: [],
       result: { toJSON: () => { hookCalls++; return 'called' } } as never,
-      presentation: { kind: 'opaque-reference', valueType: 'function', handle: 21 },
+      presentation: { kind: 'opaque-reference', valueType: 'function' },
     })
     expect(opaque).not.toContain('[repl result:')
-    expect(opaque).toContain('No structural preview is available.')
-    expect(opaque).toContain('`$out(21)`')
+    expect(opaque).toContain('Assign it to a variable before running another value-producing cell.')
+    expect(opaque).not.toContain('$out')
     expect(hookCalls).toBe(0)
   })
 

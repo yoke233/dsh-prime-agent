@@ -2,7 +2,7 @@
 
 > 状态：已实现  
 > 适用版本：`dsh-prime-agent` 0.4.1 及以上  
-> 目标：定义 Prime Agent 的固定 REPL 教学、completion 保留、可信呈现 metadata 与模型可见文本契约。
+> 目标：定义 Prime Agent 的固定 REPL 教学、单槽 completion 保留、可信呈现 metadata 与模型可见文本契约。
 
 ## 1. 范围
 
@@ -10,7 +10,7 @@
 
 - Agent 收到的 Persistent TypeScript REPL 固定提示；
 - Host 工具结果进入 Realm 的数据形态；
-- cell completion 的 generation-local 保留和访问；
+- cell 最新 completion 的 generation-local 保留和访问；
 - Realm → Host 的可信 presentation metadata；
 - 外层 `repl` canonical value；
 - 模型可见的 notebook 文本；
@@ -35,25 +35,15 @@ Host 与 Realm 之间只传 lossless JSON：
 
 ### 2.2 保留层
 
-成功 cell 的末尾表达式由 runtime 自动进入当前 Worker generation 的 completion history：
+成功 cell 的非 `undefined` 末尾表达式由 runtime 自动尝试保留在当前 Worker generation 的唯一 completion 槽中：
 
 ```ts
-$_            // 最近一个已保留 completion
-$out(17)      // 读取较早的 completion
-$out.list()   // 有界 metadata
-$out.drop(17)
-$out.clear()
+$_            // 最近一个通过准入的非 undefined completion
 ```
 
-优先级：
+模型应优先把需要复用的工具结果和工作值赋给命名变量。`$_` 适合立即读取最新 completion；下一个产生非 `undefined` completion 的 cell 会替换它。completion 为 `undefined` 的 cell 不覆盖当前 `$_`，因此可先执行 `let saved = $_` 再继续工作。
 
-1. 模型已命名的变量；
-2. 最近 completion：`$_`；
-3. 更早 completion：`$out(id)`。
-
-`$out` 是函数，不是结果对象；`$out.property` 和 `$out[id]` 均不是合法访问方式。
-
-history 只在当前 Worker generation 内有效。hard kill、OOM、active abort、timeout、Worker exit 或 host restart 会使旧 handle 失效；后续访问抛 `CompletionExpiredError`。
+单槽只保留原始 value identity，不提供 numeric id、历史列表、淘汰或管理操作。hard kill、OOM、active abort、timeout、Worker exit 或 host restart 会丢失整个 Worker generation；下一次真正执行会收到 namespace-loss notice，旧 bindings 与 `$_` 均不可恢复。
 
 ### 2.3 呈现层
 
@@ -72,37 +62,34 @@ history 只在当前 Worker generation 内有效。hard kill、OOM、active abor
 ```text
 ## Persistent TypeScript REPL
 
-Use `repl` to execute TypeScript cells. Top-level `await` works. Variables,
-functions, and objects remain available while the REPL stays active. The final
-expression is the cell result; top-level `return` is invalid. A cell that fails to
-parse executes no code; correct its TypeScript syntax and retry it.
+Call only `repl` directly. In the TypeScript code passed to `repl`, use the
+preloaded `tools.*`, `agents.*`, and `jobs.*` APIs. Follow each generated
+declaration and its comments. `import` and `require` are unavailable.
 
-Call tools through `tools.*`, `agents.*`, and `jobs.*`. Pass arguments as
-TypeScript object literals. For identifier keys, write `key: 'value'`; never write a trailing quote after
-an unquoted key. Results are already parsed JavaScript values. Follow the provided TypeScript declarations; do not
-call `JSON.parse` on tool results or guess their fields. Assign values that you
-will reuse. If a value's shape is uncertain, inspect it with
-`Array.isArray(value)` and `Object.keys(value)`.
+Top-level `await` works; top-level `return` does not. Treat the REPL as a live
+notebook: successful top-level bindings remain available in later cells. Prefer `let`
+for named tool results and working values you may refine across cells. Before repeating
+a tool call, continue from the existing binding; reassign or transform it as needed. A
+parse failure executes nothing; fix the cell and retry.
+Pass TypeScript object literals, writing identifier keys as `key: 'value'`, not
+`key': 'value'`. Tool results are parsed JavaScript values; do not call
+`JSON.parse` on them. Inspect uncertain shapes with `Array.isArray(value)` and
+`Object.keys(value)`.
 
-`$_` is the latest available cell result. Retrieve an older result with
-`$out(id)`. `$out` is a function, so call `$out(id)`; do not use
-`$out.property` or `$out[id]`.
+`$_` is the latest available non-undefined result. A later value-producing cell
+replaces it, so assign reusable values to named variables before running that cell.
+Continue from variables or `$_` instead of parsing shortened display text. Backslashes
+in JSON previews are notation, not extra characters. Prefer forward-slash Windows
+paths such as `D:/work/project`.
 
-Displayed cell output may be shortened. Continue computation from your
-variables, `$_`, or `$out(id)` instead of parsing or copying displayed text.
-Backslashes shown inside a JSON preview are JSON notation, not additional
-characters in the underlying string. When writing Windows paths yourself,
-prefer forward slashes such as `D:/work/project`.
-
-Keep large source material in files. Keep only paths, compact indexes, helper
-functions, and task-relevant summaries in the REPL.
+Keep large source material in files and only compact working state in the REPL.
 ```
 
 固定提示不拼接：
 
 - 用户聊天或任务正文；
 - 设计过程和失败复盘；
-- 具体仓库、路径或历史 handle；
+- 具体仓库、路径或历史 completion 标识；
 - 上一 Session 或其他 Agent 的上下文；
 - 当前 catalog 中不存在的可选工具名。
 
@@ -129,7 +116,6 @@ type ReplPresentation =
       kind: 'retained-preview'
       valueType: string
       serializedBytes?: number
-      handle: number
     }
   | {
       kind: 'unretained-preview'
@@ -140,7 +126,6 @@ type ReplPresentation =
   | {
       kind: 'opaque-reference'
       valueType: string
-      handle: number
     }
 ```
 
@@ -152,7 +137,7 @@ Worker 在 runtime-authored projection terminal 中携带本次 run 的私有 no
 
 1. terminal 属于当前 run；
 2. `projected` 值等于当前 run nonce；
-3. envelope 字段、handle、type、size、retained 状态和取回表达式一致；
+3. envelope 的 type、size、retained 状态和分类一致；
 4. completion 通过 outer output ledger。
 
 只有全部通过，Host 才附加 `ReplPresentation`。
@@ -244,7 +229,7 @@ found 27 matches
 
 ```text
 The complete value remains in this REPL as `$_`.
-For older access, use `$out(17)`.
+Assign it to a variable before running another value-producing cell.
 Type: object
 Serialized size: 65,722 bytes
 
@@ -257,15 +242,15 @@ Preview:
 
 规则：
 
-- `$_` 必须先于 `$out(id)` 出现；
-- handle 必须已真实入槽；
+- presentation 不携带 numeric handle；
 - `valueType` 必须存在，包括 minimal reference；
-- preview 不显示内部 `$out`、`use`、`retained` 或 `truncated` 字段。
+- preview 不显示内部 `retained` 或 `truncated` 字段；
+- 提示必须说明在运行下一个产生 completion 的 cell 前先赋给命名变量。
 
 ### 6.6 Unretained preview
 
 ```text
-The complete value was not retained: history budget exceeded.
+The complete value was not retained: single-slot retention budget exceeded.
 This preview is not the original value. Recompute it or load it from a durable file.
 Type: object
 
@@ -273,15 +258,15 @@ Preview:
 { ... }
 ```
 
-未保留结果不得显示 `$_` 可恢复承诺或 `$out(id)` handle。
+未保留结果不得显示 `$_` 可恢复承诺；preview 不是原值，只能重新计算或从持久文件载入。
 
 ### 6.7 Opaque reference
 
-Map、Set、函数、BigInt、循环对象、class instance 或分类阶段拒绝 lossless JSON 的其他 live value 使用 opaque history：
+Map、Set、函数、BigInt、循环对象、class instance 或分类阶段拒绝 lossless JSON 的其他 live value 使用独立的 opaque 单槽预算：
 
 ```text
 The value remains in this REPL as `$_`.
-For older access, use `$out(21)`.
+Assign it to a variable before running another value-producing cell.
 Type: function
 No structural preview is available.
 ```
@@ -301,10 +286,10 @@ full → rich projection → typed minimal reference → output-limit
 - rich projection 超过 `maxCompletionProjectionBytes` 时降为 typed minimal reference；
 - minimal reference 仍装不进本次剩余 `maxOutputBytes` 时返回 `output-limit`；
 - retained minimal JSON 和 retained minimal opaque envelope 都必须携带安全 `type`；
-- 当前最坏合法 typed minimal envelope 上限为 105 bytes；
+- minimal envelope 不携带 numeric handle；
 - logs 与 completion 共用 `maxOutputBytes` ledger。
 
-原始 live value 是否保留由独立 history/opaque budgets 决定，与模型展示预算分离。
+原始 live value 是否保留由单槽预算决定，与模型展示预算分离：JSON 使用 `maxCompletionRetainedBytes` 与 `maxCompletionRetainedNodes`，opaque 使用 `maxCompletionOpaqueBytes` 与 `maxCompletionOpaqueNodes`。每类值独立判定是否可以成为最新值；预算拒绝会清空旧单槽，且不得声称被拒绝的新值可恢复。
 
 ## 8. Spill 组合
 
@@ -341,7 +326,7 @@ D:/work/project
 2. 同 Realm cell 严格串行；
 3. binding lease 按 run 撤销；
 4. hard kill 后显式 namespace-loss notice；
-5. handle 由 Host 全局单调分配且不复用；
+5. 单槽保留原始 value identity，`undefined` completion 不覆盖当前值，预算拒绝清空旧值且不声明可恢复；
 6. projection 来源由 nonce 验证；
 7. presentation metadata 不携带任务内容、路径、凭据或 Session identity；
 8. Prime 不重新实现工具 renderer，而是直接使用 DSH 已生成的 `result.content`；
@@ -370,7 +355,7 @@ npm run check:all
 
 真实 TUI 验收使用 `test-dsh-tui` packaged ConPTY runner，至少证明：
 
-- retained notice 出现且模型使用 `$_`；
+- retained notice 出现且模型使用 `$_` 或先保存为命名变量；
 - 模型按 generated output type 使用工具结果；
 - Windows 路径字符数保持正确；
 - 普通结果没有 `[repl result: ...]`、`[repl logs]` 或 Markdown fence；

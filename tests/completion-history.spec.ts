@@ -1,20 +1,4 @@
-/**
- * Completion-history behavior and lifecycle coverage.
- *
- * What is exercised here is the runtime-owned history itself: which completions
- * enter it, which handle they get, when they leave, and who is allowed to touch
- * them. The canonical completion shape is pinned by
- * `completion-contracts.spec.ts`.
- *
- * Two mechanics shape almost every test below and are worth stating once:
- *
- * - Handles are allocated by the HOST, one per dispatched run, from a counter
- *   that is monotonic for the whole process. Tests therefore never assert an
- *   absolute id; they assert ordering, absence and reuse.
- * - A top-level `const $out` is a REPL declaration, so it shadows the intrinsic
- *   for the rest of that realm's generation. Every naming-conflict case gets its
- *   own realm.
- */
+/** Single-slot completion retention and lifecycle coverage. */
 
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -22,9 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { CodeBindingFunction, CodeBindingNamespace, CodeJsonValue } from '@deepseek-ai/dsh-code-runtime'
 import { PersistentRealm } from '../src/realm/realm.js'
-import type { RealmBudgets, RealmCompletionHistoryLimits } from '../src/realm/realm.js'
+import type { RealmBudgets, RealmCompletionRetentionLimits } from '../src/realm/realm.js'
 import * as primeRuntime from '../src/runtime.js'
 
 const BUDGETS: RealmBudgets = {
@@ -47,995 +30,170 @@ afterEach(async () => {
 
 function createRealm(options: {
   budgets?: Partial<RealmBudgets>
-  completionHistory?: Partial<RealmCompletionHistoryLimits>
+  completionRetention?: Partial<RealmCompletionRetentionLimits>
 } = {}): PersistentRealm {
   const realm = new PersistentRealm({
     realmId: `realm-${realms.length}`,
     budgets: { ...BUDGETS, ...options.budgets },
-    ...options.completionHistory ? { completionHistory: options.completionHistory } : {},
+    ...options.completionRetention ? { completionRetention: options.completionRetention } : {},
   })
   realms.push(realm)
   return realm
 }
 
-/* eslint-disable @typescript-eslint/no-explicit-any -- test bindings receive already-validated JSON */
-function tools(functions: Record<string, (args: any) => Promise<CodeJsonValue>>): CodeBindingNamespace {
-  return { global: 'tools', functions: functions as Record<string, CodeBindingFunction> }
-}
-
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>((done) => { resolve = done })
-  return { promise, resolve }
-}
-
-function stateDirectory(): string {
-  if (root === undefined) throw new Error('test root was not created')
-  return join(root, 'state')
-}
-
-/** Boot a real host row, so the plugin config actually reaches a realm. */
-async function startHost(config: Record<string, unknown> = {}): Promise<Context> {
-  root = await mkdtemp(join(tmpdir(), 'dsh-prime-history-'))
-  const context = new Context()
-  contexts.push(context)
-  await context.plugin(primeRuntime, { stateDirectory: stateDirectory(), ...config })
-  return context
-}
-
-/**
- * Deterministic 43-char unpadded base64url Realm identity for one test seed,
- * the exact shape the trusted seam accepts and the lease directory verifies.
- */
-function realmId(seed: string): string {
-  return createHash('sha256').update(seed).digest('base64url')
-}
-
-/** One `$out.list()` row, as the intrinsic renders it. */
-interface HistoryRow {
-  id: number
-  type: string
-  serializedBytesAtCapture: number
-  nodes: number
-  /** Own key total of a root object; 0 for every other type and for opaque values. */
-  keyCount: number
-  /** Present only on rows whose value is a retained NON-JSON live object. */
-  opaque?: true
-}
-
-/**
- * Read one value out of a cell through its LOGS.
- *
- * Reading through a completion would not be an observation: the cell's own
- * result enters the history like any other, so `$out.list()` as a final
- * expression would append a row on every look. A logged read completes with
- * `undefined`, which retains nothing and leaves `$_` where it was.
- */
 async function probe(realm: PersistentRealm, expression: string): Promise<unknown> {
   const result = await realm.run({ program: `console.log(JSON.stringify(${expression}))`, bindings: [] })
   expect(result.error).toBeUndefined()
   return JSON.parse(result.logs[0] as string) as unknown
 }
 
-async function history(realm: PersistentRealm): Promise<HistoryRow[]> {
-  return await probe(realm, '$out.list()') as HistoryRow[]
+function realmId(seed: string): string {
+  return createHash('sha256').update(seed).digest('base64url')
 }
 
-/** An EXPRESSION that renders whatever the given expression rejects with. */
-function caught(expression: string): string {
-  return `(() => { try { ${expression}; return { threw: false, name: '', message: '' } }`
-    + ` catch (error) { return { threw: true, name: String(error.name), message: String(error.message) } } })()`
+async function startHost(config: Record<string, unknown> = {}): Promise<Context> {
+  root = await mkdtemp(join(tmpdir(), 'dsh-prime-retention-'))
+  const context = new Context()
+  contexts.push(context)
+  await context.plugin(primeRuntime, { stateDirectory: join(root, 'state'), ...config })
+  return context
 }
 
-interface CaughtRejection {
-  threw: boolean
-  name: string
-  message: string
-}
-
-describe('completion history: what enters a slot', () => {
-  it('retains a completion the program never bound and hands it back through its handle', async () => {
-    // A large unnamed tool result remains reachable through `$out(id)` without
-    // the program naming anything.
+describe('latest completion slot', () => {
+  it('starts empty and leaves the slot empty after an undefined completion', async () => {
     const realm = createRealm()
-    const produced = await realm.run({
-      program: 'await globalThis.tools.rows({})',
-      bindings: [tools({ rows: async () => ({ rows: [{ n: 1 }, { n: 2 }, { n: 3 }] }) })],
-    })
-    // The canonical shape is unchanged: no envelope, no handle, no metadata.
-    expect(produced.error).toBeUndefined()
-    expect(produced.value).toEqual({ rows: [{ n: 1 }, { n: 2 }, { n: 3 }] })
+    const initial = await realm.run({ program: 'console.log(typeof $_)', bindings: [] })
+    expect(initial.logs).toEqual(['undefined'])
+    expect(initial.value).toBeUndefined()
 
-    const rows = await history(realm)
-    expect(rows).toHaveLength(1)
-    expect(rows[0]?.type).toBe('object')
-    expect(rows[0]?.serializedBytesAtCapture).toBeGreaterThan(0)
-    expect(rows[0]?.nodes).toBeGreaterThan(0)
-
-    const recomputed = await realm.run({
-      program: `$out(${rows[0]?.id ?? 0}).rows.reduce((total, row) => total + row.n, 0)`,
-      bindings: [],
-    })
-    expect(recomputed.value).toBe(6)
+    const statement = await realm.run({ program: 'const sideEffect = 1', bindings: [] })
+    expect(statement.value).toBeUndefined()
+    const after = await realm.run({ program: 'console.log(typeof $_)', bindings: [] })
+    expect(after.logs).toEqual(['undefined'])
+    expect(after.value).toBeUndefined()
   })
 
-  it('retains every falsy completion rather than treating it as absent', async () => {
-    // `0/false/null/''` are values. `undefined` is the only completion that
-    // produces no result at all, and therefore no slot.
-    const realm = createRealm()
-    for (const program of ['0', 'false', 'null', '""']) {
-      expect((await realm.run({ program, bindings: [] })).error).toBeUndefined()
-    }
-    expect(await history(realm)).toHaveLength(4)
-
-    const absent = createRealm()
-    expect((await absent.run({ program: 'undefined', bindings: [] })).error).toBeUndefined()
-    expect(await history(absent)).toEqual([])
-  })
-
-  it('reads the last completion through `$_`', async () => {
+  it('returns the latest retained completion through `$_`', async () => {
     const realm = createRealm()
     await realm.run({ program: '({ first: true })', bindings: [] })
     expect((await realm.run({ program: '$_', bindings: [] })).value).toEqual({ first: true })
-    // `$_` follows the last completion, which is now the `$_` read above.
-    expect((await realm.run({ program: '$_', bindings: [] })).value).toEqual({ first: true })
   })
 
-  it('answers an empty history with undefined rather than with an error', async () => {
-    // An empty history is normal for `$_` and `list()`, while a handle that names
-    // nothing is still an explicit expiry.
+  it('does not overwrite the slot when a model saves `$_` in a named variable', async () => {
     const realm = createRealm()
-    const empty = await realm.run({
-      program: '({ entries: $out.list().length, last: typeof $_ })',
-      bindings: [],
-    })
-    expect(empty.value).toEqual({ entries: 0, last: 'undefined' })
+    await realm.run({ program: 'const original = { token: "kept" }\noriginal', bindings: [] })
 
-    const missing = await realm.run({ program: caught('$out(1)'), bindings: [] })
-    expect(missing.value).toMatchObject({ threw: true, name: 'CompletionExpiredError' })
-    expect((missing.value as unknown as CaughtRejection).message).toContain('recompute it')
+    const saved = await realm.run({ program: 'let saved = $_', bindings: [] })
+    expect(saved.value).toBeUndefined()
+    expect(await probe(realm, 'saved === $_')).toBe(true)
+
+    await realm.run({ program: '({ replacement: true })', bindings: [] })
+    expect(await probe(realm, 'saved === $_')).toBe(false)
+    expect(await probe(realm, 'saved.token')).toBe('kept')
   })
 
-  it('opens no slot for an exception, and retains every successful completion', async () => {
-    // Only the SUCCESS arm of the boundary retains. `startRun`'s `finally`
-    // releases the object group on every path, so a slot opened there would also
-    // capture values from failed runs. A non-lossless successful completion is
-    // retained as opaque under its own budget.
+  it('lets other undefined-producing cells inspect without replacing the slot', async () => {
     const realm = createRealm()
-    expect((await realm.run({ program: 'throw new Error("boom")', bindings: [] })).error).toEqual({
-      kind: 'exception',
-      message: 'boom',
-    })
-    const opaque = await realm.run({ program: '({ fn: () => 1 })', bindings: [] })
-    expect(opaque.error).toBeUndefined()
-    expect(opaque.value).toMatchObject({ retained: true, opaque: true, truncated: true })
-    const rows = await history(realm)
-    expect(rows).toHaveLength(1)
-    expect(rows[0]?.opaque).toBe(true)
-    // An oversized completion also succeeds and retains; projection changes only
-    // the model-visible representation.
-    const projected = await realm.run({ program: '"y".repeat(70000)', bindings: [] })
-    expect(projected.error).toBeUndefined()
-    expect(await history(realm)).toHaveLength(2)
-    // None of the three cost the realm its heap.
-    expect(realm.generation).toBe(1)
+    await realm.run({ program: '({ answer: 42 })', bindings: [] })
+
+    const logged = await realm.run({ program: 'console.log($_.answer)', bindings: [] })
+    expect(logged.value).toBeUndefined()
+    expect(logged.logs).toEqual(['42'])
+    expect((await realm.run({ program: '$_.answer', bindings: [] })).value).toBe(42)
   })
 
-  it('burns no handle on a run that never reaches a worker', async () => {
-    // A queued run cancelled by its own signal never dispatches, so it never
-    // reserves a handle; the ids on either side of it stay adjacent.
+  it('replaces the slot for every later retained value', async () => {
     const realm = createRealm()
-    const gate = deferred<CodeJsonValue>()
-    const blocking = realm.run({
-      program: 'await globalThis.tools.park({})\n;({ blocking: true })',
-      bindings: [tools({ park: async () => await gate.promise })],
-    })
-    const controller = new AbortController()
-    const queued = realm.run({ program: '({ queued: true })', bindings: [], signal: controller.signal })
-    controller.abort(new Error('cancelled while queued'))
-    expect((await queued).error?.kind).toBe('abort')
-    gate.resolve({ ok: true })
-    expect((await blocking).value).toEqual({ blocking: true })
-
-    await realm.run({ program: '({ after: true })', bindings: [] })
-    const rows = await history(realm)
-    expect(rows.map(row => row.type)).toEqual(['object', 'object'])
-    expect((rows[1]?.id ?? 0) - (rows[0]?.id ?? 0)).toBe(1)
+    await realm.run({ program: '({ sequence: 1 })', bindings: [] })
+    await realm.run({ program: '({ sequence: 2 })', bindings: [] })
+    expect((await realm.run({ program: '$_.sequence', bindings: [] })).value).toBe(2)
   })
-})
 
-describe('completion history: identity', () => {
-  it('retains the program\'s own object, so a later in-place change is visible through the handle', async () => {
-    // The history holds the ORIGINAL reference, not a copy. This keeps a user
-    // binding and the history from doubling the heap and explains why
-    // `serializedBytesAtCapture` names the moment it was taken.
+  it('preserves exact identity when the same JSON object is completed again', async () => {
     const realm = createRealm()
-    await realm.run({ program: 'const shared = { rows: [1, 2] }\nshared', bindings: [] })
-    const [row] = await history(realm)
-    const id = row?.id ?? 0
+    await realm.run({ program: 'const held = { nested: { value: 1 } }\nheld', bindings: [] })
+    expect(await probe(realm, '$_ === held')).toBe(true)
 
-    const same = await realm.run({ program: `$out(${id}) === shared`, bindings: [] })
-    expect(same.value).toBe(true)
-
-    const mutated = await realm.run({ program: `shared.rows.push(3)\n$out(${id})`, bindings: [] })
-    expect(mutated.value).toEqual({ rows: [1, 2, 3] })
-    // The capture-time byte count deliberately does NOT follow the mutation.
-    const [after] = await history(realm)
-    expect(after?.serializedBytesAtCapture).toBe(row?.serializedBytesAtCapture)
-  })
-
-  it('reuses the slot, the handle and the FIFO position when the same object completes again', async () => {
-    // Checked-in recirculation measurements under `bench/results/` show per-slot
-    // billing flushing the history in two of three traces, in the worst shape:
-    // the object remains stored under a new id while the handle the model held
-    // has expired. Two entries of budget make that failure observable.
-    const realm = createRealm({ completionHistory: { maxCompletionHistoryEntries: 2 } })
-    await realm.run({ program: 'const alpha = { tag: "alpha" }\nalpha', bindings: [] })
-    await realm.run({ program: 'const beta = { tag: "beta" }\nbeta', bindings: [] })
-    const before = await history(realm)
-    expect(before.map(entry => entry.type)).toEqual(['object', 'object'])
-
-    const recirculated = await realm.run({ program: `$out(${before[0]?.id ?? 0})`, bindings: [] })
-    expect(recirculated.value).toEqual({ tag: 'alpha' })
-
-    const after = await history(realm)
-    // No new slot, no new handle, and alpha keeps its original FIFO position:
-    // under per-slot billing beta would have been evicted here.
-    expect(after.map(entry => entry.id)).toEqual(before.map(entry => entry.id))
-    expect(await probe(realm, `$out(${before[1]?.id ?? 0})`)).toEqual({ tag: 'beta' })
-    // `$_` follows the LAST COMPLETION, which is the reused slot rather than the
-    // newest one: an identity hit keeps its FIFO position, so reading the tail
-    // of the history would answer with beta here.
-    expect(await probe(realm, '$_')).toEqual({ tag: 'alpha' })
-  })
-
-  it('reuses a slot for a repeated object but never for a repeated primitive', async () => {
-    // Identity reuse is scoped to objects on purpose. `Object.is` on strings
-    // compares CONTENT, so two independently computed equal strings are not the
-    // same result in any sense the model would recognize — folding them together
-    // would park the newer one at the older one's FIFO position — and the
-    // comparison is O(length) against every slot on every capture.
-    const realm = createRealm()
-    await realm.run({ program: 'const twice = { n: 1 }\ntwice', bindings: [] })
-    await realm.run({ program: 'twice', bindings: [] })
-    expect(await history(realm)).toHaveLength(1)
-
-    const strings = createRealm()
-    await strings.run({ program: '"same"', bindings: [] })
-    await strings.run({ program: '"same"', bindings: [] })
-    const rows = await history(strings)
-    expect(rows.map(row => row.type)).toEqual(['string', 'string'])
-    expect(rows[0]?.id).not.toBe(rows[1]?.id)
-  })
-
-  it('keeps a user binding and the history from owning each other', async () => {
-    // Dropping the history's claim must not reach the program's own declaration,
-    // in either direction.
-    const realm = createRealm()
-    await realm.run({ program: 'const owned = { n: 1 }\nowned', bindings: [] })
-    const [row] = await history(realm)
-    const id = row?.id ?? 0
-
-    const dropped = await realm.run({ program: `({ dropped: $out.drop(${id}), binding: owned })`, bindings: [] })
-    expect(dropped.value).toEqual({ dropped: true, binding: { n: 1 } })
-
-    const gone = await realm.run({ program: caught(`$out(${id})`), bindings: [] })
-    expect(gone.value).toMatchObject({ threw: true, name: 'CompletionExpiredError' })
-    // The program's binding is untouched by the eviction of the runtime's claim.
-    expect((await realm.run({ program: 'owned', bindings: [] })).value).toEqual({ n: 1 })
-  })
-
-  it('keeps the retained object addressable after the program makes it non-serializable', async () => {
-    // Mutating a retained value into something non-JSON must not corrupt the
-    // history. Returning it again creates a SECOND retention under the opaque
-    // budgets for the same object the JSON slot already holds. Both handles
-    // answer with the same identity, and the cell keeps committed bindings.
-    const realm = createRealm()
-    await realm.run({ program: 'const spoiled = { n: 1 }\nspoiled', bindings: [] })
-    const [row] = await history(realm)
-    const id = row?.id ?? 0
-
-    const succeeded = await realm.run({
-      program: 'const keptBesideSpoiling = "kept"\nspoiled.fn = () => 1\nspoiled',
-      bindings: [],
-    })
-    expect(succeeded.error).toBeUndefined()
-    expect(succeeded.value).toMatchObject({ retained: true, opaque: true, truncated: true })
-    // The declaration that completed survives, as it did beside a failure.
-    expect(await probe(realm, 'keptBesideSpoiling')).toBe('kept')
-    // The JSON slot still holds the same object; only its serializability changed.
-    expect(await probe(realm, `typeof $out(${id}).fn`)).toBe('function')
-    // The second retention opened an OPAQUE slot for the same identity.
-    const rows = await history(realm)
-    expect(rows).toHaveLength(2)
-    expect(rows[0]?.opaque).toBeUndefined()
-    expect(rows[1]?.opaque).toBe(true)
-    expect(await probe(realm, `$out(${rows[1]?.id ?? 0}) === $out(${id})`)).toBe(true)
-  })
-})
-
-describe('completion history: budgets and eviction', () => {
-  it('evicts oldest first when the entry budget is full', async () => {
-    const realm = createRealm({ completionHistory: { maxCompletionHistoryEntries: 3 } })
-    for (const tag of ['a', 'b', 'c', 'd']) {
-      await realm.run({ program: `({ tag: ${JSON.stringify(tag)} })`, bindings: [] })
-    }
-    const rows = await history(realm)
-    expect(rows).toHaveLength(3)
-    const ids = rows.map(row => row.id)
-    expect(ids[0]).toBeLessThan(ids[1] as number)
-    expect(ids[1]).toBeLessThan(ids[2] as number)
-
-    const survivors = await realm.run({
-      program: `[${ids.map(id => `$out(${id}).tag`).join(', ')}]`,
-      bindings: [],
-    })
-    expect(survivors.value).toEqual(['b', 'c', 'd'])
-  })
-
-  it('refuses an oversized completion instead of clearing the history for it', async () => {
-    // A completion over the per-slot ceiling is not retained. Its canonical
-    // result is unchanged, and earlier handles are not sacrificed to make room
-    // for a value that cannot fit anyway.
-    const realm = createRealm({ completionHistory: { maxCompletionHistoryEntryBytes: 128 } })
-    await realm.run({ program: '({ small: true })', bindings: [] })
-    const before = await history(realm)
-    expect(before).toHaveLength(1)
-
-    const oversized = await realm.run({ program: '"y".repeat(400)', bindings: [] })
-    expect(oversized.error).toBeUndefined()
-    expect((oversized.value as string).length).toBe(400)
-    expect(await history(realm)).toEqual(before)
-    // The last-result handle is unchanged too: nothing was retained to move it.
-    expect((await realm.run({ program: '$_', bindings: [] })).value).toEqual({ small: true })
-  })
-
-  it('refuses a shared subgraph whose expansion the walk counted, without abandoning the walk', async () => {
-    // The checked-in node-density measurements under `bench/results/` cover a
-    // DAG whose small live graph expands into millions of boundary nodes. The
-    // node budget is judged while the walk runs, but tripping it does not stop
-    // the serialization needed for the current wire contract.
-    //
-    // This case guards two invariants stated on `CaptureStats.overNodeLimit`.
-    // The completion still crossing intact is what would break if the walk ever
-    // gained an early exit: this value's JSON fits the output cap easily, so
-    // bailing out would turn a successful cell into `invalid-output`. The
-    // history refusing it while the EARLIER entry survives is what would break
-    // if the budget were judged after the walk, or if refusal were reached by
-    // evicting first — both would spend the model's existing handles on a value
-    // that was never going to be retained.
-    const realm = createRealm({ completionHistory: { maxCompletionHistoryNodes: 200 } })
-    await realm.run({ program: '({ modest: true })', bindings: [] })
-    const before = await history(realm)
-
-    const dag = await realm.run({
-      program: `
-        let shared: unknown = { v: 1 }
-        for (let level = 0; level < 8; level++) shared = { a: shared, b: shared }
-        shared
-      `,
-      bindings: [],
-    })
-    // Nine live objects, 767 nodes once expanded: the completion still crosses,
-    // but the history refuses it.
-    expect(dag.error).toBeUndefined()
-    expect(await history(realm)).toEqual(before)
-  })
-
-  it('refuses a value too large for the whole history without evicting for it', async () => {
-    // The eviction loop must never run for a value that cannot fit an EMPTY
-    // store: emptying the history would trade every handle the model still holds
-    // for a value that still would not be retained. The per-slot ceiling alone
-    // does not catch this — here the value clears it and fails the total.
-    const realm = createRealm({
-      completionHistory: { maxCompletionHistoryEntryBytes: 4_096, maxCompletionHistoryEstimatedBytes: 256 },
-    })
-    await realm.run({ program: '({ small: true })', bindings: [] })
-    const before = await history(realm)
-    expect(before).toHaveLength(1)
-
-    const tooBig = await realm.run({ program: '"y".repeat(1000)', bindings: [] })
-    expect(tooBig.error).toBeUndefined()
-    expect(await history(realm)).toEqual(before)
-
-    // Same shape for the node budget: over the total, under the per-slot rule.
-    const nodeBound = createRealm({ completionHistory: { maxCompletionHistoryNodes: 4 } })
-    await nodeBound.run({ program: '[1, 2]', bindings: [] })
-    const nodeBefore = await history(nodeBound)
-    expect(nodeBefore).toHaveLength(1)
-    expect((await nodeBound.run({ program: '[1, 2, 3, 4, 5]', bindings: [] })).error).toBeUndefined()
-    expect(await history(nodeBound)).toEqual(nodeBefore)
-  })
-
-  it('publishes the key COUNT but never the keys themselves', async () => {
-    // The count is one small integer whatever the value's shape and answers how
-    // large the handle is. Names remain absent: the boundary admits a
-    // 20,000-character key, so sixteen of them in a row would make a
-    // quarter-megabyte metadata answer.
-    const realm = createRealm()
-    await realm.run({
-      program: 'const wide = {}\nfor (let i = 0; i < 40; i++) wide["k".repeat(500) + i] = i\nwide',
-      bindings: [],
-    })
-    const rows = await history(realm)
-    expect(rows).toHaveLength(1)
-    expect(Object.keys(rows[0] ?? {}).sort()).toEqual(['id', 'keyCount', 'nodes', 'serializedBytesAtCapture', 'type'])
-    expect(rows[0]?.keyCount).toBe(40)
-    // Bounded regardless of how wide the value was, and of how long its keys are.
-    expect(JSON.stringify(rows[0]).length).toBeLessThan(120)
-  })
-
-  it('validates every history limit as a positive safe integer', async () => {
-    for (const invalid of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2]) {
-      expect(() => new PersistentRealm({
-        realmId: 'invalid-history',
-        budgets: BUDGETS,
-        completionHistory: { maxCompletionHistoryEntries: invalid },
-      })).toThrow('maxCompletionHistoryEntries must be a positive safe integer')
-    }
-    // Blank fields take the runtime defaults rather than disabling the history.
-    const realm = createRealm({ completionHistory: { maxCompletionHistoryNodes: 4_096 } })
-    await realm.run({ program: '({ defaulted: true })', bindings: [] })
-    expect(await history(realm)).toHaveLength(1)
-  })
-})
-
-describe('completion history: explicit release', () => {
-  it('makes drop and clear idempotent', async () => {
-    const realm = createRealm()
-    await realm.run({ program: '({ one: 1 })', bindings: [] })
-    await realm.run({ program: '({ two: 2 })', bindings: [] })
-    const rows = await history(realm)
-    const id = rows[0]?.id ?? 0
-
-    expect(await probe(realm, `[$out.drop(${id}), $out.drop(${id}), $out.drop(-1)]`)).toEqual([true, false, false])
-    expect(await probe(realm, '[$out.clear(), $out.clear()]')).toEqual([1, 0])
-
-    const afterClear = await realm.run({
-      program: `({ entries: $out.list().length, last: typeof $_, gone: ${caught(`$out(${rows[1]?.id ?? 0})`)}.name })`,
-      bindings: [],
-    })
-    expect(afterClear.value).toEqual({ entries: 0, last: 'undefined', gone: 'CompletionExpiredError' })
-  })
-
-  it('charges `$out.list()` a slot of its own when it is the final expression', async () => {
-    // Reading the history through a completion is not an observation: the list
-    // is itself a value, so it enters like any other and moves `$_`. The rule is
-    // self-consistent, but it means `$out.list()` as a bare final expression
-    // costs a slot — which is why the tests here read through logs, and why the
-    // model-facing wording must not present it as a free glance.
-    const realm = createRealm()
-    await realm.run({ program: '({ produced: true })', bindings: [] })
-    const listed = await realm.run({ program: '$out.list()', bindings: [] })
-    expect((listed.value as unknown as HistoryRow[])).toHaveLength(1)
-
-    const rows = await history(realm)
-    expect(rows.map(row => row.type)).toEqual(['object', 'array'])
-    expect(await probe(realm, '$_')).toEqual([{
-      id: rows[0]?.id,
-      type: 'object',
-      serializedBytesAtCapture: rows[0]?.serializedBytesAtCapture,
-      nodes: rows[0]?.nodes,
-      keyCount: rows[0]?.keyCount,
-    }])
-  })
-
-  it('refuses a handle that is not an integer', async () => {
-    const realm = createRealm()
-    const refused = await realm.run({ program: caught('$out("1")'), bindings: [] })
-    expect(refused.value).toMatchObject({ threw: true, name: 'Error' })
-    expect((refused.value as unknown as CaughtRejection).message).toContain('integer completion handle')
-  })
-})
-
-describe('completion history: generation fencing', () => {
-  it('expires every handle a hard kill destroyed and never reissues its id', async () => {
-    // After a restart an old handle is ABSENT, never a hit on some other value.
-    // Host-side allocation guarantees it because the counter outlives the worker.
-    const realm = createRealm({ budgets: { maxWallMs: 400 } })
-    await realm.run({ program: '({ beforeKill: true })', bindings: [] })
-    const before = await history(realm)
-    const oldId = before[0]?.id ?? 0
-
-    expect((await realm.run({ program: 'for (;;) {}', bindings: [] })).error?.kind).toBe('timeout')
-    expect(realm.generation).toBe(2)
-
-    const survivors = await realm.run({
-      program: `({ entries: $out.list().length, stale: ${caught(`$out(${oldId})`)}.name })`,
-      bindings: [],
-    })
-    expect(survivors.value).toEqual({ entries: 0, stale: 'CompletionExpiredError' })
-
-    await realm.run({ program: '({ afterKill: true })', bindings: [] })
-    const after = await history(realm)
-    // The new generation does not restart the sequence, so the handle the model
-    // was holding cannot name the value that took its place.
-    expect(after[0]?.id).toBeGreaterThan(oldId)
-  })
-
-  it('spends a candidate handle only when the completion opens a new slot', async () => {
-    // The host reserves one handle per DISPATCHED run and the worker consumes it
-    // only to open a slot, so an identity hit leaves its run's handle unspent.
-    // The sequence therefore has gaps while staying strictly increasing — which
-    // is the property that matters, since a reissued number is what would let an
-    // old handle name somebody else's value.
-    const realm = createRealm()
-    await realm.run({ program: 'const held = { tag: "held" }\nheld', bindings: [] })
     await realm.run({ program: 'held', bindings: [] })
-    await realm.run({ program: '({ fresh: true })', bindings: [] })
-
-    const rows = await history(realm)
-    // Two slots, not three: the middle run reused the first one.
-    expect(rows).toHaveLength(2)
-    // Exactly one run sat between the two retained completions, and the handle
-    // it reserved was never spent.
-    expect((rows[1]?.id ?? 0) - (rows[0]?.id ?? 0)).toBe(2)
-    expect(await probe(realm, `$out(${rows[0]?.id ?? 0})`)).toEqual({ tag: 'held' })
+    expect(await probe(realm, '$_ === held')).toBe(true)
   })
 
-  it('never reissues a handle the model saw in a run that was then hard-killed', async () => {
-    // The scenario that rules out reporting the worker's counter back on `done`:
-    // logs reach the host as they are written, so the model can see a handle in
-    // a run that never settles normally. Allocating at dispatch means the
-    // counter has already moved on by the time the worker dies.
-    const realm = createRealm({ budgets: { maxWallMs: 400 } })
-    await realm.run({ program: '({ beforeKill: true })', bindings: [] })
-    const [row] = await history(realm)
-    const seen = row?.id ?? 0
-
-    const killed = await realm.run({
-      program: 'console.log("handle=" + $out.list()[0].id)\nfor (;;) {}',
-      bindings: [],
-    })
-    expect(killed.error?.kind).toBe('timeout')
-    // The model was told the handle even though the run producing it was killed.
-    expect(killed.logs).toEqual([`handle=${seen}`])
-    expect(realm.generation).toBe(2)
-
-    await realm.run({ program: '({ afterKill: true })', bindings: [] })
-    const rows = await history(realm)
-    expect(rows).toHaveLength(1)
-    expect(rows[0]?.id).toBeGreaterThan(seen)
-    const stale = await realm.run({ program: caught(`$out(${seen})`), bindings: [] })
-    expect(stale.value).toMatchObject({ threw: true, name: 'CompletionExpiredError' })
-  })
-
-  it('retains a value the walk ran out of stack on, as opaque', async () => {
-    // Checked-in deep-retention measurements under `bench/results/` show the
-    // recursion ceiling moves with stack state, so only behavior is asserted:
-    // the classification walk treats the RangeError as a non-lossless value,
-    // retains it as opaque, and lets the cell succeed without losing the heap.
+  it('leaves the retained value intact after a failed cell', async () => {
     const realm = createRealm()
-    await realm.run({ program: '({ retained: true })', bindings: [] })
-    const before = await history(realm)
-
-    const tooDeep = await realm.run({
-      program: 'let deep: unknown = { leaf: true }\nfor (let i = 0; i < 60000; i++) deep = { next: deep }\ndeep',
-      bindings: [],
-    })
-    expect(tooDeep.error).toBeUndefined()
-    expect(tooDeep.value).toMatchObject({ retained: true, opaque: true, truncated: true })
-    expect(realm.generation).toBe(1)
-    const after = await history(realm)
-    expect(after).toHaveLength(before.length + 1)
-    expect(after[after.length - 1]?.opaque).toBe(true)
+    await realm.run({ program: '({ beforeFailure: true })', bindings: [] })
+    expect((await realm.run({ program: 'throw new Error("boom")', bindings: [] })).error?.kind).toBe('exception')
+    expect((await realm.run({ program: '$_.beforeFailure', bindings: [] })).value).toBe(true)
   })
 
-  it('opens no slot when the worker dies mid-run', async () => {
-    const realm = createRealm()
-    await realm.run({ program: '({ beforeExit: true })', bindings: [] })
-    const [row] = await history(realm)
-
-    const exited = await realm.run({ program: 'process.exit(3)\n"unreachable"', bindings: [] })
-    expect(exited.error?.kind).toBe('worker-exit')
-    expect(realm.generation).toBe(2)
-
-    const survivors = await realm.run({
-      program: `({ entries: $out.list().length, stale: ${caught(`$out(${row?.id ?? 0})`)}.name })`,
-      bindings: [],
+  it('clears the former slot when a non-undefined completion exceeds retention', async () => {
+    const realm = createRealm({
+      completionRetention: { maxCompletionRetainedBytes: 32 },
     })
-    expect(survivors.value).toEqual({ entries: 0, stale: 'CompletionExpiredError' })
+    await realm.run({ program: '({ small: true })', bindings: [] })
+
+    const refused = await realm.run({ program: '"x".repeat(256)', bindings: [] })
+    expect(refused.value).toBe('x'.repeat(256))
+    expect((await realm.run({ program: 'typeof $_', bindings: [] })).value).toBe('undefined')
   })
 
-  it('opens no slot when an active run is aborted', async () => {
-    const realm = createRealm()
-    const gate = deferred<CodeJsonValue>()
-    // The realm freezes its injected globals on the first admission, so the
-    // namespace the aborted run parks on has to be declared from the start.
-    const parking = [tools({ park: async () => await gate.promise })]
-    await realm.run({ program: '({ beforeAbort: true })', bindings: parking })
-    const [row] = await history(realm)
-
-    const controller = new AbortController()
-    const aborted = realm.run({
-      program: 'await globalThis.tools.park({})\n;({ neverRetained: true })',
-      bindings: parking,
-      signal: controller.signal,
+  it('marks an oversized projected value unretained without a recovery handle', async () => {
+    const realm = createRealm({
+      completionRetention: { maxCompletionRetainedBytes: 64 },
+      budgets: { maxOutputBytes: 2_048 },
     })
-    // Let the run reach the parked call, so the abort lands on an ACTIVE run and
-    // hard-kills the worker rather than cancelling a queued one.
-    await new Promise((resolve) => { setTimeout(resolve, 100) })
-    controller.abort(new Error('caller cancelled'))
-    expect((await aborted).error?.kind).toBe('abort')
-    gate.resolve({ ok: true })
-    expect(realm.generation).toBe(2)
-
-    const survivors = await realm.run({
-      program: `({ entries: $out.list().length, stale: ${caught(`$out(${row?.id ?? 0})`)}.name })`,
-      bindings: [],
-    })
-    expect(survivors.value).toEqual({ entries: 0, stale: 'CompletionExpiredError' })
+    const result = await realm.run({ program: '"x".repeat(4_096)', bindings: [] })
+    expect(result.error).toBeUndefined()
+    expect(result.value).toMatchObject({ retained: false, type: 'string', truncated: true })
+    expect(result.value).not.toHaveProperty('use')
+    expect(result.presentation).toMatchObject({ kind: 'unretained-preview', valueType: 'string' })
+    expect((await realm.run({ program: 'typeof $_', bindings: [] })).value).toBe('undefined')
   })
 
-  it('keeps two realms from sharing a handle', async () => {
+  it('keeps independent realms from sharing their latest completion', async () => {
     const first = createRealm()
     const second = createRealm()
     await first.run({ program: '({ realm: "first" })', bindings: [] })
     await second.run({ program: '({ realm: "second" })', bindings: [] })
-    const firstRows = await history(first)
-    const secondRows = await history(second)
-    expect(firstRows[0]?.id).not.toBe(secondRows[0]?.id)
-
-    const crossed = await second.run({ program: caught(`$out(${firstRows[0]?.id ?? 0})`), bindings: [] })
-    expect(crossed.value).toMatchObject({ threw: true, name: 'CompletionExpiredError' })
-  })
-
-  it('refuses the history to a continuation that outlived its own run', async () => {
-    // History access uses the same run fencing as leased bindings, without
-    // changing the binding's revocation order.
-    const realm = createRealm()
-    const armed = await realm.run({
-      program: `
-        const detachedTrace = []
-        let releaseDetached
-        const detachedGate = new Promise(resolve => { releaseDetached = resolve })
-        void detachedGate.then(async () => {
-          try { detachedTrace.push('read ' + JSON.stringify($out.list())) } catch (error) { detachedTrace.push('list: ' + error.message) }
-          try { $out.clear(); detachedTrace.push('cleared') } catch (error) { detachedTrace.push('clear: ' + error.message) }
-          try { detachedTrace.push('last ' + String($_)) } catch (error) { detachedTrace.push('last: ' + error.message) }
-          try { $_ = 'stolen'; detachedTrace.push('assigned $_') } catch (error) { detachedTrace.push('set $_: ' + error.message) }
-          try { $out = 'stolen'; detachedTrace.push('assigned $out') } catch (error) { detachedTrace.push('set $out: ' + error.message) }
-          try { await globalThis.tools.echo({ n: 1 }); detachedTrace.push('called') } catch (error) { detachedTrace.push('call: ' + error.message) }
-        })
-        ;({ armed: true })
-      `,
-      bindings: [tools({ echo: async args => args })],
-    })
-    expect(armed.error).toBeUndefined()
-    const [row] = await history(realm)
-
-    const observed = await realm.run({
-      program: 'releaseDetached()\nawait new Promise(resolve => setTimeout(resolve, 30))\ndetachedTrace',
-      bindings: [tools({ echo: async args => args })],
-    })
-    // Writes are fenced as tightly as reads: a continuation that could retire
-    // `$_` would take the intrinsic away from the run that is actually live, and
-    // an assignment nobody is running to observe has no legitimate reader.
-    expect(observed.value).toEqual([
-      expect.stringContaining('list: $out is only reachable'),
-      expect.stringContaining('clear: $out is only reachable'),
-      expect.stringContaining('last: $_ is only reachable'),
-      expect.stringContaining('set $_: $_ is only reachable'),
-      expect.stringContaining('set $out: $out is only reachable'),
-      expect.stringContaining('call: tool lease revoked'),
-    ])
-    // The detached `clear()` was refused, so the history the live run owns is intact.
-    expect((await realm.run({ program: `$out(${row?.id ?? 0})`, bindings: [] })).value).toEqual({ armed: true })
-    // And the refused assignments left both names as accessors rather than as
-    // the data properties an accepted assignment would have made of them.
-    expect(await probe(
-      realm,
-      '["$out", "$_"].map(name => typeof Object.getOwnPropertyDescriptor(globalThis, name).get)',
-    )).toEqual(['function', 'function'])
-  })
-
-  it('reinstalls an intrinsic a detached continuation deleted', async () => {
-    // `delete` is the one act no accessor can refuse, so it is answered at the
-    // start of the next run instead. Absence is the test, which is what keeps a
-    // name the program deliberately ASSIGNED from being taken back off it.
-    const realm = createRealm()
-    const armed = await realm.run({
-      program: `
-        let releaseDeleter
-        const deleterGate = new Promise(resolve => { releaseDeleter = resolve })
-        void deleterGate.then(() => { delete globalThis.$out; delete globalThis.$_ })
-        ;({ armed: true })
-      `,
-      bindings: [],
-    })
-    expect(armed.error).toBeUndefined()
-    const [row] = await history(realm)
-
-    // The deletion lands mid-run, after this run's own reinstall already ran.
-    const during = await realm.run({
-      program: 'releaseDeleter()\nawait new Promise(resolve => setTimeout(resolve, 30))\n;[typeof $out, typeof $_]',
-      bindings: [],
-    })
-    expect(during.value).toEqual(['undefined', 'undefined'])
-
-    // The next run gets them back, still pointing at the history that was never lost.
-    const after = await realm.run({ program: `[typeof $out, $out(${row?.id ?? 0})]`, bindings: [] })
-    expect(after.value).toEqual(['function', { armed: true }])
+    expect((await first.run({ program: '$_.realm', bindings: [] })).value).toBe('first')
+    expect((await second.run({ program: '$_.realm', bindings: [] })).value).toBe('second')
   })
 })
 
-describe('completion history: the intrinsic names', () => {
-  it('installs `$out` and `$_` as non-enumerable globals', async () => {
-    const realm = createRealm()
-    const ambient = await realm.run({
-      program: `({
-        out: typeof $out,
-        last: typeof $_,
-        ownOut: Object.hasOwn(globalThis, '$out'),
-        ownLast: Object.hasOwn(globalThis, '$_'),
-        enumerated: Object.keys(globalThis).filter(name => name === '$out' || name === '$_'),
-        methods: [typeof $out.list, typeof $out.drop, typeof $out.clear],
-        frozen: Object.isFrozen($out),
-      })`,
-      bindings: [],
-    })
-    expect(ambient.value).toEqual({
-      out: 'function',
-      last: 'undefined',
-      ownOut: true,
-      ownLast: true,
-      enumerated: [],
-      methods: ['function', 'function', 'function'],
-      frozen: true,
-    })
-  })
-
-  it('lets a cell declare `const $out`, which shadows the intrinsic from then on', async () => {
-    // The property is configurable precisely so this declaration stays legal —
-    // a non-configurable global would reject the whole cell with
-    // `Identifier has already been declared`.
-    const realm = createRealm()
-    const declared = await realm.run({ program: 'const $out = { userOwned: true }\n$out', bindings: [] })
-    expect(declared.error).toBeUndefined()
-    expect(declared.value).toEqual({ userOwned: true })
-    // A REPL declaration persists, so the program has taken the name for good.
-    expect((await realm.run({ program: '$out.userOwned', bindings: [] })).value).toBe(true)
-  })
-
-  it('lets a cell declare `let $out` and shadow it again inside a function', async () => {
-    const realm = createRealm()
-    const nested = await realm.run({
-      program: `
-        let $out = 'outer'
-        const inner = () => { const $out = 'inner'; return $out }
-        ;({ outer: $out, inner: inner() })
-      `,
-      bindings: [],
-    })
-    expect(nested.value).toEqual({ outer: 'outer', inner: 'inner' })
-  })
-
-  it('hands the name over on assignment and does not take it back', async () => {
-    const realm = createRealm()
-    const assigned = await realm.run({
-      program: '$out = { claimed: true }\n;({ value: $out, own: Object.hasOwn(globalThis, "$out") })',
-      bindings: [],
-    })
-    expect(assigned.error).toBeUndefined()
-    expect(assigned.value).toEqual({ value: { claimed: true }, own: true })
-
-    // The name is the program's now. Reviving the accessor over it at the next
-    // run would take a live variable away mid-namespace, so the reinstall tests
-    // for ABSENCE and finds the data property present.
-    const later = await realm.run({ program: '$out', bindings: [] })
-    expect(later.value).toEqual({ claimed: true })
-  })
-
-  it('reinstalls a deleted intrinsic on the next run rather than only after a restart', async () => {
+describe('latest completion lifecycle', () => {
+  it('loses the slot when a timeout replaces the worker', async () => {
     const realm = createRealm({ budgets: { maxWallMs: 400 } })
-    const deleted = await realm.run({
-      program: '({ deleted: delete globalThis.$out, out: typeof $out })',
-      bindings: [],
-    })
-    // Within the run that deleted it, the name stays gone: the reinstall for
-    // that run already happened before the cell started.
-    expect(deleted.value).toEqual({ deleted: true, out: 'undefined' })
-
-    // No hard kill needed — a stray `delete` costs one cell, not the generation.
-    expect((await realm.run({ program: 'typeof $out', bindings: [] })).value).toBe('function')
-
-    // And a restart reinstalls it too, from a worker that never saw the delete.
+    await realm.run({ program: '({ beforeKill: true })', bindings: [] })
     expect((await realm.run({ program: 'for (;;) {}', bindings: [] })).error?.kind).toBe('timeout')
-    expect((await realm.run({ program: 'typeof $out', bindings: [] })).value).toBe('function')
+    expect(realm.generation).toBe(2)
+    expect((await realm.run({ program: 'typeof $_', bindings: [] })).value).toBe('undefined')
   })
 
-  it('disables `$_` once the program assigns it, and says so exactly once', async () => {
-    // Node's REPL rule for `_`, applied to `$_`: an explicit assignment turns the
-    // name into an ordinary variable and the runtime stops tracking it there.
+  it('loses the slot when the worker exits', async () => {
     const realm = createRealm()
-    await realm.run({ program: '({ tracked: true })', bindings: [] })
-    const [row] = await history(realm)
-
-    const claimed = await realm.run({ program: '$_ = "mine"\n$_', bindings: [] })
-    expect(claimed.value).toBe('mine')
-    expect(claimed.logs).toEqual([expect.stringContaining('$_ is now a program variable')])
-
-    const again = await realm.run({ program: '$_ = "mine again"\n$_', bindings: [] })
-    expect(again.value).toBe('mine again')
-    // The accessor is gone, so there is no second notice to emit.
-    expect(again.logs).toEqual([])
-
-    // Only `$_` is affected; handles keep working.
-    expect((await realm.run({ program: `$out(${row?.id ?? 0})`, bindings: [] })).value).toEqual({ tracked: true })
+    await realm.run({ program: '({ beforeExit: true })', bindings: [] })
+    expect((await realm.run({ program: 'process.exit(3)', bindings: [] })).error?.kind).toBe('worker-exit')
+    expect(realm.generation).toBe(2)
+    expect((await realm.run({ program: 'typeof $_', bindings: [] })).value).toBe('undefined')
   })
 
-  it('leaves `_` to the program, lodash style and all', async () => {
-    // `_` is deliberately NOT claimed: its strongest JavaScript prior is lodash,
-    // and it is a common throwaway name.
+  it('reinstalls `$_` after a program deletes the accessor', async () => {
     const realm = createRealm()
-    const lodashish = await realm.run({
-      program: `
-        const _ = { chunk: (items, size) => items.reduce((out, item, index) => {
-          if (index % size === 0) out.push([])
-          out[out.length - 1].push(item)
-          return out
-        }, []) }
-        _.chunk([1, 2, 3, 4, 5], 2)
-      `,
-      bindings: [],
-    })
-    expect(lodashish.error).toBeUndefined()
-    expect(lodashish.value).toEqual([[1, 2], [3, 4], [5]])
-    expect((await realm.run({ program: 'Object.hasOwn(globalThis, "_")', bindings: [] })).value).toBe(false)
-  })
-})
-
-describe('completion history: the expiry class', () => {
-  it('exposes CompletionExpiredError as an immutable global carrying a recovery instruction', async () => {
-    const realm = createRealm()
-    const shape = await realm.run({
-      program: `
-        const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'CompletionExpiredError')
-        let caughtError: unknown
-        try { $out(123456789) } catch (error) { caughtError = error }
-        ;({
-          writable: descriptor.writable,
-          configurable: descriptor.configurable,
-          enumerable: descriptor.enumerable,
-          isInstance: caughtError instanceof CompletionExpiredError,
-          isError: caughtError instanceof Error,
-          name: caughtError.name,
-          message: caughtError.message,
-        })
-      `,
-      bindings: [],
-    })
-    expect(shape.value).toEqual({
-      writable: false,
-      configurable: false,
-      enumerable: false,
-      isInstance: true,
-      isError: true,
-      name: 'CompletionExpiredError',
-      message: 'result 123456789 was evicted; recompute it',
-    })
+    await realm.run({ program: '({ retained: true })', bindings: [] })
+    const deleted = await realm.run({ program: 'delete globalThis.$_\nconsole.log("deleted")', bindings: [] })
+    expect(deleted.logs).toEqual(['deleted'])
+    expect(deleted.value).toBeUndefined()
+    expect((await realm.run({ program: '$_.retained', bindings: [] })).value).toBe(true)
   })
 
-  it('refuses the reserved class name on both injection paths', async () => {
-    // The worker installs the class immutably before any cell runs, so either
-    // route to a program global — a namespace global or an injected error class
-    // — would leave the worker unable to install its own intrinsic and cost the
-    // realm its generation. Both are refused as caller misuse instead.
-    const realm = createRealm()
-    await expect(realm.run({
-      program: '1',
-      bindings: [{ global: 'CompletionExpiredError', functions: {} }],
-    })).rejects.toThrow('reserved binding global "CompletionExpiredError"')
+  it('reports namespace and retained-result loss after a hard kill', async () => {
+    const context = await startHost({ maxWallMs: 400 })
+    const id = realmId('single-slot-loss-notice')
+    await context.primeRealmRuntime.run(id, { program: '({ beforeKill: true })', bindings: [] })
+    expect((await context.primeRealmRuntime.run(id, { program: 'for (;;) {}', bindings: [] })).error?.kind).toBe('timeout')
 
-    await expect(realm.run({
-      program: '1',
-      bindings: [{
-        global: 'tools',
-        functions: {},
-        errorClass: { name: 'CompletionExpiredError', memberNameProperty: 'toolName' },
-      }],
-    })).rejects.toThrow('reserved binding global "CompletionExpiredError"')
-
-    // `$out` and `$_` are reserved by NAME, ahead of the identifier test. Neither
-    // could pass that test anyway, but the guarantee must not rest on a regex
-    // that exists for an unrelated reason and could be relaxed later.
-    for (const intrinsic of ['$out', '$_']) {
-      await expect(realm.run({ program: '1', bindings: [{ global: intrinsic, functions: {} }] }))
-        .rejects.toThrow(`reserved binding global ${JSON.stringify(intrinsic)}`)
-      await expect(realm.run({
-        program: '1',
-        bindings: [{ global: 'tools', functions: {}, errorClass: { name: intrinsic, memberNameProperty: 'toolName' } }],
-      })).rejects.toThrow(`reserved binding global ${JSON.stringify(intrinsic)}`)
-    }
-
-    // Neither refusal reached a worker, and an ordinary error class on the same
-    // path is unaffected — the reservation is one name, not a new class of them.
-    const accepted = await realm.run({
-      program: '({ ok: true })',
-      bindings: [{
-        global: 'tools',
-        functions: {},
-        errorClass: { name: 'ToolCallError', memberNameProperty: 'toolName' },
-      }],
-    })
-    expect(accepted.error).toBeUndefined()
-    expect(accepted.value).toEqual({ ok: true })
-    expect(realm.generation).toBe(1)
-  })
-})
-
-describe('completion history: the deployment path', () => {
-  it('carries the plugin config through to the realm that enforces it', async () => {
-    // The limits travel plugin config -> the trusted realm service ->
-    // PersistentRealm -> the run message. Constructing a realm directly, as
-    // every test above does, would not prove any of that wiring.
-    const ctx = await startHost({ maxCompletionHistoryEntries: 1 })
-    const realm = realmId('session-history-config')
-
-    const first = await ctx.primeRealmRuntime.run(realm, { program: '({ first: true })', bindings: [] })
-    expect(first.error).toBeUndefined()
-    await ctx.primeRealmRuntime.run(realm, { program: '({ second: true })', bindings: [] })
-
-    const observed = await ctx.primeRealmRuntime.run(realm, {
-      program: 'console.log(JSON.stringify($out.list().map(entry => entry.type)))',
-      bindings: [],
-    })
-    expect(observed.error).toBeUndefined()
-    // One entry of budget, so the second completion evicted the first.
-    expect(observed.logs[0]).toBe('["object"]')
-    expect((await ctx.primeRealmRuntime.run(realm, { program: '$_', bindings: [] })).value).toEqual({ second: true })
-  })
-
-  it('releases the history when an idle realm is reclaimed, and says nothing extra about it', async () => {
-    // Reclamation destroys the worker and its history, but unlike a hard kill it
-    // is not a namespace LOSS requiring a warning. The next run gets the ordinary
-    // "started empty" line. A model holding a stale handle learns this from
-    // `CompletionExpiredError`, whose message carries the recovery instruction;
-    // warning on every fresh namespace would spend tokens on every session start.
-    const ctx = await startHost({ maxIdleMs: 150 })
-    const realm = realmId('session-reclaimed')
-
-    await ctx.primeRealmRuntime.run(realm, { program: '({ beforeReclaim: true })', bindings: [] })
-    const listed = await ctx.primeRealmRuntime.run(realm, {
-      program: 'console.log(JSON.stringify($out.list()[0].id))',
-      bindings: [],
-    })
-    const handle = JSON.parse(listed.logs[0] as string) as number
-
-    await new Promise((resolve) => { setTimeout(resolve, 700) })
-
-    const after = await ctx.primeRealmRuntime.run(realm, {
-      program: `({ entries: $out.list().length, stale: ${caught(`$out(${handle})`)}.name })`,
-      bindings: [],
-    })
-    expect(after.value).toEqual({ entries: 0, stale: 'CompletionExpiredError' })
-    expect(after.logs.filter(line => line.startsWith('[prime-realm] ')))
-      .toEqual(['[prime-realm] live namespace started empty'])
-  })
-
-  it('leaves the ordinary one-shot runtime without a completion history', async () => {
-    // History exists only on the Prime path. The trusted seam is a separate
-    // service mounted beside the official one-shot runtime, whose shipped
-    // semantics remain unchanged.
-    root = await mkdtemp(join(tmpdir(), 'dsh-prime-history-'))
-    const ctx = new Context()
-    contexts.push(ctx)
-    const { default: WorkerThreadCodeRuntime } = await import('@deepseek-ai/dsh-code-runtime-worker-thread')
-    await ctx.plugin(WorkerThreadCodeRuntime, {})
-    await ctx.plugin(primeRuntime, { stateDirectory: stateDirectory() })
-
-    const oneShot = await ctx.codeRuntime.run({
-      program: 'return [typeof $out, typeof $_, typeof CompletionExpiredError]',
-      bindings: [],
-    })
-    expect(oneShot.error).toBeUndefined()
-    expect(oneShot.value).toEqual(['undefined', 'undefined', 'undefined'])
-
-    // The same deployment still installs them for a Prime realm.
-    const prime = await ctx.primeRealmRuntime.run(realmId('session-oneshot-control'), {
-      program: '[typeof $out, typeof $_, typeof CompletionExpiredError]',
-      bindings: [],
-    })
-    expect(prime.value).toEqual(['function', 'undefined', 'function'])
+    const restarted = await context.primeRealmRuntime.run(id, { program: 'typeof $_', bindings: [] })
+    expect(restarted.value).toBe('undefined')
+    expect(restarted.logs.filter(line => line.startsWith('[prime-realm] ')))
+      .toEqual(['[prime-realm] live namespace restarted; previous bindings and retained results were lost'])
   })
 })

@@ -21,15 +21,13 @@ import type { CodeRunFailure, CodeRunRequest } from '@deepseek-ai/dsh-code-runti
 import {
   MIN_OUTPUT_BYTES,
   OutputLedger,
-  resolveCompletionHistoryLimits,
-  resolveCompletionOpaqueLimits,
   resolveCompletionProjectionLimits,
+  resolveCompletionRetentionLimits,
 } from './protocol.js'
 import type {
   PrimeRunResult,
-  RealmCompletionHistoryLimits,
-  RealmCompletionOpaqueLimits,
   RealmCompletionProjectionLimits,
+  RealmCompletionRetentionLimits,
 } from './protocol.js'
 import { acquireRealmLease, RealmLeaseError } from './realm-lease.js'
 import { addRealmMetrics, emptyRealmMetrics, PersistentRealm } from './realm.js'
@@ -69,20 +67,15 @@ export interface PrimeRealmRuntimeOptions {
   stateDirectory: string
   /** Per-run ceilings handed to every realm this runtime creates. */
   budgets: RealmBudgets
-  /** Completion-history ceilings for every realm this runtime creates. Blank
-   * fields take the runtime defaults.
-   */
-  completionHistory?: Partial<RealmCompletionHistoryLimits>
   /**
-   * Opaque (non-JSON) history ceilings for every realm this runtime creates.
-   * Blank fields take the runtime defaults; the opaque store is an independent
-   * budget from {@link completionHistory}.
+   * Single-slot completion retention ceilings for every realm this runtime
+   * creates. Blank fields take the runtime defaults.
    */
-  completionOpaque?: Partial<RealmCompletionOpaqueLimits>
+  completionRetention?: Partial<RealmCompletionRetentionLimits>
   /**
    * Projection ceilings for every realm this runtime creates: the size past
-   * which a completion is referenced rather than shown, and how much a reference
-   * may itself cost. Blank fields take the runtime defaults.
+   * which a completion is projected rather than shown verbatim, and how much a
+   * bounded envelope may itself cost. Blank fields take the runtime defaults.
    */
   completionProjection?: Partial<RealmCompletionProjectionLimits>
   /** Realms that may hold a worker at once; admission past it reclaims or refuses. */
@@ -114,9 +107,9 @@ function realmOwnershipFailure(error: unknown): string {
 }
 
 /**
- * Render the one lifecycle fact a fresh worker needs to expose. The restart line
- * names completion history because a hard kill takes it with the bindings; one
- * notice reports the whole restart rather than splitting the event.
+ * Render the one lifecycle fact a fresh worker needs to expose. A hard kill
+ * takes the latest retained completion with the bindings, so one notice reports
+ * the whole restart rather than splitting the event.
  */
 function namespaceNotice(fresh: boolean, lost: boolean): string | undefined {
   if (lost) return '[prime-realm] live namespace restarted; previous bindings and retained results were lost'
@@ -159,14 +152,13 @@ function assertBudgets(budgets: RealmBudgets): void {
  */
 export class PrimeRealmRuntime extends Service {
   private readonly budgets: RealmBudgets
-  private readonly completionHistory: RealmCompletionHistoryLimits
-  private readonly completionOpaque: RealmCompletionOpaqueLimits
+  private readonly completionRetention: RealmCompletionRetentionLimits
   private readonly completionProjection: RealmCompletionProjectionLimits
   /**
    * Counters inherited from realms this runtime has already retired, so the
    * totals describe the whole process rather than only the realms still pooled.
-   * A retired realm holds nothing, so its history LEVELS are dropped here rather
-   * than carried forward.
+   * A retired realm holds nothing, so its latest-completion LEVELS are dropped
+   * here rather than carried forward.
    */
   private readonly retiredMetrics = emptyRealmMetrics()
   /** The deployment's full output cap, which a pre-worker failure may use whole. */
@@ -187,8 +179,7 @@ export class PrimeRealmRuntime extends Service {
     assertBudgets(options.budgets)
     // Resolved at construction rather than at first admission, so a bad
     // deployment fails at plugin load instead of on some session's first run.
-    this.completionHistory = resolveCompletionHistoryLimits(options.completionHistory)
-    this.completionOpaque = resolveCompletionOpaqueLimits(options.completionOpaque)
+    this.completionRetention = resolveCompletionRetentionLimits(options.completionRetention)
     this.completionProjection = resolveCompletionProjectionLimits(options.completionProjection)
     if (!(Number.isSafeInteger(options.maxActiveRealms) && options.maxActiveRealms > 0)) {
       throw new Error(`dsh-prime-agent: maxActiveRealms must be a positive safe integer, got ${String(options.maxActiveRealms)}`)
@@ -330,8 +321,7 @@ export class PrimeRealmRuntime extends Service {
         const realm = new PersistentRealm({
           realmId,
           budgets: this.budgets,
-          completionHistory: this.completionHistory,
-          completionOpaque: this.completionOpaque,
+          completionRetention: this.completionRetention,
           completionProjection: this.completionProjection,
         })
         this.pool.set(realmId, realm)
@@ -389,9 +379,8 @@ export class PrimeRealmRuntime extends Service {
    */
   private reclaim(realmId: string, realm: PersistentRealm): void {
     this.pool.delete(realmId)
-    // Take its counters before the worker goes: reclamation releases the whole
-    // history, so the levels it was reporting stop being true immediately.
-    addRealmMetrics(this.retiredMetrics, { ...realm.metrics, historyEntries: 0, historyBytes: 0, historyOpaqueEntries: 0, historyOpaqueBytes: 0 })
+    // Take the cumulative counters before the worker is destroyed.
+    addRealmMetrics(this.retiredMetrics, realm.metrics)
     const retirement = (async () => {
       try {
         await realm.dispose()

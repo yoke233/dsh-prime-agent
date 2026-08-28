@@ -1,5 +1,5 @@
 /**
- * Completion-boundary contract pinning for the Realm history implementation.
+ * Completion-boundary contract pinning for the Realm's single retained slot.
  *
  * Each test states the behavior it currently defends. A failure here means the
  * Realm's canonical completion contract changed and the expectation must move
@@ -107,12 +107,11 @@ function wireBytes(result: CodeRunResult): number {
 
 /** One projected completion, as the worker's envelope reaches the trusted host. */
 interface Envelope {
-  $out?: number
-  use?: string
-  retained?: boolean
+  retained: boolean
   type: string
   serializedBytesAtCapture?: number
   projection?: Record<string, unknown>
+  opaque?: true
   reason?: string
   truncated: true
 }
@@ -127,7 +126,7 @@ function envelopeOf(result: CodeRunResult): Envelope {
 
 describe('completion contract: values that cross the boundary unchanged', () => {
   it('returns a small lossless completion in its original shape', async () => {
-    // A small value is returned verbatim, with no envelope, handle or metadata.
+    // A small value is returned verbatim, with no envelope or metadata.
     const realm = createRealm()
     const result = await realm.run({
       program: '({ matches: [{ path: "a.ts", line: 1 }], total: 1, nested: { deep: { ok: true } } })',
@@ -192,8 +191,8 @@ describe('completion contract: opaque retention', () => {
   it('retains every non-lossless completion with one fixed opaque envelope', async () => {
     // Non-lossless values do not fail the cell with a diagnostic. Each is
     // retained under the opaque budgets and answered with the SAME fixed
-    // envelope — a handle, the safe typeof-grade type and the opaque marker —
-    // while the original value remains reachable through `$out(id)`.
+    // envelope — retention state, the safe typeof-grade type and the opaque
+    // marker — while the original value remains reachable through `$_`.
     const realm = createRealm()
     const retained = [
       { why: 'function', program: '(() => 42)' },
@@ -219,8 +218,7 @@ describe('completion contract: opaque retention', () => {
       expect(result.error, completion.why).toBeUndefined()
       const envelope = result.value as Record<string, unknown>
       expect(envelope, completion.why).toMatchObject({ retained: true, opaque: true, truncated: true })
-      expect(typeof envelope.$out, completion.why).toBe('number')
-      expect(envelope.use, completion.why).toBe(`$out(${String(envelope.$out)})`)
+      expect(envelope, completion.why).not.toHaveProperty('use')
     }
     // None of these cost the realm its heap: they are retained values, not
     // substrate failures.
@@ -289,14 +287,12 @@ describe('completion contract: output-limit byte boundaries', () => {
     const envelope = envelopeOf(overCap)
     // At this cap the rich envelope cannot fit either — it would carry a 253
     // character string that is under the projector's own truncation threshold —
-    // so the chain lands on the minimal reference.
+    // so the chain lands on the minimal preview.
     expect(envelope.projection).toBeUndefined()
-    expect(envelope.use).toBe(`$out(${envelope.$out ?? 0})`)
-    expect(envelope.type).toBe('string')
+    expect(envelope).toMatchObject({ retained: true, type: 'string' })
     expect(overCap.presentation).toEqual({
       kind: 'retained-preview',
       valueType: 'string',
-      handle: envelope.$out,
     })
     expect(wireBytes(overCap)).toBeLessThanOrEqual(MIN_OUTPUT_BYTES)
     // Still not a heap failure: the namespace survives, as it did when this was
@@ -485,53 +481,41 @@ describe('completion contract: adversarial value shapes', () => {
     expect(walked).toEqual({ leaf: true })
   })
 
-  it('leaves `_` to the program while owning `$out` and `$_`', async () => {
-    // `$out` and `$_` are non-enumerable, CONFIGURABLE accessors; configurable
-    // because a non-configurable own global would make top-level `const $out`
-    // fail the whole cell. `_` remains unclaimed because its strongest JavaScript
-    // prior is lodash. `completion-history.spec.ts` owns detailed shadow,
-    // assignment and deletion coverage.
+  it('leaves `_` to the program while owning only `$_`', async () => {
+    // `$_` is a non-enumerable, configurable accessor. `_` remains unclaimed
+    // because its strongest JavaScript prior is lodash.
     const realm = createRealm()
     const ambient = await realm.run({
       program: `({
         underscore: typeof _,
-        out: typeof $out,
         ownUnderscore: Object.hasOwn(globalThis, '_'),
-        ownOut: Object.hasOwn(globalThis, '$out'),
         ownLast: Object.hasOwn(globalThis, '$_'),
-        enumerated: Object.keys(globalThis).filter(name => name === '$out' || name === '$_'),
+        enumerated: Object.keys(globalThis).filter(name => name === '$_'),
       })`,
       bindings: [],
     })
     expect(ambient.error).toBeUndefined()
     expect(ambient.value).toEqual({
       underscore: 'undefined',
-      out: 'function',
       ownUnderscore: false,
-      ownOut: true,
       ownLast: true,
-      // Non-enumerable, so nothing that walks the globals trips over them.
       enumerated: [],
     })
 
-    // A cell may still claim both names lexically; the intrinsic is shadowed
-    // rather than rejected, exactly as it was when the name was undeclared.
+    // A cell may still claim `_` lexically, exactly as when it was undeclared.
     const claimed = await realm.run({
-      program: 'const _ = "user underscore"\nconst $out = { userOwned: true }\n;({ _, $out })',
+      program: 'const _ = "user underscore"\n_',
       bindings: [],
     })
     expect(claimed.error).toBeUndefined()
-    expect(claimed.value).toEqual({ _: 'user underscore', $out: { userOwned: true } })
-
-    // And they persist like any other user binding.
-    expect((await realm.run({ program: '[_, $out.userOwned]', bindings: [] })).value).toEqual(['user underscore', true])
+    expect(claimed.value).toBe('user underscore')
+    expect((await realm.run({ program: '_', bindings: [] })).value).toBe('user underscore')
     expect(realm.generation).toBe(1)
   })
 
   it('retains a completion the program did not bind itself', async () => {
-    // An unnamed result is addressable through a runtime-owned handle without
-    // the program naming it, while the producing cell's canonical result stays
-    // unchanged.
+    // An unnamed result remains addressable through `$_`, while the producing
+    // cell's canonical result stays unchanged.
     const realm = createRealm()
     const produced = await realm.run({ program: '({ rows: [1, 2, 3] })', bindings: [] })
     expect(produced.error).toBeUndefined()
@@ -539,14 +523,14 @@ describe('completion contract: adversarial value shapes', () => {
     expect(Object.keys(produced)).toEqual(['logs', 'value'])
 
     const recalled = await realm.run({
-      program: 'const [entry] = $out.list()\n;({ underscore: typeof _, handled: $out(entry.id), last: $_ })',
+      program: 'console.log(JSON.stringify({ underscore: typeof _, last: $_ }))',
       bindings: [],
     })
-    expect(recalled.value).toEqual({
+    expect(JSON.parse(recalled.logs[0] as string)).toEqual({
       underscore: 'undefined',
-      handled: { rows: [1, 2, 3] },
       last: { rows: [1, 2, 3] },
     })
+    expect(recalled.value).toBeUndefined()
   })
 })
 
@@ -609,8 +593,8 @@ describe('completion contract: host-level notices and the notice reserve', () =>
     expect(jsonStringBytes(fits.value as string)).toBe(realmBytes - 2)
   })
 
-  it('fits a minimal reference beside the notice reserve at the smallest legal cap', async () => {
-    // The reference-envelope constant is sized against the smallest legal
+  it('fits a minimal preview beside the notice reserve at the smallest legal cap', async () => {
+    // The minimal-envelope constant is sized against the smallest legal
     // deployment, where the realm receives 256 bytes and the completion has
     // about 254. This keeps the last rung reachable even at the floor.
     await makeRoot('dsh-prime-contract-minimal-')
@@ -622,7 +606,7 @@ describe('completion contract: host-level notices and the notice reserve', () =>
       bindings: [],
     })
     const envelope = envelopeOf(referenced)
-    expect(envelope.use).toBe(`$out(${envelope.$out ?? 0})`)
+    expect(envelope).toMatchObject({ retained: true, type: 'string', truncated: true })
     expect(Buffer.byteLength(JSON.stringify(envelope), 'utf8')).toBeLessThanOrEqual(128)
 
     // The notice is appended after the realm finalized its ledger, and the whole
@@ -630,10 +614,9 @@ describe('completion contract: host-level notices and the notice reserve', () =>
     expect(notices(referenced)).toEqual(['[prime-realm] live namespace started empty'])
     expect(wireBytes(referenced)).toBeLessThanOrEqual(maxOutputBytes)
 
-    // And the reference works: the value it names survived the cap that could
-    // not carry it.
+    // And the retained value survives the cap that could not carry it.
     const recovered = await ctx.primeRealmRuntime.run(realmId('session-minimal'), {
-      program: `$out(${envelope.$out ?? 0}).length`,
+      program: '$_.length',
       bindings: [],
     })
     expect(recovered.value).toBe(4000)

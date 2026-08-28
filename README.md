@@ -39,9 +39,10 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
 - Prime 额外注册本地组合能力 `tools.apply_patch({ patch })`：对齐 OpenAI Codex `apply_patch` 的 marker/heredoc parser、顺序 hunk、EOF/纯追加和 exact → rstrip → trim → Unicode 归一化匹配语义，并一次预检同文件多 hunk 或多文件 Add/Update；Add 与 Codex 一样允许覆盖已有目标。相对或绝对目标路径原样交给 Agent catalog 中正式的 DSH `read`/`write` nested calls，路径解析与授权、sandbox、approval、observation、日志、取消和单文件原子发布仍由 DSH 拥有。每个 REPL nested call 按官方 `tool/code-dispatch-start` / `tool/code-dispatch` 协议记录，因此官方 Web 与兼容 TUI 都能递归显示；`apply_patch` 投影标准 `card: 'diff'`，失败结果走 generic error fallback。`edit` 继续用于一次精确的原位替换；`apply_patch` 负责相关的多 hunk/多文件变更，两者不互相替代。
 - Profile 显式安装的 DSH Host MCP client 把 server tools 注册进统一 catalog，repl 单元自动获得对应 `tools.*` 绑定；Prime 不复制 Python kernel-owned MCP runtime。
 - Prime preset 挂载 DSH 官方持久 Terminal：POSIX 使用 Bash，Windows 使用 PowerShell；`terminal_open`/`terminal_send`/`terminal_read`/`terminal_signal`/`terminal_close`/`terminal_list` 通过 `tools.*` 调用。同行安装的 `dsh-tool-monitor` 可对后台 `terminal_send` 产生的 `pty-send-*` Job 做逐行 JavaScript 正则订阅。
+- Prime preset 不挂载 DSH Plan Mode；Compaction 保持 DSH 默认策略，preset 不接管 provider 或配置模型容量。
 - `tools.*` 返回值始终遵循 canonical `ToolOutputMap`，可直接访问 `read.lines`、`edit.before/after` 等字段；对象结果直接成为 completion 时只改变模型展示为官方 content，不改变程序拿到的值。不要对返回值盲目再次 `JSON.parse`。notebook 结构化 preview 中的 `\\` 只是 JSON notation；模型自行编写 Windows 路径时优先使用 `D:/work/project` 形式，避免额外转义层。工具参数使用 TypeScript 对象字面量；完整 cell 会在执行前解析，语法失败不会执行其中任何代码或 tool call，修正后应重试。
 - Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值；`repl` 的外层 canonical value 仍是可程序化读取的 lossless JSON（`logs`、可选 `result` 与可信 presentation metadata），但模型只看到无类型外壳的 notebook 文本：logs 和字符串原样显示，结构化值只 pretty-print 一次，空结果返回空文本；renderer 不添加 `[repl result: ...]`、`[repl logs]` 或 Markdown fence。普通程序异常只保留可行动的异常消息，不把 Worker/V8 内部调用栈带进模型或界面。外层 notebook 文本超过展示预算时由 DSH 写入 artifact 并返回 locator；保存失败时保留完整 inline 成功结果并告警，不伪造 locator。
-- 完成值由 runtime 自动保留在 generation-local 的 completion history 中：`$_` 是最近已保留结果的首选入口，`$out(N)` 只用于较早结果；runtime-authored preview 由 nonce 验证后的 metadata 驱动，已保留 preview 明确教授这两个入口，未保留 preview 不显示 handle，opaque 值不做结构化渲染。用户主动返回旧 envelope 同形 JSON 时仍按普通 JSON 显示。
+- 成功的非 `undefined` completion 由 runtime 自动保留在 generation-local 单槽中：优先把需要复用的值赋给命名变量，`$_` 表示最新 completion，下一个非 `undefined` completion 会替换它；`undefined` 不覆盖当前值，因此可先执行 `let saved = $_`。runtime-authored preview 由 nonce 验证后的 metadata 驱动，retained/opaque 提示要求在下一个产出 completion 的 cell 前保存为变量，预算拒绝会清空旧槽并明确新值不可恢复。presentation 不携带 numeric handle，opaque 值不做结构化渲染；用户主动返回同形 envelope 仍按普通 JSON 显示。
 - Realm 是 live-only 的：abort、timeout、OOM 会 hard-kill Worker 并丢失 namespace，下一次真正执行时会明确提示之前的 bindings 与保留结果已丢失。跨重启的检查点由程序显式写入持久任务文件。
 
 完整身份路由、namespace 生命周期、Agent 编排与学习层边界见 [当前架构](docs/architecture.md)；固定提示、completion metadata 和 notebook renderer 的模型可见契约见 [Prime REPL Notebook 呈现规格](docs/repl-notebook-presentation.zh.md)。
@@ -51,7 +52,7 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
 | 状态层 | 责任 | 保证 |
 | --- | --- | --- |
 | Realm live namespace | 普通顶层变量、函数、对象、Map 和索引 | 同一 Worker 内的 cell 间保留；hard kill 后丢失 |
-| Completion history | runtime 自动保留的 cell 结果，经 `$_` 与 `$out(N)` 访问 | 同上；超预算按 FIFO 淘汰，失效 handle 抛 `CompletionExpiredError` |
+| Latest completion | runtime 自动保留的最新非 `undefined` cell 结果，经 `$_` 访问 | 下一结果会替换；hard kill 或 generation 换代后丢失 |
 | 持久任务文件 | 大型输入、重要结果与跨重启检查点 | 由文件系统承载,进程重启后仍可恢复 |
 | `refine` | 稳定路由与行为经验 | 证据化、乐观并发、事务历史和安全回滚 |
 
@@ -204,7 +205,7 @@ try {
 
 ## 编排工作流
 
-控制面 policy 引导模型把 REPL 当作 live notebook：命名的工具结果和跨 cell 继续收敛的工作值优先使用 `let` 留在 live namespace，重复工具调用前先复用、重赋值或转换已有 binding；不确定的文件路径从已知父目录 `glob`，不确定的目录路径通过 `pwsh` 检查父目录；只有任一失败会让全部成功结果都失去用途时才用 `Promise.all`，相互独立的读取、搜索和探测即使希望拿到全部答案也改用 `Promise.allSettled` 或逐项捕获 `ToolCallError`，保留成功结果并只重试失败项；副作用型 mutation 顺序执行。大结果不需要模型自己归约——runtime 会把超过 64 KiB 的完成值换成有界引用 envelope，cell 仍然成功，原值留在 Realm 内可用 envelope 里给出的 `$out(N)` 继续计算。
+控制面 policy 引导模型把 REPL 当作 live notebook：命名的工具结果和跨 cell 继续收敛的工作值优先使用 `let` 留在 live namespace，重复工具调用前先复用、重赋值或转换已有 binding；不确定的文件路径从已知父目录 `glob`，不确定的目录路径通过 `pwsh` 检查父目录；只有任一失败会让全部成功结果都失去用途时才用 `Promise.all`，相互独立的读取、搜索和探测即使希望拿到全部答案也改用 `Promise.allSettled` 或逐项捕获 `ToolCallError`，保留成功结果并只重试失败项；副作用型 mutation 顺序执行。超过 64 KiB 的完成值由 runtime 生成有界 preview；原值通过准入时仍在 `$_`，应在运行下一个产生 completion 的 cell 前赋给命名变量。
 
 慢任务使用非阻塞控制循环：交给 managed Job 或 continuable child，保存 id/输出位置后继续独立工作，或结束当前 turn 等待通知；不使用 sleep 轮询或长阻塞 `await` 占住交互。多回合或多 child 工作由直接面向用户的 root 在有意义里程碑简洁汇报结果、阻塞和下一步。
 
@@ -249,7 +250,7 @@ Prime 注册一个随包 `refine` Skill provider。Host 的正式 `dsh-tool-skil
 | `requireOrchestrationTools` | `true` | 要求 Agent catalog 具备 Subagent admission（`subagent`/`subagent_fork`）与 `agents`/`jobs` 控制（`list_agents`、`send_message`、`interrupt_agent`、`job_output`、`job_list`、`job_kill`） |
 | `continual` | 有界默认值 | 学习条目、事务、状态与 prompt 限制 |
 
-`dsh-prime-agent/runtime` 条目另接受官方预算字段（`computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，同名逐字透传）、realm pool 治理项（`maxActiveRealms`、`maxIdleMs`、`maxHostCallsPerRun`、`maxParallelHostCallsPerRun`），以及 completion history 与投影上限（`maxCompletionHistoryEntries`、`maxCompletionHistoryEstimatedBytes`、`maxCompletionHistoryNodes`、`maxCompletionHistoryEntryBytes`、`maxCompletionFullBytes`、`maxCompletionProjectionBytes`）。
+`dsh-prime-agent/runtime` 条目另接受官方预算字段（`computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，同名逐字透传）、realm pool 治理项（`maxActiveRealms`、`maxIdleMs`、`maxHostCallsPerRun`、`maxParallelHostCallsPerRun`），以及单槽 completion 保留与投影上限（`maxCompletionRetainedBytes`、`maxCompletionRetainedNodes`、`maxCompletionOpaqueBytes`、`maxCompletionOpaqueNodes`、`maxCompletionFullBytes`、`maxCompletionProjectionBytes`）。
 
 ## 存储与安全
 

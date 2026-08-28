@@ -10,6 +10,28 @@ import * as primeRuntime from '../src/runtime.js'
 /* eslint-disable @typescript-eslint/no-explicit-any -- test bindings receive already-validated JSON */
 type Binding = (args: any) => Promise<CodeJsonValue>
 
+const RETENTION_CONFIG_FIELDS = [
+  'maxCompletionRetainedBytes',
+  'maxCompletionRetainedNodes',
+  'maxCompletionOpaqueBytes',
+  'maxCompletionOpaqueNodes',
+] as const
+
+const CONFIG_FIELDS = [
+  'stateDirectory',
+  'computeMs',
+  'maxWallMs',
+  'maxOutputBytes',
+  'maxOldGenerationSizeMb',
+  'maxActiveRealms',
+  'maxIdleMs',
+  'maxHostCallsPerRun',
+  'maxParallelHostCallsPerRun',
+  ...RETENTION_CONFIG_FIELDS,
+  'maxCompletionFullBytes',
+  'maxCompletionProjectionBytes',
+] as const
+
 let root: string | undefined
 const contexts: Context[] = []
 
@@ -91,6 +113,54 @@ async function makeRoot(prefix: string): Promise<void> {
 }
 
 describe('prime realm runtime routing', () => {
+  it('publishes only the latest-slot retention config fields', () => {
+    const retentionConfig = {
+      maxCompletionRetainedBytes: 101,
+      maxCompletionRetainedNodes: 102,
+      maxCompletionOpaqueBytes: 103,
+      maxCompletionOpaqueNodes: 104,
+    } satisfies Pick<primeRuntime.Config, (typeof RETENTION_CONFIG_FIELDS)[number]>
+    type ExpectedConfigField = (typeof CONFIG_FIELDS)[number]
+    const interfaceMatchesExpectedFields:
+      [Exclude<keyof primeRuntime.Config, ExpectedConfigField>] extends [never]
+        ? [Exclude<ExpectedConfigField, keyof primeRuntime.Config>] extends [never] ? true : false
+        : false = true
+
+    expect(interfaceMatchesExpectedFields).toBe(true)
+    expect(Object.keys(retentionConfig)).toEqual(RETENTION_CONFIG_FIELDS)
+    expect(Object.keys(primeRuntime.Config.dict ?? {})).toEqual(CONFIG_FIELDS)
+  })
+
+  it('passes all four latest-slot retention ceilings from host config to realms', async () => {
+    await makeRoot('dsh-prime-retention-config-')
+    const cases = [
+      { field: 'maxCompletionRetainedBytes', program: '"xx"', opaque: false },
+      { field: 'maxCompletionRetainedNodes', program: '[1]', opaque: false },
+      { field: 'maxCompletionOpaqueBytes', program: '({ fn: () => 1 })', opaque: true },
+      { field: 'maxCompletionOpaqueNodes', program: '({ fn: () => 1 })', opaque: true },
+    ] as const
+
+    for (const configCase of cases) {
+      const ctx = await startHost({ [configCase.field]: 1, maxCompletionFullBytes: 1 })
+      const result = await ctx.primeRealmRuntime.run(realmId(`retention-${configCase.field}`), {
+        program: configCase.program,
+        bindings: [],
+      })
+
+      expect(result.error, configCase.field).toBeUndefined()
+      expect(result.value, configCase.field).toMatchObject({
+        retained: false,
+        type: configCase.opaque ? 'object' : configCase.field.endsWith('Nodes') ? 'array' : 'string',
+        truncated: true,
+        ...(configCase.opaque ? { opaque: true } : {}),
+      })
+      expect(result.presentation, configCase.field).toMatchObject({
+        kind: 'unretained-preview',
+        valueType: configCase.opaque ? 'object' : configCase.field.endsWith('Nodes') ? 'array' : 'string',
+      })
+    }
+  })
+
   it('keeps ordinary bindings across cells without emitting retained-run notices', async () => {
     await makeRoot('dsh-prime-continuity-')
     const ctx = await startHost()
@@ -133,7 +203,7 @@ describe('prime realm runtime routing', () => {
       serializedBytes: 502,
     })
     if (result.presentation?.kind !== 'retained-preview') throw new Error('expected retained preview metadata')
-    expect(result.presentation.handle).toBeGreaterThan(0)
+    expect(result.presentation).not.toHaveProperty('handle')
   })
 
   it('routes one realm id to one live namespace and keeps separate realm ids isolated', async () => {

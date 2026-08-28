@@ -3,7 +3,7 @@
 // The byte budget cannot bound heap on its own: `[[],[],[],...]` costs 3 JSON
 // bytes per element but a whole object per element in the heap. This measures
 // the heap-per-node and heap-per-JSON-byte of the densest legal shapes, which
-// is what maxCompletionHistoryNodes has to be sized against.
+// is what maxCompletionRetainedNodes has to be sized against.
 //
 // One shape per child process: retaining a multi-hundred-MiB graph leaves the
 // heap unsettled for the next shape, so in-process iteration produces negative

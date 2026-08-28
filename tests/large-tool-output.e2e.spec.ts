@@ -156,6 +156,17 @@ function testAgent(id: string, cwd: string, events: LoggedEvent[]): Agent {
   } as unknown as Agent
 }
 
+function expectDispatchEvents(events: LoggedEvent[], names: string[]): void {
+  expect(events.map(event => {
+    const data = event.data
+    const name = typeof data === 'object' && data !== null && 'name' in data ? data.name : undefined
+    return { type: event.type, name }
+  })).toEqual(names.flatMap(name => [
+    { type: 'tool/code-dispatch-start', name },
+    { type: 'tool/code-dispatch', name },
+  ]))
+}
+
 interface BootOptions {
   /** Which spill backend to mount. */
   backend: 'local' | 'stub' | 'failing'
@@ -275,14 +286,15 @@ describe('scenario 1: nested full value, bounded model-facing content, retained 
     expect(content).toContain('Omitted')
     expect(content).not.toContain('row-0150')
 
-    // The outer artifact contains the notebook rendering of the official tool text.
+    // Nested dispatch content and the outer notebook rendering are governed
+    // independently, so both artifacts remain recoverable.
     const expectedText = renderRepl(firstValue)
     const recovered = await readFile(locatorOf(content), 'utf8')
     expect(recovered).toBe(expectedText)
     expect(Buffer.byteLength(recovered, 'utf8')).toBe(Buffer.byteLength(expectedText, 'utf8'))
-
-    // Exactly one artifact: the small outer result was never spilled as well.
-    expect(await spillFiles(spillRoot)).toHaveLength(1)
+    const artifactContents = await Promise.all((await spillFiles(spillRoot)).map(async file => await readFile(file, 'utf8')))
+    expect(artifactContents).toHaveLength(2)
+    expect(artifactContents).toEqual(expect.arrayContaining([renderReport({ marker: 'ALPHA', rows: expectedRows }), expectedText]))
 
     // The realm retained the canonical DTO for code, while the same object identity
     // continues to use the compact official presentation as a completion.
@@ -292,8 +304,7 @@ describe('scenario 1: nested full value, bounded model-facing content, retained 
     const secondValue = runValue(second)
     expect(secondValue.result).toBe(firstValue.result)
 
-    // No handshake/bootstrap or code-dispatch projection reached the session log.
-    expect(events).toEqual([])
+    expectDispatchEvents(events, ['big_report'])
   })
 })
 
@@ -355,21 +366,21 @@ describe('scenario 3: the hard output cap references instead of failing', () => 
     const value = runValue(execution)
     const envelope = value.result as Record<string, unknown>
     expect(envelope).toMatchObject({ retained: true, type: 'string', serializedBytesAtCapture: 2002, truncated: true })
-    expect(value.presentation).toMatchObject({ kind: 'retained-preview', valueType: 'string', serializedBytes: 2002 })
-    expect(envelope.use).toBe(`$out(${String(envelope.$out)})`)
+    expect(value.presentation).toEqual({ kind: 'retained-preview', valueType: 'string', serializedBytes: 2002 })
+    expect(envelope).not.toHaveProperty('$out')
+    expect(envelope).not.toHaveProperty('use')
     // Canonical execution keeps the internal envelope, while model text teaches
     // notebook reuse without exposing that transport object.
     expect(Buffer.byteLength(JSON.stringify(envelope), 'utf8')).toBeLessThanOrEqual(512)
     expect(await spillFiles(spillRoot)).toHaveLength(0)
     const content = textOf(execution.content)
     expect(content).not.toContain('[repl result:')
-    expect(content).toContain('remains in this REPL as `$_`')
-    expect(content).toContain(`use \`$out(${String(envelope.$out)})\``)
-    expect(content).not.toContain('"$out"')
+    expect(content).toContain('Assign it to a variable before running another value-producing cell.')
+    expect(content).not.toContain('$out')
     expect(content).not.toContain('Full formatted result stored at:')
 
-    // And the value the reference names is still there, in full, for the next cell.
-    const recovered = await runRepl(agent, `$out(${String(envelope.$out)}).length`)
+    // The single retained value remains available to the next cell.
+    const recovered = await runRepl(agent, '$_.length')
     expect(runValue(recovered).result).toBe(2000)
   })
 })
@@ -444,7 +455,7 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
     const replaced = textOf(atCap.content)
     expect(replaced).toBe(stubNotice(Buffer.byteLength(full, 'utf8')))
     expect(Buffer.byteLength(replaced, 'utf8')).toBe(cap)
-    expect(exact.store?.saves.map(save => save.content)).toEqual([full])
+    expect(exact.store?.saves.map(save => save.content)).toEqual([body, full])
 
     await ctx?.fiber.dispose()
     ctx = undefined
@@ -458,9 +469,9 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
     const inline = await runRepl(tight.agent, echoProgram)
     expect(runValue(inline).result).toBe(body)
     expect(textOf(inline.content)).toBe(full)
-    // The save happens before the cap check, so the file is a documented
-    // harmless orphan — what matters is that no locator reached the content.
-    expect(tight.store?.saves).toHaveLength(1)
+    // Nested and outer saves happen before the cap check, so both artifacts are
+    // documented harmless orphans; what matters is that no locator reached the content.
+    expect(tight.store?.saves).toHaveLength(2)
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('exceeds maxInlineBytes'))
   })
 
@@ -479,17 +490,18 @@ describe('scenario 4: UTF-8 and cap boundaries', () => {
       echoed.text.length
     `)
     expect(runValue(atCap).result).toBe(100)
-    expect(events).toEqual([])
+    expectDispatchEvents(events, ['echo_text', 'echo_text'])
     expect(store?.saves).toEqual([])
 
-    // A result whose RENDER exceeds the cap by one byte is the first size that
-    // spills: the boundary is `>` on the model-facing text.
+    // A result whose render exceeds the cap by one byte is the first size that
+    // spills: nested dispatch content and the outer notebook are governed
+    // independently, and the boundary is `>` for both.
     const overCap = await runRepl(agent, `
       const echoed = await tools.echo_text({ text: 'y'.repeat(101) })
       echoed
     `)
     expect(runValue(overCap).result).toBe('y'.repeat(101))
-    expect(store?.saves).toHaveLength(1)
+    expect(store?.saves).toHaveLength(2)
   })
 })
 
@@ -515,6 +527,6 @@ describe('scenario 5: a refusing spill backend', () => {
     // The degradation is distinguishable from a successful spill.
     expect(warn).toHaveBeenCalled()
     expect(store?.saves).toEqual([])
-    expect(events).toEqual([])
+    expectDispatchEvents(events, ['big_report'])
   })
 })

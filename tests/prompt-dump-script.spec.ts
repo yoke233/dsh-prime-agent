@@ -43,6 +43,8 @@ describe('Prime prompt dump script', () => {
     expect(dump).toContain('## Route')
     expect(dump).toContain('## System Prompt')
     expect(dump).toContain('## Persistent TypeScript REPL')
+    expect(dump).toContain('declare const $_: unknown')
+    expect(dump).not.toMatch(/\$out\b/)
     expect(dump).toContain(root)
     expect(dump).toContain('## Messages')
     expect(dump).toContain('### 1. user / user')
