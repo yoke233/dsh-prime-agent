@@ -125,6 +125,7 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 - Prime 的 child answer 可以进入 parent 仍在进行的计算。DSH 0.1.1-rc.2 已原生实现该不变量：官方 `tool-subagent-report` 默认使用 `next-step`，由 continuation manager 调用 `parent.steer()`，让运行中的 parent 在最近 step 消费并唤醒空闲 parent，同时维护唤醒记账以及 report-before-settlement FIFO。本插件直接组合该能力，不再替换 report row 或维护私有 adapter。
 - Prime 的 Python heap 能保存活对象和函数；当前适配用可信 `exec.agent.id` 解析的 Realm identity 选择 Persistent TypeScript Realm，在同一 Worker generation 中保留 TypeScript live objects。IPython 只用于参考行为与失败语义，不是产品 backend。
 - Prime preset 相比 shipped `code` preset 不重复注册 scoped `tool-skill`：Host 已有正式 catalog/loader；保留第二个同名注册会 shadow Host tool，使 visibility-matched pre-step hook 无法把合并后的 Skill 目录加入首个模型请求。preset 仍保留 scoped filesystem provider，以贡献项目与用户 Skill roots。
+- Prime preset 有意不挂载 shipped `code` preset 的 Plan Mode；Compaction 保持 DSH 默认策略，preset 不接管 provider 或配置模型容量。
 - Prime preset 额外组合 DSH 官方 owner-isolated Terminal：POSIX 选择 Bash，Windows 选择 PowerShell。正则输出订阅由 profile 同行安装的 `dsh-tool-monitor` bundle 提供；Monitor 只替换具体 `jobs-local` adapter，不复制 Terminal、Jobs 所有权、sandbox 或取消策略。Prime 同时通过 scoped restriction 关闭全局 `workflow`/`ralph` 工具，并移除 preset 内重复的 `tool-ralph` row；Subagent 的内部 spawn provider 保持不变。
 - 当前跨 Agent 上下文使用共享工作区 handoff file。写后不改是 policy 约定，不存在独立 Capsule store、`share`/`mount` 或文件访问授权。
 - 模型可加载 `refine` Skill 并主动安排 turn-end refinement，人类也可调用 `/refine`；两者复用同一个有界 planner 和 revision-checked store。interval/compaction auto-refine 与效果观察仍未启用。

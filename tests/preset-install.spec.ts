@@ -148,6 +148,9 @@ describe('packaged Prime preset composition', () => {
     // projection policy row stays in the composition.
     expect(rows.find(row => row.id === 'tool-presentation')).toBeUndefined()
     expect(rows.find(row => row.id === 'prime-spill-policy')?.name).toBe('@deepseek-ai/dsh-spill-policy')
+
+    // Prime intentionally omits Plan Mode.
+    expect(rows.find(row => row.id === 'planning')).toBeUndefined()
   })
 
   it('derives stateDirectory from a `!!js` harness-home expression', async () => {
