@@ -41,7 +41,7 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
 - Prime preset 挂载 DSH 官方持久 Terminal：POSIX 使用 Bash，Windows 使用 PowerShell；`terminal_open`/`terminal_send`/`terminal_read`/`terminal_signal`/`terminal_close`/`terminal_list` 通过 `tools.*` 调用。同行安装的 `dsh-tool-monitor` 可对后台 `terminal_send` 产生的 `pty-send-*` Job 做逐行 JavaScript 正则订阅。
 - Prime preset 不挂载 DSH Plan Mode；Compaction 保持 DSH 默认策略，preset 不接管 provider 或配置模型容量。
 - `tools.*` 返回值始终遵循 canonical `ToolOutputMap`，可直接访问 `read.lines`、`edit.before/after` 等字段；对象结果直接成为 completion 时只改变模型展示为官方 content，不改变程序拿到的值。不要对返回值盲目再次 `JSON.parse`。notebook 结构化 preview 中的 `\\` 只是 JSON notation；模型自行编写 Windows 路径时优先使用 `D:/work/project` 形式，避免额外转义层。工具参数使用 TypeScript 对象字面量；完整 cell 会在执行前解析，语法失败不会执行其中任何代码或 tool call，修正后应重试。
-- Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值；`repl` 的外层 canonical value 仍是可程序化读取的 lossless JSON（`logs`、可选 `result` 与可信 presentation metadata），但模型只看到无类型外壳的 notebook 文本：logs 和字符串原样显示，结构化值只 pretty-print 一次，空结果返回空文本；renderer 不添加 `[repl result: ...]`、`[repl logs]` 或 Markdown fence。普通程序异常只保留可行动的异常消息，不把 Worker/V8 内部调用栈带进模型或界面。外层 notebook 文本超过展示预算时由 DSH 写入 artifact 并返回 locator；保存失败时保留完整 inline 成功结果并告警，不伪造 locator。
+- Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值；`repl` 的外层 canonical value 仍是可程序化读取的 lossless JSON（`logs`、可选 `result` 与可信 presentation metadata），但模型只看到无类型外壳的 notebook 文本：logs 和字符串原样显示，结构化值只 pretty-print 一次，空结果返回空文本；renderer 不添加 `[repl result: ...]`、`[repl logs]` 或 Markdown fence。展示缩短不改变已赋给 REPL 变量的 canonical value；spill notice 出现时，模型先从变量继续结构化处理，确需遗漏的格式化文本才 read/grep locator，并在 Windows 字符串中把 locator 的反斜杠改为正斜杠。普通程序异常只保留可行动的异常消息，不输出用户栈；成功值仍保留 canonical completion。
 - 成功的非 `undefined` completion 由 runtime 自动保留在 generation-local 单槽中：优先把需要复用的值赋给命名变量，`$_` 表示最新 completion，下一个非 `undefined` completion 会替换它；`undefined` 不覆盖当前值，因此可先执行 `let saved = $_`。runtime-authored preview 由 nonce 验证后的 metadata 驱动，retained/opaque 提示要求在下一个产出 completion 的 cell 前保存为变量，预算拒绝会清空旧槽并明确新值不可恢复。presentation 不携带 numeric handle，opaque 值不做结构化渲染；用户主动返回同形 envelope 仍按普通 JSON 显示。
 - Realm 是 live-only 的：abort、timeout、OOM 会 hard-kill Worker 并丢失 namespace，下一次真正执行时会明确提示之前的 bindings 与保留结果已丢失。跨重启的检查点由程序显式写入持久任务文件。
 
@@ -250,7 +250,7 @@ Prime 注册一个随包 `refine` Skill provider。Host 的正式 `dsh-tool-skil
 | `requireOrchestrationTools` | `true` | 要求 Agent catalog 具备 Subagent admission（`subagent`/`subagent_fork`）与 `agents`/`jobs` 控制（`list_agents`、`send_message`、`interrupt_agent`、`job_output`、`job_list`、`job_kill`） |
 | `continual` | 有界默认值 | 学习条目、事务、状态与 prompt 限制 |
 
-`dsh-prime-agent/runtime` 条目另接受官方预算字段（`computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，同名逐字透传）、realm pool 治理项（`maxActiveRealms`、`maxIdleMs`、`maxHostCallsPerRun`、`maxParallelHostCallsPerRun`），以及单槽 completion 保留与投影上限（`maxCompletionRetainedBytes`、`maxCompletionRetainedNodes`、`maxCompletionOpaqueBytes`、`maxCompletionOpaqueNodes`、`maxCompletionFullBytes`、`maxCompletionProjectionBytes`）。
+`dsh-prime-agent/runtime` 条目接受执行预算字段（`computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`）；显式值逐字透传，未配置时 Worker old-generation 使用 Prime 默认 64 MiB。Realm pool 治理项默认 `maxActiveRealms: 32`、`maxIdleMs: 600000`、`maxHostCallsPerRun: 200`、`maxParallelHostCallsPerRun: 16`。条目还接受单槽 completion 保留与投影上限（`maxCompletionRetainedBytes`、`maxCompletionRetainedNodes`、`maxCompletionOpaqueBytes`、`maxCompletionOpaqueNodes`、`maxCompletionFullBytes`、`maxCompletionProjectionBytes`）。
 
 ## 存储与安全
 

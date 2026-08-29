@@ -34,16 +34,13 @@ const HOST_PARENT_PID = process.ppid
 const USER_PRESET_DIR = '.agent-presets'
 
 /**
- * The official per-run budgets, restated because a realm needs a concrete value
- * even when the deployment leaves the field blank. These MUST track
- * `WorkerThreadCodeRuntime.Config`; a divergence would give realm runs
- * different budgets from the official one-shot runtime under one unset config.
+ * Official per-run defaults that Prime preserves when deployment config leaves
+ * the shared execution and output fields blank.
  */
 const OFFICIAL_DEFAULTS = {
   computeMs: 60_000,
   maxWallMs: 600_000,
   maxOutputBytes: 67_108_864,
-  maxOldGenerationSizeMb: 512,
 } as const
 
 /**
@@ -72,7 +69,8 @@ const COMPLETION_PROJECTION_FIELDS = [
   'maxCompletionProjectionBytes',
 ] as const
 
-const DEFAULT_MAX_ACTIVE_REALMS = 8
+const DEFAULT_MAX_OLD_GENERATION_SIZE_MB = 64
+const DEFAULT_MAX_ACTIVE_REALMS = 32
 const DEFAULT_MAX_IDLE_MS = 600_000
 const DEFAULT_MAX_HOST_CALLS_PER_RUN = 200
 const DEFAULT_MAX_PARALLEL_HOST_CALLS_PER_RUN = 16
@@ -91,7 +89,7 @@ export interface Config {
   maxWallMs?: number
   /** Combined outer-output cap for one run; blank passes through to the official default. */
   maxOutputBytes?: number
-  /** Worker max old-generation heap in MiB; blank passes through to the official default. */
+  /** Worker max old-generation heap in MiB; blank uses the Prime default. */
   maxOldGenerationSizeMb?: number
   /** Realms that may hold a worker at once. */
   maxActiveRealms?: number
@@ -169,7 +167,7 @@ function realmBudgets(config: Config): RealmBudgets {
     computeMs: config.computeMs ?? OFFICIAL_DEFAULTS.computeMs,
     maxWallMs: config.maxWallMs ?? OFFICIAL_DEFAULTS.maxWallMs,
     maxOutputBytes: config.maxOutputBytes ?? OFFICIAL_DEFAULTS.maxOutputBytes,
-    maxOldGenerationSizeMb: config.maxOldGenerationSizeMb ?? OFFICIAL_DEFAULTS.maxOldGenerationSizeMb,
+    maxOldGenerationSizeMb: config.maxOldGenerationSizeMb ?? DEFAULT_MAX_OLD_GENERATION_SIZE_MB,
     maxHostCallsPerRun: config.maxHostCallsPerRun ?? DEFAULT_MAX_HOST_CALLS_PER_RUN,
     maxParallelHostCallsPerRun: config.maxParallelHostCallsPerRun ?? DEFAULT_MAX_PARALLEL_HOST_CALLS_PER_RUN,
   }

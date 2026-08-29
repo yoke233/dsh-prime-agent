@@ -151,7 +151,7 @@ Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分�
 
 外层 `repl` canonical value 保持结构化：`logs`、可选 `result` 和可选可信 `presentation` metadata 仍可由调用方程序化读取。模型 renderer 不再 `JSON.stringify({ logs, result })`：logs 和 scalar string 原样显示，full structured value 只 pretty-print 一次；retained preview 与 opaque reference 提示值仍在 `$_`，并要求在下一个产生 completion 的 cell 前赋给命名变量；unretained preview 只说明重新计算或从持久文件载入。renderer 不调用用户 hook，无 logs 且无 completion 时返回空文本，也不添加普通结果类型标题或 Markdown fence。preview 是观察文本而非可解析数据，后续计算必须回到命名变量或 `$_`。
 
-工具调用的 canonical value、官方 content、日志与 spill locator 仍由 DSH 工具层管理。Prime binding 始终把 canonical value 返回给程序；非空官方 content 只与对象 identity 关联，并仅在该对象直接成为 completion 时替代其模型展示。提取字段、spread 或其他转换产生的新值继续走普通 completion 路径；primitive canonical value 保持原值。Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值，超过预算时 spill artifact 保存完整 notebook renderer 文本并按需读取。store 缺失、保存失败或 notice 无法放进预算时，策略保留完整 inline 成功结果并告警，不伪造 locator。这个预算不限制 Realm heap，也不等于上游 IPython 的 snapshot pruning；Realm 不复制 DSH 的 spill 或工具日志存储。
+工具调用的 canonical value、官方 content、日志与 spill locator 仍由 DSH 工具层管理。Prime binding 始终把 canonical value 返回给程序；非空官方 content 只与对象 identity 关联，并仅在该对象直接成为 completion 时替代其模型展示。提取字段、spread 或其他转换产生的新值继续走普通 completion 路径；primitive canonical value 保持原值。Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值，超过预算时模型先继续使用已赋值的 canonical 变量；只有确需遗漏的格式化文本时才 read/grep notice 中的 locator，并在 TypeScript 字符串中规范化 Windows 反斜杠。Spill backend 不可用时保留 inline 成功结果并告警。
 
 控制面 policy 只在任一失败会让全部成功结果都失去用途时建议 `Promise.all`；相互独立的读取、搜索和探测即使希望拿到全部答案，也使用 `Promise.allSettled` 或逐项捕获 `ToolCallError`，保留成功结果、检查失败并只重试失败项。这些是模型侧编排约定，不改变 DSH 工具失败或 Realm partial-commit 语义。
 
@@ -241,7 +241,7 @@ Agent-scope `dsh-prime-agent`：
 | `requireOrchestrationTools` | `true` | 是否在 prompt assembly 时要求 Agent catalog 具备 Subagent admission（`subagent`/`subagent_fork`）与 `agents`/`jobs` 控制（`list_agents`、`send_message`、`interrupt_agent`、`job_output`、`job_list`、`job_kill`）。 |
 | `continual` | 有界默认值 | entry、evidence、transaction、状态文件和 prompt 预算。 |
 
-Host-scope `dsh-prime-agent/runtime` 透传官方 `computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb`，并增加 `maxActiveRealms`（默认 8）、`maxIdleMs`（默认 600000）、`maxHostCallsPerRun`（默认 200）、`maxParallelHostCallsPerRun`（默认 16），以及 completion 保留与投影的六个上限：`maxCompletionRetainedBytes`（默认 8 MiB）、`maxCompletionRetainedNodes`（默认 1,000,000）、`maxCompletionOpaqueBytes`（默认 8 MiB）、`maxCompletionOpaqueNodes`（默认 262,144）、`maxCompletionFullBytes`（默认 64 KiB）、`maxCompletionProjectionBytes`（默认 4 KiB）。前四项分别限制单个最新 JSON/opaque 值的准入，不是 entry-count 或累计 history 配额。
+Host-scope `dsh-prime-agent/runtime` 对显式配置的 `computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb` 逐字透传；未配置时 `maxOldGenerationSizeMb` 使用 Prime 默认 64 MiB。Realm pool 治理项为 `maxActiveRealms`（默认 32）、`maxIdleMs`（默认 600000）、`maxHostCallsPerRun`（默认 200）、`maxParallelHostCallsPerRun`（默认 16）。Completion 保留与投影的六个上限为 `maxCompletionRetainedBytes`（默认 8 MiB）、`maxCompletionRetainedNodes`（默认 1,000,000）、`maxCompletionOpaqueBytes`（默认 8 MiB）、`maxCompletionOpaqueNodes`（默认 262,144）、`maxCompletionFullBytes`（默认 64 KiB）、`maxCompletionProjectionBytes`（默认 4 KiB）。前四项分别限制单个最新 JSON/opaque 值的准入，不是 entry-count 或累计 history 配额。
 
 runtime row 与 Prime preset 的 `stateDirectory` 必须相同，否则身份记录与 lease 目录不一致，所有 Prime 请求都会 fail closed。
 

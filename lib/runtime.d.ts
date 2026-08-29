@@ -26,7 +26,7 @@ export interface Config {
     maxWallMs?: number;
     /** Combined outer-output cap for one run; blank passes through to the official default. */
     maxOutputBytes?: number;
-    /** Worker max old-generation heap in MiB; blank passes through to the official default. */
+    /** Worker max old-generation heap in MiB; blank uses the Prime default. */
     maxOldGenerationSizeMb?: number;
     /** Realms that may hold a worker at once. */
     maxActiveRealms?: number;

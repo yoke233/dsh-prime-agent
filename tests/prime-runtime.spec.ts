@@ -131,6 +131,20 @@ describe('prime realm runtime routing', () => {
     expect(Object.keys(primeRuntime.Config.dict ?? {})).toEqual(CONFIG_FIELDS)
   })
 
+  it('uses the Prime worker and pool defaults when deployment config leaves them blank', async () => {
+    await makeRoot('dsh-prime-default-budgets-')
+    const ctx = await startHost()
+    const runtime = ctx.primeRealmRuntime as unknown as {
+      budgets: { maxOldGenerationSizeMb: number }
+      maxActiveRealms: number
+      maxIdleMs: number
+    }
+
+    expect(runtime.budgets.maxOldGenerationSizeMb).toBe(64)
+    expect(runtime.maxActiveRealms).toBe(32)
+    expect(runtime.maxIdleMs).toBe(600_000)
+  })
+
   it('passes all four latest-slot retention ceilings from host config to realms', async () => {
     await makeRoot('dsh-prime-retention-config-')
     const cases = [
