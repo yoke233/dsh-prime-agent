@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId, HarnessError } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, HarnessError } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { registerApplyPatch } from '../src/apply-patch/plugin.js'
@@ -120,7 +120,7 @@ async function harness(initial: Record<string, string>): Promise<Harness> {
 
 async function apply(h: Harness, patch: string) {
   return await h.ctx.tools.execute({
-    callId: CallId('patch-root'),
+    callId: ToolCallId('patch-root'),
     name: 'apply_patch',
     arguments: { patch },
     agent: h.agent,

@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
@@ -100,7 +100,7 @@ async function startHost(options: HostOptions = {}): Promise<Context> {
 async function call(agent: Agent, code: string): Promise<ToolExecutionResult> {
   if (ctx === undefined) throw new Error('test context was not created')
   return await ctx.tools.execute({
-    callId: CallId(`prime-failure-${++callNumber}`),
+    callId: ToolCallId(`prime-failure-${++callNumber}`),
     name: 'repl',
     arguments: { code },
     signal,
@@ -264,9 +264,10 @@ describe('ordinary tool failure inside a Prime program', () => {
 
     expect(observed.maxInFlight).toBe(2)
     expect(observed.reads.sort()).toEqual([READABLE_PATH, MISSING_PATH].sort())
-    // The bridge dispatches through the registry: no code-dispatch projection
-    // is written to the session log for nested calls.
-    expect(alpha.events.filter(event => event.type === 'tool/code-dispatch')).toEqual([])
+    // Alpha.2 records each nested PTC settlement durably for presentation and replay.
+    const dispatches = alpha.events.filter(event => event.type === 'tool/code-dispatch')
+    expect(dispatches.map(event => event.data.name)).toEqual(['probe_read', 'probe_read'])
+    expect(dispatches.map(event => event.data.isError)).toEqual([false, true])
   }, 30_000)
 
   it('fails the run on a bare Promise.all rejection while the realm generation survives', async () => {
@@ -311,9 +312,7 @@ describe('program failure inside a Prime program', () => {
       throw new Error("program invariant broken")
     `)
 
-    // The runtime renders the thrown value with its `Error: ` envelope and its
-    // stack, so the assertion pins the prefix rather than a bare message.
-    expect(failure.message).toContain('repl cell failed (exception): Error: program invariant broken')
+    expect(failure.message).toContain('repl cell failed (exception): program invariant broken')
     // The logs the program produced before dying are visible to the model, which
     // is what lets it write a smaller repair program instead of replaying.
     for (let index = 0; index < 5; index++) expect(failure.message).toContain(`checkpoint ${index}`)
@@ -337,7 +336,7 @@ describe('program failure inside a Prime program', () => {
       throw new Error("follow-up step failed after the mutation")
     `)
 
-    expect(failure.message).toContain('repl cell failed (exception): Error: follow-up step failed after the mutation')
+    expect(failure.message).toContain('repl cell failed (exception): follow-up step failed after the mutation')
     expect(failure.message).toContain('mutation committed at')
 
     // The external fact, read outside the realm: the side effect happened and

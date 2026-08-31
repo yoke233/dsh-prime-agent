@@ -62,7 +62,7 @@ DSH profile
 
 随包 `cordis.patch.yml` 只执行一个操作：把 `dsh-prime-agent/runtime` 作为新 row 纯插入。官方 `code-runtime` row 原样保留——Prime 包不替换它、不携带也不挂载 one-shot fallback，非 Prime 会话继续由宿主官方 runtime 按官方语义处理。该 host row 注册唯一命名的 `primeRealmRuntime` 服务、监控直接父进程并在启动时落位 Prime preset。标准安装命令把 `dsh-tool-monitor` 作为第二个 profile bundle 直接加入；不能把它仅作为 Prime 的传递依赖，因为 DSH 只把 profile 的直接依赖纳入有序 bundle patch 层。
 
-Subagent report 完全复用 DSH 0.1.1-rc.2 base bundle 的官方 `tool-subagent-report`。其默认 `next-step` 调度通过 `parent.steer()` 让运行中的 parent 在最近 step 消费报告，并唤醒空闲 parent；continuation manager 同时负责唤醒记账以及 report 先于后续 settled notice 的 FIFO 顺序。本包不再替换或复制该能力。
+Subagent report 完全复用 DSH 0.1.2-alpha.2 base bundle 的官方 `tool-subagent-report`。其默认 `next-step` 调度通过 `parent.steer()` 让运行中的 parent 在最近 step 消费报告，并唤醒空闲 parent；continuation manager 同时负责唤醒记账以及 report 先于后续 settled notice 的 FIFO 顺序。本包不再替换或复制该能力。
 
 runtime 启动时把随包 Prime preset 复制到 `$DSH_HOME/.agent-presets/prime`，仅在目标目录不存在时写入。已有目录永不覆盖；要采用新快照必须由操作者删除旧目录后重启。
 

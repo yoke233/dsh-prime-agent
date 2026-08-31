@@ -5,9 +5,9 @@ import {
   type DiffCallView,
   type DiffResultView,
   type FileDiff,
-  type JsonValue,
   type ToolResult,
 } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { executePatch } from './executor.js'
 import { parsePatch } from './parser.js'
 import { PatchError, type ParsedPatch } from './types.js'

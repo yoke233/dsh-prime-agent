@@ -5,7 +5,7 @@
 # which registers the uniquely named `primeRealmRuntime` service, watches its
 # owning parent, and places the packaged preset.
 #
-# Subagent report delivery stays with the DSH 0.1.1-rc.2 base bundle. Its official
+# Subagent report delivery stays with the DSH 0.1.2-alpha.2 base bundle. Its official
 # `tool-subagent-report` defaults to `next-step`: `parent.steer()` lets a running parent
 # consume the report at its nearest step boundary and wakes an idle parent,
 # including continuation-manager accounting and report-before-settlement FIFO.

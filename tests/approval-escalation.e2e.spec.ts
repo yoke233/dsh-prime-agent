@@ -19,8 +19,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -90,11 +91,13 @@ async function bootFs(options: { mode: 'read-only' | 'workspace-write'; approval
   const workspace = join(root, 'workspace')
   await mkdir(workspace, { recursive: true })
   const context = new Context()
+  await context.plugin(SessionProjectionRegistry)
   await context.plugin(SystemPrompt)
   await context.plugin(ToolRuntime, {})
   await context.plugin(SandboxPolicyService, { mode: options.mode, workspaceRoot: workspace })
   await context.plugin(SandboxedFileSystem, { cwd: workspace })
-  await context.plugin(ToolFs, {})
+  const toolFsFiber = context.plugin(ToolFs, {})
+  await toolFsFiber.await()
   let approval: FakeApproval | undefined
   if (options.approval) {
     await context.plugin(FakeApproval)
@@ -102,11 +105,15 @@ async function bootFs(options: { mode: 'read-only' | 'workspace-write'; approval
   }
   ctx = context
   const id = SessionId('escalation-agent')
+  const session = Session.create(id, undefined, {
+    version: 0,
+    id,
+    createdAt: Date.now(),
+    cwd: workspace,
+  })
   const agent = {
     id,
-    // `events` must exist: sandboxPolicy.resolve scans the session log for a
-    // `sandbox/mode` override (`sandbox-policy/src/index.ts:149-151`).
-    session: { id, header: { id, cwd: workspace }, events: [], append: () => {} },
+    session,
   } as unknown as Agent
   return { agent, workspace, approval }
 }
@@ -114,7 +121,7 @@ async function bootFs(options: { mode: 'read-only' | 'workspace-write'; approval
 async function write(agent: Agent, args: Record<string, unknown>): Promise<ToolExecutionResult> {
   if (ctx === undefined) throw new Error('test context was not created')
   return await ctx.tools.execute({
-    callId: CallId(`escalation-${++callNumber}`),
+    callId: ToolCallId(`escalation-${++callNumber}`),
     name: 'write',
     arguments: args,
     signal,

@@ -1,9 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { CallId, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { CodeBindingFunction, CodeBindingNamespace } from '@deepseek-ai/dsh-code-runtime'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type {
-  CodeDispatchLog,
-  JsonValue,
+  PtcDispatchLog,
   ToolExecutionInput,
   ToolExecutionResult,
   ToolRunContext,
@@ -77,11 +77,11 @@ function officialPresentation(result: ToolExecutionResult): string | undefined {
 
 async function dispatchLogContent(
   ctx: Context,
-  dispatch: CodeDispatchLog,
+  dispatch: PtcDispatchLog,
 ): Promise<ToolExecutionResult['content']> {
   try {
     return await ctx.waterfall(
-      'tools/code-dispatch-log',
+      'tools/ptc-dispatch-log',
       dispatch,
       () => Promise.resolve(dispatch.content),
     )
@@ -108,7 +108,7 @@ export function createReplBindings(
   let commitTail: Promise<void> = Promise.resolve()
 
   const binding = (toolName: string): CodeBindingFunction => async (argumentsValue: unknown): Promise<JsonValue> => {
-    const subCallId = CallId(String(exec.callId) + ':repl:' + String(++dispatchNumber))
+    const subCallId = ToolCallId(String(exec.callId) + ':repl:' + String(++dispatchNumber))
     const rootCallId = exec.rootCallId ?? exec.callId
     const input: ToolExecutionInput = {
       callId: subCallId,

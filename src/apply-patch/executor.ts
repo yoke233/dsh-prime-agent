@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { CallId } from '@deepseek-ai/dsh-llm'
-import type { JsonValue, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import type { ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { parsePatch } from './parser.js'
 import { planPatch } from './planner.js'
 import { PATCH_ERROR_CODES, PatchError, type ApplyPatchResult } from './types.js'
@@ -62,7 +63,7 @@ export async function executePatch(ctx: Context, args: { patch: string }, exec: 
   let dispatchNumber = 0
   const dispatch = async (name: 'read' | 'write', argumentsValue: unknown): Promise<ToolExecutionResult> => {
     const result = await ctx.tools.execute({
-      callId: CallId(`${String(exec.callId)}:apply_patch:${++dispatchNumber}`),
+      callId: ToolCallId(`${String(exec.callId)}:apply_patch:${++dispatchNumber}`),
       rootCallId: exec.rootCallId,
       name,
       arguments: argumentsValue,

@@ -129,7 +129,7 @@ describe('Prime packaging boundary', () => {
     expect(composed.find(row => row.id === 'prime-code-runtime')?.name).toBe('dsh-prime-agent/runtime')
   })
 
-  // Prime delegates report scheduling to the 0.1.1-rc.2 base bundle. Pin the
+  // Prime delegates report scheduling to the 0.1.2-alpha.2 base bundle. Pin the
   // composition boundary without duplicating the upstream tool implementation.
   it('uses exactly one official tool-subagent-report row', async () => {
     const patches = load(await readFile(BASE_PATCH, 'utf8'), { schema: entryListSchema }) as Row[]

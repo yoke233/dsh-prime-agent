@@ -1,7 +1,7 @@
 /** Prime Agent-inspired RLM control plane for DeepSeek Harness. @module dsh-prime-agent */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-import { type JsonValue } from '@deepseek-ai/dsh-tools';
+import type { JsonValue } from '@deepseek-ai/dsh-util-values';
 import type { HarnessLimits } from './continual/types.js';
 import type { ReplPresentation } from './realm/protocol.js';
 export declare const name = "prime-agent";

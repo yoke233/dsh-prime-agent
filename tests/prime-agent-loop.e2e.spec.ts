@@ -6,16 +6,17 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { CallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { installLlmReplay, type ReplayEntry } from '@deepseek-ai/dsh-llm-replay'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LocalSpillStore from '@deepseek-ai/dsh-spill-local'
 import * as SpillPolicy from '@deepseek-ai/dsh-spill-policy'
 import * as primeAgent from '../src/index.js'
 import * as primeRuntime from '../src/runtime.js'
 
 function toolCallResponse(rawCallId: string, code: string): StreamChunk[] {
-  const id = CallId(rawCallId)
+  const id = ToolCallId(rawCallId)
   const argumentsJson = JSON.stringify({ code })
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
@@ -79,6 +80,7 @@ describe('Prime realm across deterministic agent-loop turns', () => {
 
     ctx = new Context()
     // Native tool presentation: the Prime plugin itself owns the `repl` surface.
+    await ctx.plugin(SessionProjectionRegistry)
     await mountAgentLoopTestDependencies(ctx)
     await ctx.plugin(LocalSpillStore, { root: join(root, 'spill') })
     await ctx.plugin(SpillPolicy, { maxInlineBytes: 1024 })

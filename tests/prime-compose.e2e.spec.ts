@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { boot, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { REPL_TOOL_NAME } from '../src/repl/bridge.js'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -65,7 +65,7 @@ function completion(execution: ToolExecutionResult): { logs: string[], result?: 
 async function runRepl(agent: Agent, code: string): Promise<{ logs: string[], result?: unknown }> {
   if (ctx === undefined) throw new Error('test context was not booted')
   return completion(await ctx.tools.execute({
-    callId: CallId(`prime-compose-${++callNumber}`),
+    callId: ToolCallId(`prime-compose-${++callNumber}`),
     name: REPL_TOOL_NAME,
     arguments: { code },
     signal: testSignal,
@@ -197,7 +197,7 @@ describe('Prime host patch composition', () => {
     // hand in the test.
     const body = 'SPILL-'.repeat(1000)
     const big = await ctx.tools.execute({
-      callId: CallId(`prime-compose-${++callNumber}`),
+      callId: ToolCallId(`prime-compose-${++callNumber}`),
       name: REPL_TOOL_NAME,
       arguments: { code: '"SPILL-".repeat(1000)' },
       signal: testSignal,

@@ -20,7 +20,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
@@ -219,7 +219,7 @@ async function bootPrime(options: BootOptions): Promise<Booted> {
 async function runRepl(agent: Agent, code: string): Promise<ToolExecutionResult> {
   if (ctx === undefined) throw new Error('test context was not created')
   return await ctx.tools.execute({
-    callId: CallId(`prime-large-output-${++callNumber}`),
+    callId: ToolCallId(`prime-large-output-${++callNumber}`),
     name: 'repl',
     arguments: { code },
     signal,

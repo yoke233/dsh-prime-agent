@@ -159,6 +159,7 @@ async function main() {
   }
 
   const scratch = await mkdtemp(join(tmpdir(), 'dsh-prime-prompt-dump-'))
+  const configScratch = await mkdtemp(join(PROJECT_ROOT, 'node_modules', '.dsh-prime-prompt-dump-'))
   const previousHome = process.env.DSH_HOME
   let ctx
   let handle
@@ -166,7 +167,7 @@ async function main() {
     const home = join(scratch, 'home')
     const presetRoot = join(scratch, 'presets')
     await copyPrimePreset(join(presetRoot, 'prime'))
-    const configPath = join(scratch, 'cordis.yml')
+    const configPath = join(configScratch, 'cordis.yml')
     await writeFile(configPath, '[]\n')
     process.env.DSH_HOME = home
 
@@ -242,6 +243,7 @@ async function main() {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     await rm(scratch, { recursive: true, force: true })
+    await rm(configScratch, { recursive: true, force: true })
   }
 }
 

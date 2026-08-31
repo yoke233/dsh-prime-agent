@@ -103,12 +103,12 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 | Python 变量/文件上下文 | Realm live namespace + 共享工作区 handoff/result files |
 | `rlm()` admission handle | continuable Subagent id；inbox acceptance 后立即返回 |
 | foreground concurrent work | repl 程序内按失败语义选择 `Promise.all` 或 `Promise.allSettled` 调用真实工具/Subagent |
-| child 显式 reply | child `report`；DSH 0.1.1-rc.2 官方 next-step 调度在父忙时进入最近 step、父闲时唤醒 |
+| child 显式 reply | child `report`；DSH 0.1.2-alpha.2 官方 next-step 调度在父忙时进入最近 step、父闲时唤醒 |
 | list/follow-up/cancel child | `list_agents` / `send_message` / `interrupt_agent` |
 | delete child | 当前无对应操作；持久 child Session 不由插件删除 |
 | `rlm.harness` | `refine` |
 | `/refine` / auto-refine | 手动 `/refine` 独立生成有界 proposal 并复用事务 store；auto-refine 未实现 |
-| per-child `thinking` | 当前无 per-spawn 参数；等待 DSH Subagent 原生支持并按 resolved model 校验 |
+| per-child `thinking` | 官方 `reasoning_effort` 参数；先用 `list_subagent_models` 核对目标模型公开的 effort |
 | kernel-owned MCP programs | DSH Host MCP client 注册统一 tools；repl 单元从 catalog 生成 `tools.*` bindings |
 | IPython snapshot pruning | Realm 不 snapshot/GC；任务文件 + spill artifact + 紧凑 live 工作集 |
 | Persistent Goal | DSH Goal 与 round driver |
@@ -124,4 +124,4 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 
 我们学习这一不变量，而不绑定其实现语言。当前 DSH 适配是破坏性的：模型可见入口从 `run_code`/Code Mode SDK 换成唯一 `repl` 工具，身份路由不再经过握手——Agent scope 用可信 `exec.agent.id` 解析不透明 Realm identity，host `primeRealmRuntime` 服务与未被改动的官方 code runtime 并存，非 Prime 会话继续官方 one-shot 语义。旧 `run_code` 入口、旧 Code Mode 组合与旧 live namespace 不迁移：没有 alias、feature flag 或静默降级。跨重启的可靠数据层是工作区文件，跨 Agent 的材料通过只写一次的 handoff file 交接。完整当前边界见 [当前架构](architecture.md)。
 
-child 的中间发现应尽可能进入 parent 当前计算的最近 step，而不是无条件积压成多个独立后续轮次。DSH 0.1.1-rc.2 已把这一行为收归官方 `tool-subagent-report`：`next-step` 通过 `parent.steer()` 让忙碌 parent 在最近 step 消费，并唤醒空闲 parent；continuation manager 维护唤醒记账和 report-before-settlement FIFO。本插件因此删除了本地 report adapter，不再复制 DSH 已拥有的消息调度。
+child 的中间发现应尽可能进入 parent 当前计算的最近 step，而不是无条件积压成多个独立后续轮次。DSH 0.1.2-alpha.2 已把这一行为收归官方 `tool-subagent-report`：`next-step` 通过 `parent.steer()` 让忙碌 parent 在最近 step 消费，并唤醒空闲 parent；continuation manager 维护唤醒记账和 report-before-settlement FIFO。本插件因此删除了本地 report adapter，不再复制 DSH 已拥有的消息调度。

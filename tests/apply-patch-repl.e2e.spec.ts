@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -132,7 +132,7 @@ describe('apply_patch through the Prime Realm', () => {
 +new
 *** End Patch`
     const result = await ctx.tools.execute({
-      callId: CallId('prime-apply-patch-repl'),
+      callId: ToolCallId('prime-apply-patch-repl'),
       name: 'repl',
       arguments: { code: `await tools.apply_patch({ patch: ${JSON.stringify(patch)} })` },
       signal,

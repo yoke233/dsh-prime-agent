@@ -14,10 +14,11 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import LlmRuntime, { CallId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentProvider, SubagentResult } from '@deepseek-ai/dsh-subagent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -47,23 +48,24 @@ afterEach(async () => {
 })
 
 function ownerAgent(idValue: string): Agent {
-  const scopeFiber = context!.plugin(() => {})
-  const id = SessionId(idValue)
-  const agent = {
-    id,
-    ctx: scopeFiber.ctx,
-    inject: () => {},
-    options: {},
-    session: { id, header: { version: 0, id, createdAt: 0 }, append: () => {} },
-  } as unknown as Agent
-  context!.agents.register(agent)
-  return agent
+  return context!.agentLoop.create(SessionId(idValue), {})
+}
+
+/** Query implementation needed by the official continuable-subagent catalog. */
+class TestSessionQuery extends SessionQueryEngine {
+  override searchSessions(): Promise<never> {
+    return Promise.reject(new Error('session search is not configured in this test'))
+  }
+
+  override searchEvents(): Promise<never> {
+    return Promise.reject(new Error('event search is not configured in this test'))
+  }
 }
 
 /** Run one cell through the sole model-facing entry and return its completion. */
 async function completes(agent: Agent, code: string): Promise<{ logs: string[], result?: unknown }> {
   const execution = await context!.tools.execute({
-    callId: CallId(`continuable-orchestration-${++callNumber}`),
+    callId: ToolCallId(`continuable-orchestration-${++callNumber}`),
     name: REPL_TOOL_NAME,
     arguments: { code },
     signal: new AbortController().signal,
@@ -131,6 +133,7 @@ describe('continuable orchestration through the model-facing repl', () => {
     await context.plugin(SessionProjectionRegistry)
     await context.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'none' })
     await context.plugin(AgentLoop, { agents: [] })
+    await context.plugin(TestSessionQuery)
     await context.plugin(LocalJobRegistry)
     await context.plugin(ToolJobs, {})
     context.subagents.registerProvider(scriptedProvider('scripted', started))
@@ -223,7 +226,12 @@ describe('job ownership through the jobs aliases', () => {
     context = new Context()
     await context.plugin(SystemPrompt)
     await context.plugin(ToolRuntime)
+    await context.plugin(LlmRuntime)
+    await context.plugin(SessionStore)
     await context.plugin(AgentRegistry)
+    await context.plugin(SessionProjectionRegistry)
+    await context.plugin(AgentLoop, { agents: [] })
+    await context.plugin(TestSessionQuery)
     await context.plugin(SubagentRuntime)
     await context.plugin(LocalJobRegistry)
     await context.plugin(ToolJobs, {})

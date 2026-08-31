@@ -1,4 +1,4 @@
-import type { JsonValue } from '@deepseek-ai/dsh-session';
+import type { JsonValue } from '@deepseek-ai/dsh-util-values';
 /** Continual-learning entry categories inherited from Prime Agent's Continual Harness. */
 export type HarnessEntryKind = 'prompt' | 'memory' | 'skill' | 'subagent';
 /** Persistence scope: one agent session or the whole deployment. */

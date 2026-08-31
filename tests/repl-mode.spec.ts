@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
@@ -168,7 +168,7 @@ describe('Prime REPL composition', () => {
 
     for (const name of ['prime_refine', 'subagent', 'job_output', 'apply_patch']) {
       const denied = await context!.tools.execute({
-        callId: CallId(`repl-mode-denied-${++callNumber}`),
+        callId: ToolCallId(`repl-mode-denied-${++callNumber}`),
         name,
         arguments: {},
         signal,
@@ -182,7 +182,7 @@ describe('Prime REPL composition', () => {
 
     // The one allowed direct call executes against the persistent realm.
     const allowed = await context!.tools.execute({
-      callId: CallId(`repl-mode-allowed-${++callNumber}`),
+      callId: ToolCallId(`repl-mode-allowed-${++callNumber}`),
       name: 'repl',
       arguments: { code: '21 * 2' },
       signal,

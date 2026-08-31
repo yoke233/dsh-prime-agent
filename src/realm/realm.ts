@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { MessageChannel, MessagePort, Worker } from 'node:worker_threads'
 import type { EventLoopUtilization } from 'node:perf_hooks'
 import type { Readable } from 'node:stream'
-import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
+import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import type { CodeBindingNamespace, CodeJsonValue, CodeRunFailure, CodeRunRequest } from '@deepseek-ai/dsh-code-runtime'
 import {
   LAST_RESULT_GLOBAL,

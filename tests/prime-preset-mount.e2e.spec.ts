@@ -8,8 +8,9 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
-import LlmRuntime, { CallId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
@@ -56,7 +57,7 @@ function completion(execution: ToolExecutionResult): { logs: string[], result?: 
 async function runRepl(agent: Agent, code: string): Promise<{ logs: string[], result?: unknown }> {
   if (ctx === undefined) throw new Error('test context was not created')
   return completion(await ctx.tools.execute({
-    callId: CallId(`prime-preset-mount-${++callNumber}`),
+    callId: ToolCallId(`prime-preset-mount-${++callNumber}`),
     name: 'repl',
     arguments: { code },
     signal: testSignal,
@@ -115,6 +116,7 @@ describe('Prime packaged preset realm rows', () => {
     ctx.loader.builtins.include = Include
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SkillRegistry)

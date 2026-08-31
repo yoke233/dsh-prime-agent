@@ -8,6 +8,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm'
 import LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as primeAgent from '../src/index.js'
@@ -50,10 +51,11 @@ describe.skipIf(process.env.DSH_RUN_MODEL_E2E !== '1' || !process.env.DEEPSEEK_A
     ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SystemPrompt, {
-      persona: 'You are testing persistent Code Mode bindings. Follow the user instructions exactly.',
+      persona: 'You are testing persistent REPL bindings. Follow the user instructions exactly.',
     })
-    await ctx.plugin(ToolRuntime, { mode: 'code' })
+    await ctx.plugin(ToolRuntime, { mode: 'ptc' })
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(AgentLoop, { agents: [] })
     await ctx.plugin(LlmDeepSeek)

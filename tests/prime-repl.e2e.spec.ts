@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -63,7 +63,7 @@ function unwrapRepl(result: ToolExecutionResult): { logs: string[], result?: unk
 async function runRepl(agent: Agent, code: string): Promise<{ logs: string[], result?: unknown }> {
   if (ctx === undefined) throw new Error('test context was not created')
   return unwrapRepl(await ctx.tools.execute({
-    callId: CallId(`prime-repl-${++callNumber}`),
+    callId: ToolCallId(`prime-repl-${++callNumber}`),
     name: 'repl',
     arguments: { code },
     signal,
