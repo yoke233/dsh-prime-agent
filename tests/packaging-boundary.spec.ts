@@ -113,7 +113,7 @@ describe('Prime packaging boundary', () => {
       devDependencies?: Record<string, string>
     }
     expect(manifest.devDependencies?.['dsh-tool-monitor']).toBe(
-      'https://github.com/yoke233/dsh-tool-monitor/archive/9b6aac3701560309ac4e3befcf646a1eca920e77.tar.gz',
+      'https://github.com/yoke233/dsh-tool-monitor/archive/c3397b2cafeb725af08705d5bcaeeeb828e012ae.tar.gz',
     )
 
     const base = load(await readFile(BASE_PATCH, 'utf8'), { schema: entryListSchema }) as Row[]

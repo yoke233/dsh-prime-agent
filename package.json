@@ -163,7 +163,7 @@
     "@deepseek-ai/dsh-tool-subagent": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-tools": "^0.1.2-alpha.2",
     "@types/node": "^26.3.0",
-    "dsh-tool-monitor": "https://github.com/yoke233/dsh-tool-monitor/archive/9b6aac3701560309ac4e3befcf646a1eca920e77.tar.gz",
+    "dsh-tool-monitor": "https://github.com/yoke233/dsh-tool-monitor/archive/c3397b2cafeb725af08705d5bcaeeeb828e012ae.tar.gz",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   },

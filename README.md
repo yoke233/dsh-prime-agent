@@ -61,7 +61,7 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
 ```sh
 npm install
 npm run check:all
-dsh plugin --profile web add ./dsh-prime-agent https://github.com/yoke233/dsh-tool-monitor/archive/9b6aac3701560309ac4e3befcf646a1eca920e77.tar.gz
+dsh plugin --profile web add ./dsh-prime-agent https://github.com/yoke233/dsh-tool-monitor/archive/c3397b2cafeb725af08705d5bcaeeeb828e012ae.tar.gz
 ```
 
 安装命令同时加入两个独立 bundle：`dsh-prime-agent` 的 patch 仍只在官方 `code-runtime` row 旁纯插入 `dsh-prime-agent/runtime` host row；`dsh-tool-monitor` 的 patch 以兼容 Registry 替换 Host 的具体 `jobs-local` 实现并注册 `job_monitor`。Prime preset 在启动时落位到 `$DSH_HOME/.agent-presets`（仅缺失时），并挂载官方持久 Terminal。启用 Prime 模式只是为某个会话选中 Prime preset；默认 preset 与其他 preset 保持官方 one-shot 语义。落位后的 preset 不会被覆盖，删除 `$DSH_HOME/.agent-presets/prime` 并重启即可重新落位当前快照。
@@ -77,7 +77,7 @@ npm pack
 $primePackage = Get-ChildItem -Filter 'dsh-prime-agent-*.tgz' |
   Sort-Object LastWriteTime -Descending |
   Select-Object -First 1 -ExpandProperty FullName
-dsh plugin --profile tui add $primePackage https://github.com/yoke233/dsh-tool-monitor/archive/9b6aac3701560309ac4e3befcf646a1eca920e77.tar.gz
+dsh plugin --profile tui add $primePackage https://github.com/yoke233/dsh-tool-monitor/archive/c3397b2cafeb725af08705d5bcaeeeb828e012ae.tar.gz
 ```
 
 使用 `dsh --profile tui --dump-config` 核验组合结果中存在 `agent-presets`、`prime-code-runtime`、`monitor-jobs`、`tool-monitor`、官方 `tool-subagent-report` 和 `tui`，然后运行 `dsh --profile tui`。
