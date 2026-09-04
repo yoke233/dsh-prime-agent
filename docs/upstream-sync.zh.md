@@ -122,7 +122,7 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 
 ## 每次都要复查的语义差距
 
-- Prime 的 child answer 可以进入 parent 仍在进行的计算。DSH 0.1.1-rc.2 已原生实现该不变量：官方 `tool-subagent-report` 默认使用 `next-step`，由 continuation manager 调用 `parent.steer()`，让运行中的 parent 在最近 step 消费并唤醒空闲 parent，同时维护唤醒记账以及 report-before-settlement FIFO。本插件直接组合该能力，不再替换 report row 或维护私有 adapter。
+- Prime 的 child answer 可以进入 parent 仍在进行的计算。DSH 已原生实现该不变量。DSH 0.1.2-rc.1 撤下了 child 专用的 `tool-subagent-report` row，改为在官方 `tool-subagent-control` 上对 parent 与 child 统一暴露一个 `send_message({ agent_id, message })`。每条被接受的消息都走 `Agent.steer()`，运行中的目标在最近 step 消费，空闲目标开启新一轮；continuation manager 同时维护唤醒记账，以及消息先于后续 settled notice 的 next-step FIFO 顺序。本插件直接组合该能力，不再替换消息 row 或维护私有 adapter。
 - Prime 的 Python heap 能保存活对象和函数；当前适配用可信 `exec.agent.id` 解析的 Realm identity 选择 Persistent TypeScript Realm，在同一 Worker generation 中保留 TypeScript live objects。IPython 只用于参考行为与失败语义，不是产品 backend。
 - Prime preset 相比 shipped `code` preset 不重复注册 scoped `tool-skill`：Host 已有正式 catalog/loader；保留第二个同名注册会 shadow Host tool，使 visibility-matched pre-step hook 无法把合并后的 Skill 目录加入首个模型请求。preset 仍保留 scoped filesystem provider，以贡献项目与用户 Skill roots。
 - Prime preset 有意不挂载 shipped `code` preset 的 Plan Mode；Compaction 保持 DSH 默认策略，preset 不接管 provider 或配置模型容量。

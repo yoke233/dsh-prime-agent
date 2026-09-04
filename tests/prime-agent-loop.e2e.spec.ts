@@ -111,17 +111,17 @@ describe('Prime realm across deterministic agent-loop turns', () => {
     for (const request of requests) {
       expect(request.tools?.map(tool => tool.name)).toEqual(['repl'])
     }
-    const headers = agent.session.events.filter(event => event.type === 'request/header')
+    const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
     expect(headers.length).toBeGreaterThan(0)
     for (const header of headers) {
       expect(header.data.header.tools?.map(tool => tool.name)).toEqual(['repl'])
     }
 
-    const calls = agent.session.events.filter(event => event.type === 'tool/call')
+    const calls = agent.session.snapshotEvents().filter(event => event.type === 'tool/call')
     expect(calls).toHaveLength(3)
     expect(calls.every(event => event.data.name === 'repl')).toBe(true)
 
-    const results = agent.session.events.filter(event => event.type === 'tool/result')
+    const results = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
     expect(results).toHaveLength(3)
     const scalar = results[1]?.type === 'tool/result'
       ? results[1].data.message.content
@@ -150,10 +150,10 @@ describe('Prime realm across deterministic agent-loop turns', () => {
 
     // No handshake/bootstrap dispatch exists any more: the realm is routed by
     // the plugin's own identity resolution, and nothing probes a bootstrap tool.
-    const dispatches = agent.session.events.filter(event => event.type === 'tool/code-dispatch')
+    const dispatches = agent.session.snapshotEvents().filter(event => event.type === 'tool/code-dispatch')
     expect(dispatches).toHaveLength(0)
 
-    const final = agent.session.events.findLast(event => event.type === 'assistant/message')
+    const final = agent.session.snapshotEvents().findLast(event => event.type === 'assistant/message')
     const finalText = final?.type === 'assistant/message'
       ? final.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
       : ''

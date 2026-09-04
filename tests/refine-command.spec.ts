@@ -133,15 +133,15 @@ describe('/refine command', () => {
     const execution = ctx!.commands.execute(agent, '/refine', [], signal)
     await adapter.requested
     try {
-      const running = agent.session.events.filter(event => event.type === 'command/run').at(-1)
+      const running = agent.session.snapshotEvents().filter(event => event.type === 'command/run').at(-1)
       expect(running).toMatchObject({ type: 'command/run', data: { name: 'refine' } })
-      expect(agent.session.events.some(event => event.type === 'command/done')).toBe(false)
+      expect(agent.session.snapshotEvents().some(event => event.type === 'command/done')).toBe(false)
     } finally {
       release(proposal)
     }
 
     const settled = await execution
-    const done = agent.session.events.filter(event => event.type === 'command/done').at(-1)
+    const done = agent.session.snapshotEvents().filter(event => event.type === 'command/done').at(-1)
     expect(done).toMatchObject({
       type: 'command/done',
       data: { commandId: settled?.commandId, kind: 'success' },

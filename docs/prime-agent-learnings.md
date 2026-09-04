@@ -124,4 +124,4 @@ Continual Harness 只修改补充状态，不能改写基础 system prompt。改
 
 我们学习这一不变量，而不绑定其实现语言。当前 DSH 适配是破坏性的：模型可见入口从 `run_code`/Code Mode SDK 换成唯一 `repl` 工具，身份路由不再经过握手——Agent scope 用可信 `exec.agent.id` 解析不透明 Realm identity，host `primeRealmRuntime` 服务与未被改动的官方 code runtime 并存，非 Prime 会话继续官方 one-shot 语义。旧 `run_code` 入口、旧 Code Mode 组合与旧 live namespace 不迁移：没有 alias、feature flag 或静默降级。跨重启的可靠数据层是工作区文件，跨 Agent 的材料通过只写一次的 handoff file 交接。完整当前边界见 [当前架构](architecture.md)。
 
-child 的中间发现应尽可能进入 parent 当前计算的最近 step，而不是无条件积压成多个独立后续轮次。DSH 0.1.2-alpha.2 已把这一行为收归官方 `tool-subagent-report`：`next-step` 通过 `parent.steer()` 让忙碌 parent 在最近 step 消费，并唤醒空闲 parent；continuation manager 维护唤醒记账和 report-before-settlement FIFO。本插件因此删除了本地 report adapter，不再复制 DSH 已拥有的消息调度。
+child 的中间发现应尽可能进入 parent 当前计算的最近 step，而不是无条件积压成多个独立后续轮次。DSH 已把这一行为收归官方实现：0.1.2-rc.1 撤下 child 专用的 `tool-subagent-report`，改由 `tool-subagent-control` 对两个方向统一暴露 `send_message({ agent_id, message })`，每条消息都走 `Agent.steer()`，忙碌目标在最近 step 消费、空闲目标开启新一轮；continuation manager 维护唤醒记账和 next-step FIFO。本插件因此删除了本地 report adapter，不再复制 DSH 已拥有的消息调度。

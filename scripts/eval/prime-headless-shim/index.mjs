@@ -47,7 +47,7 @@ async function run(ctx, task, io) {
   agent.followup(createUserMessage({ content: [{ type: 'text', text: task }], source: { kind: 'user' } }))
   await agent.whenIdle()
   await sessions.flush(agent.session)
-  const outcome = summarize(agent.session.events, firstSeq)
+  const outcome = summarize(agent.session.snapshotEvents(), firstSeq)
   io.stdout.write(outcome.text + '\n')
   if (outcome.reason?.kind === 'error') io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
   const exitCode = outcome.reason?.kind === 'completed' ? 0 : 1

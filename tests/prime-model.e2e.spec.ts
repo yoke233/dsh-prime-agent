@@ -77,17 +77,17 @@ describe.skipIf(process.env.DSH_RUN_MODEL_E2E !== '1' || !process.env.DEEPSEEK_A
       'Use one repl cell whose final expression is secret. Reply with exactly the returned value.',
     )
 
-    const headers = agent.session.events.filter(event => event.type === 'request/header')
+    const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
     expect(headers.length).toBeGreaterThan(0)
     for (const header of headers) {
       expect(header.data.header.tools?.map(tool => tool.name)).toEqual([REPL_TOOL_NAME])
     }
 
-    const calls = agent.session.events.filter(event => event.type === 'tool/call')
+    const calls = agent.session.snapshotEvents().filter(event => event.type === 'tool/call')
     expect(calls.length).toBeGreaterThanOrEqual(2)
     expect(calls.every(event => event.data.name === REPL_TOOL_NAME)).toBe(true)
 
-    const final = agent.session.events.findLast(event => event.type === 'assistant/message')
+    const final = agent.session.snapshotEvents().findLast(event => event.type === 'assistant/message')
     const finalText = final?.type === 'assistant/message'
       ? final.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
       : ''

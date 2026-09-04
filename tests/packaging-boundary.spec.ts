@@ -113,7 +113,7 @@ describe('Prime packaging boundary', () => {
       devDependencies?: Record<string, string>
     }
     expect(manifest.devDependencies?.['dsh-tool-monitor']).toBe(
-      'https://github.com/yoke233/dsh-tool-monitor/archive/c3397b2cafeb725af08705d5bcaeeeb828e012ae.tar.gz',
+      'https://github.com/yoke233/dsh-tool-monitor/archive/1e0f2cc14b4ddbc49c2e3cb2c2a7913c80b3083f.tar.gz',
     )
 
     const base = load(await readFile(BASE_PATCH, 'utf8'), { schema: entryListSchema }) as Row[]
@@ -129,15 +129,24 @@ describe('Prime packaging boundary', () => {
     expect(composed.find(row => row.id === 'prime-code-runtime')?.name).toBe('dsh-prime-agent/runtime')
   })
 
-  // Prime delegates report scheduling to the 0.1.2-alpha.2 base bundle. Pin the
-  // composition boundary without duplicating the upstream tool implementation.
-  it('uses exactly one official tool-subagent-report row', async () => {
+  // Prime delegates adjacent-agent message scheduling to the 0.1.2-rc.1 base bundle.
+  // Pin the composition boundary without duplicating the upstream tool implementation.
+  // DSH 0.1.2-rc.1 retired the child-scoped `tool-subagent-report` row in favour of the
+  // unified `send_message` on `tool-subagent-control`, which keeps the same
+  // `Agent.steer()` nearest-step delivery for both directions.
+  it('uses exactly one official adjacent-agent messaging row and no retired report row', async () => {
     const patches = load(await readFile(BASE_PATCH, 'utf8'), { schema: entryListSchema }) as Row[]
-    const reports = patches.flatMap(patch => patch.insert ?? [])
-      .filter(row => row.id === 'tool-subagent-report')
-    expect(reports).toEqual([expect.objectContaining({
-      name: '@deepseek-ai/dsh-tool-subagent-report',
+    const rows = patches.flatMap(patch => patch.insert ?? [])
+
+    expect(rows.filter(row => row.id === 'tool-subagent-control')).toEqual([expect.objectContaining({
+      name: '@deepseek-ai/dsh-tool-subagent-control',
     })])
+    expect(rows.filter(row => row.id === 'tool-subagent-report')).toEqual([])
+
+    // Prime composes the host-owned row; it never inserts a messaging tool of its own.
+    const prime = await loadDialect('../cordis.patch.yml')
+    const primeRows = prime.flatMap(patch => patch.insert ?? [])
+    expect(primeRows.filter(row => String(row.name ?? '').includes('subagent'))).toEqual([])
   })
 
   it('ships the prompt dump script and scoped restriction export', async () => {
