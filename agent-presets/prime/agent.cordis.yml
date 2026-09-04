@@ -159,6 +159,14 @@
 # browser reads for every session — behind a realm those units would come and go
 # with whichever presets happen to be mounted. What a preset chooses is whether
 # its agent compacts at all, which is `compaction-basic` below.
+#
+# `modelPolicies` lowers the pressure threshold for the DSH default DeepSeek
+# route only. Its adapter advertises a 1,000,000-token window, so the shipped
+# 0.8 ratio would not compact before 800k tokens; Prime cells accumulate tool
+# output far faster than that, and long contexts degrade the model well before
+# the window fills. 0.3 mirrors the 300k-in-1M trigger published by other
+# long-context coding agents. Other routes keep the DSH defaults; retention
+# inherits the top-level ratio.
 - id: compaction
   name: cordis:group
   group: true
@@ -168,6 +176,11 @@
   config:
     - id: compaction-basic
       name: '@deepseek-ai/dsh-compaction-basic'
+      config:
+        modelPolicies:
+          - provider: deepseek-official
+            model: deepseek-v4-flash
+            thresholdRatio: 0.3
 
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'
@@ -268,6 +281,8 @@
     searchTimeoutMs: 60000
 
 # Prime keeps large nested tool projections bounded without changing canonical values.
+# The REPL prompt states this cap as the per-cell display budget; keep it equal to
+# the `prime-agent` row's `visibleOutputBudgetBytes` (default 12000).
 - id: prime-spill-policy
   name: '@deepseek-ai/dsh-spill-policy'
   config:

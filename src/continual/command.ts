@@ -133,11 +133,12 @@ export function parseRefinementProposal(output: string): RefinementProposal {
   }
 }
 
-function modelTarget(agent: Agent): { provider: string; model: string } {
+/** The Agent's current provider/model route: the latest logged request envelope, else its creation options. */
+export function modelTarget(agent: Agent): { provider: string; model: string } {
   const latest = agent.session.requestHeader()?.config
   if (latest !== undefined) return latest
   const { provider, model } = agent.options
-  if (provider === undefined || provider.length === 0 || model === undefined || model.length === 0) throw new Error('no provider/model is available for /refine')
+  if (provider === undefined || provider.length === 0 || model === undefined || model.length === 0) throw new Error('no provider/model is available for this agent')
   return { provider, model }
 }
 

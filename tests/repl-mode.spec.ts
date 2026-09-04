@@ -43,6 +43,14 @@ function registerPromptGuidanceFixtures(ctx: Context): void {
     },
     { name: 'grep', parameters: { pattern: { type: 'string' as const, required: true } } },
     {
+      name: 'read',
+      parameters: {
+        file_path: { type: 'string' as const, required: true },
+        offset: { type: 'number' as const },
+        limit: { type: 'number' as const },
+      },
+    },
+    {
       name: 'edit',
       parameters: {
         file_path: { type: 'string' as const, required: true },
@@ -130,8 +138,28 @@ describe('Prime REPL composition', () => {
     expect(sdk).not.toContain('ToolResult')
     expect(sdk).toContain('apply_patch')
     expect(sdk).toContain('patch: string')
+    // The private sub-model members sit inside `agents` (never a tool, never a
+    // fifth injected global) with their own JSDoc above the declaration.
+    const agentsStart = sdk.indexOf('declare const agents: {')
+    const jobsStart = sdk.indexOf('declare const jobs: {')
+    const queryStart = sdk.indexOf('  query: (args: { prompt: string; system?: string; maxTokens?: number })')
+    const queryManyStart = sdk.indexOf('  queryMany: (args: { prompts: string[]; system?: string; maxTokens?: number })')
+    expect(agentsStart).toBeGreaterThan(0)
+    expect(queryStart).toBeGreaterThan(agentsStart)
+    expect(queryManyStart).toBeGreaterThan(queryStart)
+    expect(jobsStart).toBeGreaterThan(queryManyStart)
+    expect(sdk.slice(sdk.lastIndexOf('/**', agentsStart), agentsStart)).toContain('stateless model calls')
+    expect(sdk).not.toContain('declare const llm')
+    expect(sdk).not.toContain('  query: {')
+    // The reduction-shaped examples render only when every tool they name exists.
+    expect(sdk).toContain('Patterns:')
+    expect(sdk).toContain('Map.groupBy(hits.matches')
+    expect(sdk.indexOf('Patterns:')).toBeLessThan(sdk.indexOf('Available functions and values:'))
+    // The prompt states the display budget the spill policy enforces.
+    expect(sdk).toContain('about 12 KB')
     const repl = initialAssembly.tools[0]
     expect(repl?.parameters.properties).toHaveProperty('code')
+    expect(repl?.description).toContain('orchestrate and compose tool calls')
     expect(initialAssembly.sections.some(section => section.name === 'prime-agent:rlm-policy')).toBe(true)
     expect(initialAssembly.sections.some(section => section.name.startsWith('tool:'))).toBe(false)
     expect(initialAssembly.sections.some(section => section.name === 'harness:identity')).toBe(false)
@@ -146,7 +174,7 @@ describe('Prime REPL composition', () => {
     expect(sdk).toBeDefined()
     if (sdk === undefined) throw new Error('tools SDK was not assembled')
 
-    for (const name of ['edit', 'glob', 'grep', 'pwsh', 'todo_write', 'write']) {
+    for (const name of ['edit', 'glob', 'grep', 'pwsh', 'read', 'todo_write', 'write']) {
       const declaration = `  ${name}: {`
       const declarationStart = sdk.indexOf(declaration)
       expect(declarationStart).toBeGreaterThan(0)
@@ -189,9 +217,13 @@ describe('Prime REPL composition', () => {
       agent,
     })
     expect(allowed.isError).toBe(false)
-    const canonical = allowed.value as { result: number; presentation?: unknown }
+    const canonical = allowed.value as { result: number; presentation?: unknown; contextTokens?: number; contextWindow?: number }
     expect(canonical.result).toBe(42)
     expect(canonical.presentation).toBeUndefined()
+    // No session meter is composed here, so the context usage fields stay absent
+    // instead of failing the cell.
+    expect(canonical.contextTokens).toBeUndefined()
+    expect(canonical.contextWindow).toBeUndefined()
   })
 
   it('renders canonical values as notebook output without exposing the outer transport', () => {
@@ -224,6 +256,14 @@ describe('Prime REPL composition', () => {
     expect(primeAgent.renderReplResult({ logs: [] })).toBe('')
   })
 
+  it('appends the context usage line only when the meter measured the cell', () => {
+    expect(primeAgent.renderReplResult({ logs: ['done'], result: 3, contextTokens: 61900, contextWindow: 372000 }))
+      .toBe('done\n\n3\n\nContext: 61,900 / 372,000 tokens')
+    expect(primeAgent.renderReplResult({ logs: [], contextTokens: 1200 })).toBe('Context: 1,200 tokens')
+    expect(primeAgent.renderReplResult({ logs: [], result: 'x', contextWindow: 1000 })).toBe('x')
+  })
+
+
   it('renders only trusted presentation metadata as single-slot retention guidance', () => {
     const envelope = {
       retained: true,
@@ -238,6 +278,7 @@ describe('Prime REPL composition', () => {
     })
     expect(retained).not.toContain('[repl result:')
     expect(retained).toContain('Assign it to a variable before running another value-producing cell.')
+    expect(retained).toContain('do not display it whole again')
     expect(retained).toContain('Type: object')
     expect(retained).toContain('Serialized size: 65,722 bytes')
     expect(retained).toContain('"path": "D:/work/spec.md"')

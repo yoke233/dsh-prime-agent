@@ -109,6 +109,7 @@ async function bootFs(options: { mode: 'read-only' | 'workspace-write'; approval
     version: 0,
     id,
     createdAt: Date.now(),
+    isSeeded: false,
     cwd: workspace,
   })
   const agent = {

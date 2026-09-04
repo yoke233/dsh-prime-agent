@@ -66,24 +66,46 @@ Call only `repl` directly. In the TypeScript code passed to `repl`, use the
 preloaded `tools.*`, `agents.*`, and `jobs.*` APIs. Follow each generated
 declaration and its comments. `import` and `require` are unavailable.
 
+Only the cell's completion value (its last expression) and `console.log` output
+enter the conversation; every `tools.*` result stays in the REPL until you display
+part of it. Visible output per cell is budgeted at about 12 KB: a larger display
+is spilled to a file and replaced by a preview, so filter, slice, count, or aggregate
+in code and display only what the next decision needs. Extra cells cost more than
+extra output: reduce round trips first, then keep displays small when doing so does
+not force another cell.
+
 Top-level `await` works; top-level `return` does not. Treat the REPL as a live
-notebook: successful top-level bindings remain available in later cells. Prefer `let`
-for named tool results and working values you may refine across cells. Before repeating
-a tool call, continue from the existing binding; reassign or transform it as needed. A
-parse failure executes nothing; fix the cell and retry.
+notebook: successful top-level bindings remain available in later cells. Bind every
+read, search, and command result to a named `let` variable and continue from it in
+later cells: slice, filter, or transform the binding instead of repeating the call.
+A value bound in an earlier cell does not need to be re-read, printed, or
+reconstructed. Tool results are typed values (see `ToolOutputMap`): chain calls and
+access fields directly in one cell without displaying intermediate results. A parse
+failure executes nothing; fix the cell and retry.
+
+If a cell is a single `await tools.x(...)` whose raw result becomes the completion,
+you are using the REPL as tool-call syntax: bind the result and reduce it instead.
+Conversely, when one grep or one ranged read already pins the answer, read it
+directly; do not build machinery for a one-line lookup.
+
 Pass TypeScript object literals, writing identifier keys as `key: 'value'`, not
 `key': 'value'`. Tool results are parsed JavaScript values; do not call
 `JSON.parse` on them. Inspect uncertain shapes with `Array.isArray(value)` and
 `Object.keys(value)`.
 
-`$_` is the latest available non-undefined result. A later value-producing cell
-replaces it, so assign reusable values to named variables before running that cell.
-Continue from variables or `$_` instead of parsing shortened display text. Backslashes
-in JSON previews are notation, not extra characters. Prefer forward-slash Windows
-paths such as `D:/work/project`.
+`$_` is the latest non-undefined completion; assign it to a name before running
+another value-producing cell. When a result reports `Full formatted result stored
+at:`, your variable still holds the complete value: continue from it in the next
+cell (slice, filter, count, or grep it) rather than displaying it whole again or
+re-running the call, and read or grep the reported locator only for omitted
+formatted text. Convert Windows locator backslashes to forward slashes before
+putting the path in a string literal. Backslashes in JSON previews are notation,
+not extra characters. Prefer forward-slash Windows paths such as `D:/work/project`.
 
 Keep large source material in files and only compact working state in the REPL.
 ```
+
+「about 12 KB」由插件配置 `visibleOutputBudgetBytes`（默认 12000）渲染，须与 preset 的 `prime-spill-policy.maxInlineBytes` 一致。固定提示之后、declaration 之前，插件在 `grep` 与 `read` 都在 catalog 中时附一段 `Patterns:`，含三个各不超过六行的 TypeScript 样例：批量 grep 后按文件分组计数、先 grep 定位锚点再范围 read、跨候选文件早停。样例只使用相对路径与真实字段名（`matches[].path/lineNumber`、`lines[].number/text`），不含仓库、任务或历史内容。
 
 固定提示不拼接：
 
@@ -93,7 +115,7 @@ Keep large source material in files and only compact working state in the REPL.
 - 上一 Session 或其他 Agent 的上下文；
 - 当前 catalog 中不存在的可选工具名。
 
-当前 Agent catalog 只负责生成实际可用的 `tools.*`、`agents.*`、`jobs.*` 参数与 canonical output 类型声明。
+当前 Agent catalog 只负责生成实际可用的 `tools.*`、`agents.*`、`jobs.*` 参数与 canonical output 类型声明；`agents` 声明固定附带私有成员 `query`/`queryMany`，声明上方的 JSDoc 说明它们与 `spawn` 的分工，成员 JSDoc 携带当前预算（prompt 字符上限、单批条数、`maxTokens` 上限）。
 
 ## 4. 内部结果类型
 
@@ -157,10 +179,12 @@ interface ReplExecutionResult {
   logs: string[]
   result?: JsonValue
   presentation?: ReplPresentation
+  contextTokens?: number
+  contextWindow?: number
 }
 ```
 
-该结构供 DSH tool runtime、测试、日志和 spill policy 程序化处理。模型只接收它的 notebook renderer 文本。
+该结构供 DSH tool runtime、测试、日志和 spill policy 程序化处理。模型只接收它的 notebook renderer 文本。`contextTokens` 是 cell 开始前 host `tokenMeter` 对当前 Session 的估算，`contextWindow` 是路由模型宣告的窗口；meter、LLM 服务或路由信息任一不可用时对应字段省略，测量失败不影响 cell。
 
 失败 cell 继续抛：
 
@@ -230,6 +254,7 @@ found 27 matches
 ```text
 The complete value remains in this REPL as `$_`.
 Assign it to a variable before running another value-producing cell.
+Continue from that variable in the next cell (slice, filter, count); do not display it whole again.
 Type: object
 Serialized size: 65,722 bytes
 
@@ -245,7 +270,7 @@ Preview:
 - presentation 不携带 numeric handle；
 - `valueType` 必须存在，包括 minimal reference；
 - preview 不显示内部 `retained` 或 `truncated` 字段；
-- 提示必须说明在运行下一个产生 completion 的 cell 前先赋给命名变量。
+- 提示必须说明在运行下一个产生 completion 的 cell 前先赋给命名变量，并说明下一步是从变量归约而不是整体重显示。
 
 ### 6.6 Unretained preview
 
@@ -272,6 +297,16 @@ No structural preview is available.
 ```
 
 renderer 和分类过程不得调用用户 `toJSON`、`toString`、inspect hook、getter 或 Proxy trap 来生成展示。
+
+### 6.8 上下文用量行
+
+canonical value 带 `contextTokens` 时，renderer 在全部 sections 之后以空行分隔追加一行：
+
+```text
+Context: 61,900 / 372,000 tokens
+```
+
+`contextWindow` 缺失时只显示 `Context: 61,900 tokens`；`contextTokens` 缺失时不追加任何内容，即使 `contextWindow` 存在。这一行是纯追加的观察文本，不改写既有 sections，也不进入 `$_`。
 
 ## 7. 大小与降级
 
@@ -345,6 +380,7 @@ npm run check:all
 重点回归：
 
 - `tests/repl-mode.spec.ts`
+- `tests/llm-binding.spec.ts`
 - `tests/completion-contracts.spec.ts`
 - `tests/completion-history.spec.ts`
 - `tests/completion-projection.spec.ts`

@@ -26,6 +26,11 @@ interface RefinementProposal {
 export declare function parseRefineCommandOptions(rawInput: string): RefineCommandOptions;
 /** Parse and minimally shape-check model output; HarnessStore remains the bounds authority. */
 export declare function parseRefinementProposal(output: string): RefinementProposal;
+/** The Agent's current provider/model route: the latest logged request envelope, else its creation options. */
+export declare function modelTarget(agent: Agent): {
+    provider: string;
+    model: string;
+};
 /** Enforce the shared callable-entry policy for model tool and slash-command writes. */
 export declare function assertCallableReferences(ctx: Context, agent: Agent | undefined, scope: HarnessScope, edits: readonly HarnessEdit[]): void;
 /** Run one already-admitted refinement without claiming Agent maintenance ownership. */

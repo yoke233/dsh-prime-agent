@@ -78,14 +78,14 @@ Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt ass
 
 - 支持顶层 `await`。
 - cell 的末尾表达式是结果，顶层 `return` 无效。
-- 普通顶层 binding 留在同一 live namespace，供后续 cell 直接使用；模型文案把 REPL 定义为 live notebook，建议命名工具结果和跨 cell 继续收敛的工作值优先使用 `let`，重复工具调用前先复用、重赋值或转换已有 binding。
-- cell 内预加载三个绑定命名空间：`tools.*`（当前 Agent catalog 中除 `repl` 外的全部工具）、`agents.*`（`spawn`/`fork`/`list`/`send`/`interrupt` → `subagent`/`subagent_fork`/`list_agents`/`send_message`/`interrupt_agent`）、`jobs.*`（`list`/`output`/`kill` → `job_list`/`job_output`/`job_kill`）。程序始终得到 canonical value，SDK 从当前 catalog 生成真实 `ToolOutputMap`；对象结果若未经转换直接成为 completion，Worker 才用关联的官方 content 展示。SDK 只额外声明 `declare const $_: unknown`，不提供 completion id 或历史管理接口。
-- 固定 Agent 文案只教授唯一 `repl` 路由、cell 内预加载命名空间、declaration/JSDoc 的权威性、不可使用 `import`/`require`、persistent TypeScript、跨 cell 复用命名 binding、合法参数对象字面量、解析失败不执行、已解析工具值、completion intrinsics、preview 不可解析、Windows 路径优先 `/` 与紧凑 live 工作集；共享 orchestration guidance 另要求不确定的文件路径从已知父目录 `glob`、不确定的目录路径通过 `pwsh` 检查父目录，以及 package manager、formatter、build/codegen 后重新读取可能被重写的文件；不重复具体工具 schema，不拼接用户聊天、具体任务、仓库路径、历史失败或可选工具名。
+- 普通顶层 binding 留在同一 live namespace，供后续 cell 直接使用；模型文案把 REPL 定义为 live notebook，要求把每个读取、搜索和命令结果绑定到命名 `let` 变量并从变量继续切片、过滤或转换，不重复已绑定的调用；更早 cell 绑定的值无需重读、打印或重建。
+- cell 内预加载三个绑定命名空间：`tools.*`（当前 Agent catalog 中除 `repl` 外的全部工具）、`agents.*`（`spawn`/`fork`/`list`/`send`/`interrupt` → `subagent`/`subagent_fork`/`list_agents`/`send_message`/`interrupt_agent`，外加私有子模型成员 `query`/`queryMany`，见「子模型调用」）、`jobs.*`（`list`/`output`/`kill` → `job_list`/`job_output`/`job_kill`）。程序始终得到 canonical value，SDK 从当前 catalog 生成真实 `ToolOutputMap`；对象结果若未经转换直接成为 completion，Worker 才用关联的官方 content 展示。SDK 只额外声明 `declare const $_: unknown`，不提供 completion id 或历史管理接口。
+- 固定 Agent 文案只教授唯一 `repl` 路由、cell 内预加载命名空间、declaration/JSDoc 的权威性、不可使用 `import`/`require`、code mode 的经济学（只有 completion 与 `console.log` 进入对话、每 cell 约 12 KB 的事前显示预算、先归约再显示、额外往返比额外输出更贵）、persistent TypeScript、把结果绑定到命名变量并跨 cell 复用、typed `ToolOutputMap` 的同 cell 串联、「单调用原样回流」红旗与「一次 grep 能定位就直接读」反向条款、合法参数对象字面量、解析失败不执行、已解析工具值、completion intrinsics、spill 后从变量继续而非重打印或重调用、preview 不可解析、Windows 路径优先 `/` 与紧凑 live 工作集；declaration 之前附三个归约型样例（批量 + 归约、先 grep 后范围 read、早停），仅当 `grep` 与 `read` 都在 catalog 中时渲染。共享 orchestration guidance 把 TypeScript 定位为编排语言，另要求不确定的文件路径从已知父目录 `glob`、不确定的目录路径通过 `pwsh` 检查父目录、package manager/formatter/build/codegen 后重新读取可能被重写的文件、委派判据（并行重上下文调研或独立实现交给 agent，单次已知查找/编辑/命令直接做，只要结论、计数、路径）以及 compaction checkpoint 与 `live namespace restarted` 通知的区别（前者变量仍在，后者才从文件重建）；不重复具体工具 schema，不拼接用户聊天、具体任务、仓库路径、历史失败或可选工具名。
 - 必须跨 Worker 或 host 重启保存的进度写入工作区文件。
 
 开发脚本 `scripts/dump-prime-prompt.mjs` 从空 root 应用已安装的 DSH base patch、同行 Monitor patch、本包 host patch 和随包 Prime preset，并通过一个隔离临时 `DSH_HOME` 创建真实 Agent scope 后调用 `assembleContextFor`。它把 `renderPrompt`、`renderContextSections`/`joinContextSections` 和 assembly tool schemas 渲染为分节纯文本，不调用模型。默认结果写到当前目录的 `prompt-dumps/prime-prompt.txt` 且 stdout 只返回路径，避免诊断本身制造超大终端工具块；`--stdout` 是显式 opt-in，`prompt-dumps/` 不进入版本控制。脚本移除只服务于开发热更新且要求特殊 Node 启动 flag 的 HMR row，不改变任何 prompt/tool contribution。
 
-Prime 不增加搜索 provider。源码发现仍调用 DSH 原生 `grep`；prompt assembly 按工具名复制 schema，在 `edit`、`glob`、`grep`、`pwsh`、`write` 的原始 description 后追加 schema 尚未表达的使用约束，并为 `todo_write` 替换仅模型可见的 description，不修改 catalog 中共享定义。`edit` 说明首次修改和 stale retry 前读取当前文件，`write` 说明只用于创建或完整替换并优先用 `edit` 做局部变更；`glob` 明确递归文件搜索不能枚举目录，`pwsh` 说明 REPL 外层 TypeScript 字符串与 shell 内层引号的选择；`todo_write` 删除逐项即时刷新的高频契约，只用于需要用户可见跟踪的长流程或真实并行工作，并把更新收敛到有意义的阶段边界；`grep` 明确字符串参数仍按正则解释，普通代码搜索优先省略标点，确需正则标点时使用无 flags literal 的 `.source`，使模型只写一层正则转义且继续向 canonical `grep.pattern: string` 传参。多个代码片段应在同一 cell 内并行运行独立的小型 `grep`，而不是拼成大型正则，并在 parse error 后显式简化或拆分。生成 SDK 和 Realm interface 都保持 DSH canonical `grep.pattern: string`，不改写 `ToolArgsMap`，也不在 Worker 中投影非 JSON 参数；DSH schema、授权、执行与日志路径不变。
+Prime 不增加搜索 provider。源码发现仍调用 DSH 原生 `grep`；prompt assembly 按工具名复制 schema，在 `bash`、`edit`、`glob`、`grep`、`pwsh`、`read`、`subagent`、`subagent_fork`、`web_search`、`write` 的原始 description 后追加 schema 尚未表达的使用约束，并为 `todo_write` 替换仅模型可见的 description，不修改 catalog 中共享定义。`read`、`grep`、`bash`/`pwsh`、`web_search` 各带一句归约提示（长文件先 grep 再范围 read 并只显示切片；`matches` 超过一屏先分组或计数；`stdout.text` 只显示需要的行；`sources` 只显示要用的标题与 URL）；`subagent`/`subagent_fork` 说明 prompt 应含目标、报告格式、路径与边界，并要求 child 以几百字的结论、计数、路径回报，大材料写文件。`edit` 说明首次修改和 stale retry 前读取当前文件，`write` 说明只用于创建或完整替换并优先用 `edit` 做局部变更；`glob` 明确递归文件搜索不能枚举目录，`pwsh` 说明 REPL 外层 TypeScript 字符串与 shell 内层引号的选择；`todo_write` 删除逐项即时刷新的高频契约，只用于需要用户可见跟踪的长流程或真实并行工作，并把更新收敛到有意义的阶段边界；`grep` 明确字符串参数仍按正则解释，普通代码搜索优先省略标点，确需正则标点时使用无 flags literal 的 `.source`，使模型只写一层正则转义且继续向 canonical `grep.pattern: string` 传参。多个代码片段应在同一 cell 内并行运行独立的小型 `grep`，而不是拼成大型正则，并在 parse error 后显式简化或拆分。生成 SDK 和 Realm interface 都保持 DSH canonical `grep.pattern: string`，不改写 `ToolArgsMap`，也不在 Worker 中投影非 JSON 参数；DSH schema、授权、执行与日志路径不变。
 
 MCP 同样不进入 Realm runtime。profile 显式安装 DSH Host MCP client 后，server tools 注册到统一 `ctx.tools` catalog，repl 单元自动获得对应 `tools.*` 绑定；连接、认证、重连、工具代际、子进程与清理由 Host 插件拥有。本插件不复制上游的 Python kernel-owned MCP 或 ACP MCP program。
 
@@ -127,7 +127,7 @@ cell 以严格模式和 V8 REPL 语义执行，支持顶层 `const`、`let`、`v
 
 DSH compaction 不遍历、序列化或清理 Realm heap，spill 也不会驱逐用户保留的 binding。live namespace 因此只应作为紧凑工作集：大源数据和结果放在任务文件或现有 spill artifact，Realm 长期保留路径、索引、函数和摘要。当前没有隐式的 binding 级 GC。
 
-Prime agent-plane 组合不挂载 Plan Mode。Compaction 仍由 DSH 官方 backend 拥有并使用其默认策略；preset 不注册或覆盖 provider，也不配置模型容量。
+Prime agent-plane 组合不挂载 Plan Mode。Compaction 仍由 DSH 官方 backend 拥有；preset 只通过 `compaction-basic.modelPolicies` 把 DSH 默认路由 `deepseek-official/deepseek-v4-flash` 的压力阈值降到 0.3（该 adapter 宣告 1M 窗口，出厂 0.8 意味着 80 万 token 前不会压缩，而 Prime cell 堆积工具输出远快于此；比例参照其他长上下文编码 agent 在 1M 窗口上 300K 触发的做法），其他路由沿用 DSH 默认值；preset 不注册或覆盖 provider，也不配置模型容量。
 
 ### binding lease
 
@@ -141,6 +141,14 @@ Prime agent-plane 组合不挂载 Plan Mode。Compaction 仍由 DSH 官方 backe
 
 每个 cell 同时受 host-call 总量和并发量限制，超限调用被拒绝，不扩大权限。
 
+### 子模型调用 `agents.query` / `agents.queryMany`
+
+`agents` 命名空间在委派别名之外还带两个私有成员：`agents.query({ prompt, system?, maxTokens? })` 返回 `{ text, truncated }`，`agents.queryMany({ prompts, system?, maxTokens? })` 按输入顺序返回 `{ replies }`。它们与 `refine` 走同一条私有 binding 路径：不注册为 DSH tool、不进入 `tools.*`/`ToolArgsMap`、不产生 `tool/code-dispatch` 记录，但写进生成的 `agents` 声明及其 JSDoc（上游 Prime 明令不得发明未声明的 wrapper）。每次调用用 `ctx.llm.stream()` 对当前 Agent 的路由（最近一次请求 envelope，否则创建选项）发起无工具的一次性请求，`sessionId` 归属当前 Session，取消信号来自本次 cell；回复至 `maxTokens` 截断时返回 `truncated: true` 而不是失败。预算由插件 `llm` 配置约束：单条 prompt/system 上限 `maxPromptChars`（默认 200,000 字符）、单批 `maxBatchSize`（默认 20）、批内并发 `maxConcurrency`（默认 8）、`maxTokens` 默认且上限 4096；越界在调用模型前拒绝，批内单条失败带下标整批拒绝。这是 RLM 范式里「对 N 个 chunk 各做一次无状态子调用并把结果收进变量」的原语；与 `agents.spawn` 的分工由声明的 JSDoc 说明：需要工具或多步推理的子任务用 `spawn`，对已在变量里的文本做语义归约用 `query`。它不经过 approval（不是工具调用），计费归当前 Session；UI 当前看不到这些子调用，是已知缺口。bridge 只允许把这类额外成员加到 `agents` 上，且不得与委派别名同名。
+
+### Worker 销毁与注入全局数
+
+这两个成员没有做成独立的 `llm` 全局，是因为实测第五个注入全局会让 Worker 销毁崩溃：在同一进程里创建两个 Realm、各跑一个 cell、然后一起 `dispose()`，Realm 注入 `tools`/`agents`/`jobs`/`refine` 四个全局时 15/15 次正常，再注入任意名字的第五个 Proxy 全局时约 3–5/5 次触发 V8 fatal `Invoke in DisallowJavascriptExecutionScope`（栈在 isolate 销毁与 inspector 之间），整个宿主进程随之退出；单个 Realm 无论几个全局都不崩，把 `terminate()` 串行化或把 host 端 `port.close()` 挪到 `terminate()` 之后都不改变结果（Node v24.18.0，Windows）。一个只含 inspector 会话与 Proxy 全局的最小 Worker 复现不出，说明触发条件还依赖 Realm Worker 的其它组成；根因未定。在弄清之前，新的私有能力一律挂到现有命名空间，不再增加注入全局。
+
 ### 完成值、日志与大输出
 
 Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分类：lossless JSON 与 Map、Set、函数、BigInt、循环对象、class instance 等 opaque 值分别按各自的单槽预算判定。日志与 Realm → Host 的 completion value 共同受 `maxOutputBytes` 硬上限约束。工具 binding 在 Host 侧把 canonical value 与可选官方 content 放入仅供 Worker 解包的内部结果；程序只得到 canonical value，Worker 以私有 WeakMap 关联对象 identity 与展示文本。
@@ -149,7 +157,9 @@ Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分�
 
 `maxCompletionFullBytes`（默认 64 KiB）以内的完成值原样返回，超过后 Worker 产生固定 schema 的有界内部 envelope。Realm 验证 terminal nonce 与 envelope shape 后才附加 discriminated `ReplPresentation`；retained preview 与 opaque reference 都不携带 numeric handle，unretained preview 明确不可恢复。用户程序返回同形对象没有可信 metadata，仍按普通 JSON 显示。降级链是 full → rich projection → minimal reference → output-limit，只有连最小 envelope 都放不进剩余预算时才真正失败。
 
-外层 `repl` canonical value 保持结构化：`logs`、可选 `result` 和可选可信 `presentation` metadata 仍可由调用方程序化读取。模型 renderer 不再 `JSON.stringify({ logs, result })`：logs 和 scalar string 原样显示，full structured value 只 pretty-print 一次；retained preview 与 opaque reference 提示值仍在 `$_`，并要求在下一个产生 completion 的 cell 前赋给命名变量；unretained preview 只说明重新计算或从持久文件载入。renderer 不调用用户 hook，无 logs 且无 completion 时返回空文本，也不添加普通结果类型标题或 Markdown fence。preview 是观察文本而非可解析数据，后续计算必须回到命名变量或 `$_`。
+外层 `repl` canonical value 保持结构化：`logs`、可选 `result`、可选可信 `presentation` metadata 与可选 `contextTokens`/`contextWindow` 仍可由调用方程序化读取。模型 renderer 不再 `JSON.stringify({ logs, result })`：logs 和 scalar string 原样显示，full structured value 只 pretty-print 一次；retained preview 与 opaque reference 提示值仍在 `$_`，要求在下一个产生 completion 的 cell 前赋给命名变量，retained preview 还要求从该变量继续切片、过滤或计数而不再整体显示；unretained preview 只说明重新计算或从持久文件载入。renderer 不调用用户 hook，无 logs 且无 completion 时返回空文本，也不添加普通结果类型标题或 Markdown fence。preview 是观察文本而非可解析数据，后续计算必须回到命名变量或 `$_`。
+
+当 host `tokenMeter` 与路由模型宣告的 contextWindow 可用时，`repl` 在 cell 开始前测量当前 Session 的上下文用量，并在结果末尾追加一行 `Context: <已用> / <窗口> tokens`（窗口未知时只有已用数）。任何一步不可用或抛错都只是省略这一行，永不让 cell 失败；这一行纯追加、不改写历史，因此不影响 prompt cache。它对应研究文档所说的 continuous visibility：模型对自己烧了多少上下文不再是盲的。
 
 工具调用的 canonical value、官方 content、日志与 spill locator 仍由 DSH 工具层管理。Prime binding 始终把 canonical value 返回给程序；非空官方 content 只与对象 identity 关联，并仅在该对象直接成为 completion 时替代其模型展示。提取字段、spread 或其他转换产生的新值继续走普通 completion 路径；primitive canonical value 保持原值。Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值，超过预算时模型先继续使用已赋值的 canonical 变量；只有确需遗漏的格式化文本时才 read/grep notice 中的 locator，并在 TypeScript 字符串中规范化 Windows 反斜杠。Spill backend 不可用时保留 inline 成功结果并告警。
 
@@ -239,7 +249,9 @@ Agent-scope `dsh-prime-agent`：
 | `refinementMaxTokens` | `4096` | `/refine` 辅助模型请求的最大输出 token。 |
 | `refinementMaxConversationChars` | `80000` | `/refine` 会话尾部文本预算。 |
 | `requireOrchestrationTools` | `true` | 是否在 prompt assembly 时要求 Agent catalog 具备 Subagent admission（`subagent`/`subagent_fork`）与 `agents`/`jobs` 控制（`list_agents`、`send_message`、`interrupt_agent`、`job_output`、`job_list`、`job_kill`）。 |
+| `visibleOutputBudgetBytes` | `12000` | 固定提示告知模型的每 cell 可见输出预算；须与 preset `prime-spill-policy.maxInlineBytes` 一致，因为实际截断由 spill policy 执行。 |
 | `continual` | 有界默认值 | entry、evidence、transaction、状态文件和 prompt 预算。 |
+| `llm` | `maxPromptChars` 200000、`maxBatchSize` 20、`maxConcurrency` 8、`maxTokens` 4096 | cell 内私有 `agents.query`/`agents.queryMany` 子模型调用的预算；越界在调用模型前拒绝。 |
 
 Host-scope `dsh-prime-agent/runtime` 对显式配置的 `computeMs`、`maxWallMs`、`maxOutputBytes`、`maxOldGenerationSizeMb` 逐字透传；未配置时 `maxOldGenerationSizeMb` 使用 Prime 默认 64 MiB。Realm pool 治理项为 `maxActiveRealms`（默认 32）、`maxIdleMs`（默认 600000）、`maxHostCallsPerRun`（默认 200）、`maxParallelHostCallsPerRun`（默认 16）。Completion 保留与投影的六个上限为 `maxCompletionRetainedBytes`（默认 8 MiB）、`maxCompletionRetainedNodes`（默认 1,000,000）、`maxCompletionOpaqueBytes`（默认 8 MiB）、`maxCompletionOpaqueNodes`（默认 262,144）、`maxCompletionFullBytes`（默认 64 KiB）、`maxCompletionProjectionBytes`（默认 4 KiB）。前四项分别限制单个最新 JSON/opaque 值的准入，不是 entry-count 或累计 history 配额。
 

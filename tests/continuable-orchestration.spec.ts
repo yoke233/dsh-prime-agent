@@ -156,7 +156,7 @@ describe('continuable orchestration through the model-facing repl', () => {
 
     const surface = await completes(agent, `({ agents: Object.keys(agents).sort(), jobs: Object.keys(jobs).sort() })`)
     expect(surface.result).toEqual({
-      agents: ['fork', 'interrupt', 'list', 'send', 'spawn'],
+      agents: ['fork', 'interrupt', 'list', 'query', 'queryMany', 'send', 'spawn'],
       jobs: ['kill', 'list', 'output'],
     })
   }, 30_000)
@@ -203,7 +203,7 @@ describe('continuable orchestration through the model-facing repl', () => {
     // roster, follow-up, and interrupt aliases — never through a job tool.
     const managed = await completes(agent, `
       const roster = await agents.list({})
-      const sent = await agents.send({ subagent_id: childId, message: 'summarize the findings' })
+      const sent = await agents.send({ agent_id: childId, message: 'summarize the findings' })
       const stopped = await agents.interrupt({ agent_id: childId })
       const out = { roster, sent, stopped }
       out

@@ -1,11 +1,16 @@
 import type { Context } from '@deepseek-ai/cordis';
-import type { CodeBindingNamespace } from '@deepseek-ai/dsh-code-runtime';
+import type { CodeBindingFunction, CodeBindingNamespace } from '@deepseek-ai/dsh-code-runtime';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
 export declare const REPL_TOOL_NAME = "repl";
 export interface ReplBindings {
     bindings: CodeBindingNamespace[];
     finish(): Promise<void>;
 }
-/** Build one cell's leased host capabilities from the calling Agent's catalog. */
-export declare function createReplBindings(ctx: Context, exec: ToolRunContext, extraBindings?: readonly CodeBindingNamespace[]): ReplBindings;
+/**
+ * Build one cell's leased host capabilities from the calling Agent's catalog.
+ * `agentFunctions` are extra members installed on the `agents` namespace next
+ * to the delegation aliases (they must not shadow an alias name); the namespace
+ * exists whenever it has at least one member.
+ */
+export declare function createReplBindings(ctx: Context, exec: ToolRunContext, extraBindings?: readonly CodeBindingNamespace[], agentFunctions?: Readonly<Record<string, CodeBindingFunction>>): ReplBindings;
 //# sourceMappingURL=bridge.d.ts.map

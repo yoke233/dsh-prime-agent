@@ -9,8 +9,9 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { registerApplyPatch } from './apply-patch/plugin.js'
 import { registerContinual } from './continual/plugin.js'
-import { registerRefineCommand } from './continual/command.js'
+import { modelTarget, registerRefineCommand } from './continual/command.js'
 import type { HarnessLimits } from './continual/types.js'
+import { createLlmFunctions, LLM_BINDING_DEFAULTS, LLM_NAMESPACE_DOC, renderLlmMembers, type LlmBindingLimits } from './llm/binding.js'
 import { registerPolicy } from './policy.js'
 import { RealmIdentityStore } from './realm/identity.js'
 import type { ReplPresentation } from './realm/protocol.js'
@@ -20,6 +21,14 @@ import { createReplBindings, REPL_TOOL_NAME } from './repl/bridge.js'
 export const name = 'prime-agent'
 export const inject = ['tools', 'systemPrompt', 'primeRealmRuntime']
 
+/**
+ * The model-visible output budget one cell is told it has, in bytes. Keep it
+ * equal to the preset's `prime-spill-policy.maxInlineBytes`: the prompt states
+ * this number as the per-cell display budget, and the spill policy is what
+ * enforces it.
+ */
+const DEFAULT_VISIBLE_OUTPUT_BUDGET_BYTES = 12000
+
 /** Current configuration surface; removed legacy state and options are not accepted. */
 export interface Config {
   stateDirectory: string
@@ -27,7 +36,9 @@ export interface Config {
   refinementMaxTokens?: number
   refinementMaxConversationChars?: number
   requireOrchestrationTools?: boolean
+  visibleOutputBudgetBytes?: number
   continual?: Partial<HarnessLimits>
+  llm?: Partial<LlmBindingLimits>
 }
 
 /** Schemastery configuration for the control plane and secondary learning layer. */
@@ -37,6 +48,7 @@ export const Config: z<Config> = z.object({
   refinementMaxTokens: z.natural().min(256).default(4096),
   refinementMaxConversationChars: z.natural().min(1000).default(80000),
   requireOrchestrationTools: z.boolean().default(true),
+  visibleOutputBudgetBytes: z.natural().min(1000).default(DEFAULT_VISIBLE_OUTPUT_BUDGET_BYTES),
   continual: z.object({
     maxEntriesPerScope: z.natural().min(1).default(64),
     maxEntryIdChars: z.natural().min(1).default(128),
@@ -50,6 +62,12 @@ export const Config: z<Config> = z.object({
     maxStateBytes: z.natural().min(1024).default(524288),
     maxPromptEntriesPerScope: z.natural().min(1).default(32),
     maxPromptCharsPerScope: z.natural().min(256).default(16000),
+  }),
+  llm: z.object({
+    maxPromptChars: z.natural().min(1000).default(LLM_BINDING_DEFAULTS.maxPromptChars),
+    maxBatchSize: z.natural().min(1).default(LLM_BINDING_DEFAULTS.maxBatchSize),
+    maxConcurrency: z.natural().min(1).default(LLM_BINDING_DEFAULTS.maxConcurrency),
+    maxTokens: z.natural().min(64).default(LLM_BINDING_DEFAULTS.maxTokens),
   }),
 }) as unknown as z<Config>
 
@@ -76,39 +94,98 @@ function positiveLimits<T extends object>(defaults: T, partial: Partial<T> | und
   return limits
 }
 
-const REPL_AGENT_PROMPT = `## Persistent TypeScript REPL
+/** The fixed REPL contract. `budgetBytes` is the per-cell display budget the spill policy enforces. */
+function replAgentPrompt(budgetBytes: number): string {
+  const budget = `${Math.round(budgetBytes / 1000)} KB`
+  return `## Persistent TypeScript REPL
 
 Call only \`repl\` directly. In the TypeScript code passed to \`repl\`, use the
 preloaded \`tools.*\`, \`agents.*\`, and \`jobs.*\` APIs. Follow each generated
 declaration and its comments. \`import\` and \`require\` are unavailable.
 
+Only the cell's completion value (its last expression) and \`console.log\` output
+enter the conversation; every \`tools.*\` result stays in the REPL until you display
+part of it. Visible output per cell is budgeted at about ${budget}: a larger display
+is spilled to a file and replaced by a preview, so filter, slice, count, or aggregate
+in code and display only what the next decision needs. Extra cells cost more than
+extra output: reduce round trips first, then keep displays small when doing so does
+not force another cell.
+
 Top-level \`await\` works; top-level \`return\` does not. Treat the REPL as a live
-notebook: successful top-level bindings remain available in later cells. Prefer \`let\`
-for named tool results and working values you may refine across cells. Before repeating
-a tool call, continue from the existing binding; reassign or transform it as needed. A
-parse failure executes nothing; fix the cell and retry.
+notebook: successful top-level bindings remain available in later cells. Bind every
+read, search, and command result to a named \`let\` variable and continue from it in
+later cells: slice, filter, or transform the binding instead of repeating the call.
+A value bound in an earlier cell does not need to be re-read, printed, or
+reconstructed. Tool results are typed values (see \`ToolOutputMap\`): chain calls and
+access fields directly in one cell without displaying intermediate results. A parse
+failure executes nothing; fix the cell and retry.
+
+If a cell is a single \`await tools.x(...)\` whose raw result becomes the completion,
+you are using the REPL as tool-call syntax: bind the result and reduce it instead.
+Conversely, when one grep or one ranged read already pins the answer, read it
+directly; do not build machinery for a one-line lookup.
+
 Pass TypeScript object literals, writing identifier keys as \`key: 'value'\`, not
 \`key': 'value'\`. Tool results are parsed JavaScript values; do not call
 \`JSON.parse\` on them. Inspect uncertain shapes with \`Array.isArray(value)\` and
 \`Object.keys(value)\`.
 
-\`$_\` is the latest available non-undefined result. A later value-producing cell
-replaces it, so assign reusable values to named variables before running that cell.
-Continue from variables or \`$_\` instead of parsing shortened display text. A
-shortened display does not shorten the value already assigned to your variable.
-When a result reports \`Full formatted result stored at:\`, use that variable for
-structured data or read/grep the reported locator for omitted formatted text before
-repeating the same request. Convert Windows locator backslashes to forward slashes
-before putting the path in a string literal. Backslashes in JSON previews are notation,
+\`$_\` is the latest non-undefined completion; assign it to a name before running
+another value-producing cell. When a result reports \`Full formatted result stored
+at:\`, your variable still holds the complete value: continue from it in the next
+cell (slice, filter, count, or grep it) rather than displaying it whole again or
+re-running the call, and read or grep the reported locator only for omitted
+formatted text. Convert Windows locator backslashes to forward slashes before
+putting the path in a string literal. Backslashes in JSON previews are notation,
 not extra characters. Prefer forward-slash Windows paths such as \`D:/work/project\`.
 
 Keep large source material in files and only compact working state in the REPL.`
+}
+
+/** Reduction-shaped examples, rendered only when every tool they name is in the catalog. */
+const REPL_PATTERNS = [
+  'Patterns:',
+  '',
+  '```ts',
+  '// batch + reduce: many calls in one cell, small display',
+  "let hits = await tools.grep({ pattern: 'TODO', path: 'src' })",
+  'let byFile = Map.groupBy(hits.matches, m => m.path)',
+  "Array.from(byFile, ([p, ms]) => `${p}: ${ms.length}`).join('\\n')",
+  '```',
+  '',
+  '```ts',
+  '// locate before reading: grep for the anchor, then read only the relevant range',
+  "let file = 'src/server.ts'",
+  "let at = (await tools.grep({ pattern: 'listen\\\\(', path: file })).matches[0]?.lineNumber ?? 1",
+  'let slice = await tools.read({ file_path: file, offset: Math.max(1, at - 10), limit: 40 })',
+  "slice.lines.map(l => `${l.number}: ${l.text}`).join('\\n')",
+  '```',
+  '',
+  '```ts',
+  '// early termination over candidates bound in an earlier cell',
+  'let found',
+  'for (const p of candidates) {',
+  '  const head = await tools.read({ file_path: p, limit: 5 })',
+  "  if (head.lines.some(l => l.text.includes('#!/usr/bin/env node'))) { found = p; break }",
+  '}',
+  "found ?? 'none'",
+  '```',
+].join('\n')
+
+const REPL_PATTERN_TOOLS = ['grep', 'read'] as const
+
+const OUTPUT_REDUCTION_GUIDANCE = 'Bind `stdout.text` and display only the lines you need, for example the last 40 or those matching an error pattern.'
 
 const TOOL_AGENT_GUIDANCE: Readonly<Record<string, string>> = {
+  bash: OUTPUT_REDUCTION_GUIDANCE,
   edit: 'Read the current file before editing; after a stale-file error, read it again before retrying.',
   glob: 'For directory names, use pwsh `Get-ChildItem -Directory`. Avoid a bare `*` under a broad root.',
-  grep: 'A string value is still interpreted as a regular expression. For literal code search, omit punctuation when possible. When punctuation matters, use a no-flags literal `.source`, for example `pattern: /stream\\(options\\)/.source`. Run unrelated searches as separate parallel calls; simplify a rejected pattern before retrying.',
-  pwsh: 'When a shell command contains single-quoted fragments, use a double-quoted TypeScript `command` value and escape any embedded double quotes.',
+  grep: 'A string value is still interpreted as a regular expression. For literal code search, omit punctuation when possible. When punctuation matters, use a no-flags literal `.source`, for example `pattern: /stream\\(options\\)/.source`. Run unrelated searches as separate parallel calls; simplify a rejected pattern before retrying. Aggregate `matches` (group by path, count, or filter) before displaying when there is more than a screenful.',
+  pwsh: `When a shell command contains single-quoted fragments, use a double-quoted TypeScript \`command\` value and escape any embedded double quotes. ${OUTPUT_REDUCTION_GUIDANCE}`,
+  read: 'For a file longer than a few hundred lines, grep first and read only the relevant range; keep `lines` in a variable and display a slice.',
+  subagent: 'Give the prompt an objective, the expected report format, relevant paths, and boundaries. Ask for conclusions, counts, and file paths in a few hundred words; large material goes to a file the report names, never raw tool output.',
+  subagent_fork: 'State what is new and the expected report format: conclusions, counts, and file paths in a few hundred words, with large material in a file the report names.',
+  web_search: 'Keep `sources` in a variable and display only the titles and URLs you will use.',
   write: 'Use this for file creation or complete replacement; prefer edit for targeted changes. Read an existing file before overwriting it.',
 }
 
@@ -124,15 +201,28 @@ interface CapabilityAlias {
 }
 
 
-function namespaceDeclaration(global: string, aliases: CapabilityAlias[]): string | undefined {
-  if (aliases.length === 0) return undefined
-  const members = aliases.map(({ member, target }) =>
-    `  ${member}: (args: ToolArgsMap[${JSON.stringify(target)}]) => Promise<ToolOutputMap[${JSON.stringify(target)}]>;`)
-  return `declare const ${global}: {\n${members.join('\n')}\n}`
+function namespaceDeclaration(
+  global: string,
+  aliases: CapabilityAlias[],
+  extraMembers: readonly string[] = [],
+  doc: readonly string[] = [],
+): string | undefined {
+  if (aliases.length === 0 && extraMembers.length === 0) return undefined
+  const members = [
+    ...aliases.map(({ member, target }) =>
+      `  ${member}: (args: ToolArgsMap[${JSON.stringify(target)}]) => Promise<ToolOutputMap[${JSON.stringify(target)}]>;`),
+    ...extraMembers,
+  ]
+  const header = doc.length === 0 ? '' : `${doc.join('\n')}\n`
+  return `${header}declare const ${global}: {\n${members.join('\n')}\n}`
 }
 
+interface PromptOptions {
+  visibleOutputBudgetBytes: number
+  llm: LlmBindingLimits
+}
 
-function sdkText(ctx: Context, agent: Agent): string {
+function sdkText(ctx: Context, agent: Agent, options: PromptOptions): string {
   const schemas = ctx.tools.schemas(agent)
     .filter(schema => schema.name !== REPL_TOOL_NAME)
     .map((schema) => {
@@ -169,16 +259,48 @@ function sdkText(ctx: Context, agent: Agent): string {
   const declarations = [
     rendered.slice(declarationStart + '```ts\n'.length, declarationEnd),
     COMPLETION_INTRINSICS,
-    namespaceDeclaration('agents', agents),
+    namespaceDeclaration('agents', agents, renderLlmMembers(options.llm), LLM_NAMESPACE_DOC),
     namespaceDeclaration('jobs', jobs),
   ].filter((section): section is string => section !== undefined)
-  return `${REPL_AGENT_PROMPT}\n\nAvailable functions and values:\n\n\`\`\`ts\n${declarations.join('\n\n')}\n\`\`\``
+  const patterns = REPL_PATTERN_TOOLS.every(tool => available.has(tool)) ? `\n\n${REPL_PATTERNS}` : ''
+  return `${replAgentPrompt(options.visibleOutputBudgetBytes)}${patterns}\n\nAvailable functions and values:\n\n\`\`\`ts\n${declarations.join('\n\n')}\n\`\`\``
 }
 
 export interface ReplExecutionResult {
   logs: string[]
   result?: JsonValue
   presentation?: ReplPresentation
+  /** Estimated tokens already in this conversation's context when the cell started, when the session meter is available. */
+  contextTokens?: number
+  /** The routed model's context window in tokens, when the route declares one. */
+  contextWindow?: number
+}
+
+/** The session token meter's surface this plugin reads; the service itself stays host-owned and optional. */
+interface SessionTokenMeter {
+  measure(session: Agent['session']): { totalTokens: number }
+}
+
+/** Best-effort context measurement for the trailing `Context:` line; every failure yields no line rather than a failed cell. */
+async function measureContext(ctx: Context, agent: Agent, signal: AbortSignal): Promise<Pick<ReplExecutionResult, 'contextTokens' | 'contextWindow'>> {
+  const meter = ctx.get('tokenMeter') as SessionTokenMeter | undefined
+  if (meter === undefined) return {}
+  let contextTokens: number
+  try {
+    contextTokens = meter.measure(agent.session).totalTokens
+  } catch {
+    return {}
+  }
+  if (!Number.isSafeInteger(contextTokens) || contextTokens < 0) return {}
+  const llm = ctx.get('llm')
+  if (llm === undefined) return { contextTokens }
+  try {
+    const target = modelTarget(agent)
+    const contextWindow = (await llm.resolveModelInfo(target.provider, target.model, signal)).context?.contextWindow
+    return contextWindow === undefined ? { contextTokens } : { contextTokens, contextWindow }
+  } catch {
+    return { contextTokens }
+  }
 }
 
 
@@ -200,6 +322,7 @@ function renderResult(value: JsonValue | undefined, presentation: ReplPresentati
   if (presentation.kind === 'retained-preview') {
     return 'The complete value remains in this REPL as `$_`.\n'
       + 'Assign it to a variable before running another value-producing cell.\n'
+      + 'Continue from that variable in the next cell (slice, filter, count); do not display it whole again.\n'
       + `Type: ${presentation.valueType}`
       + (presentation.serializedBytes === undefined ? '' : `\nSerialized size: ${presentation.serializedBytes.toLocaleString('en-US')} bytes`)
       + previewSection(value)
@@ -218,12 +341,22 @@ function renderResult(value: JsonValue | undefined, presentation: ReplPresentati
     + 'No structural preview is available.'
 }
 
+function renderContextLine(value: ReplExecutionResult): string | undefined {
+  if (value.contextTokens === undefined) return undefined
+  const used = value.contextTokens.toLocaleString('en-US')
+  return value.contextWindow === undefined
+    ? `Context: ${used} tokens`
+    : `Context: ${used} / ${value.contextWindow.toLocaleString('en-US')} tokens`
+}
+
 /** Render a canonical REPL result as notebook-style model text without changing its programmatic value. */
 export function renderReplResult(value: ReplExecutionResult): string {
   const sections: string[] = []
   if (value.logs.length > 0) sections.push(value.logs.join('\n'))
   const result = renderResult(value.result, value.presentation)
   if (result !== undefined) sections.push(result)
+  const context = renderContextLine(value)
+  if (context !== undefined) sections.push(context)
   return sections.join('\n\n')
 }
 
@@ -232,6 +365,12 @@ export function apply(ctx: Context, config: Config): void {
   const stateDirectory = config.stateDirectory.trim()
   if (stateDirectory.length === 0) throw new Error('dsh-prime-agent: stateDirectory must not be empty')
   const continualLimits = positiveLimits(CONTINUAL_DEFAULTS, config.continual, 'continual')
+  const llmLimits = positiveLimits(LLM_BINDING_DEFAULTS, config.llm, 'llm')
+  const visibleOutputBudgetBytes = config.visibleOutputBudgetBytes ?? DEFAULT_VISIBLE_OUTPUT_BUDGET_BYTES
+  if (!Number.isSafeInteger(visibleOutputBudgetBytes) || visibleOutputBudgetBytes < 1) {
+    throw new Error('dsh-prime-agent: visibleOutputBudgetBytes must be a positive safe integer')
+  }
+  const promptOptions: PromptOptions = { visibleOutputBudgetBytes, llm: llmLimits }
   const identity = new RealmIdentityStore({ directory: join(stateDirectory, 'realm-identity') })
   const allowGlobalRefinement = config.allowGlobalRefinement ?? false
   const refinementMaxTokens = config.refinementMaxTokens ?? 4096
@@ -252,7 +391,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: REPL_TOOL_NAME,
-    description: 'Execute a TypeScript REPL cell.',
+    description: 'Run TypeScript in a persistent REPL cell to orchestrate and compose tool calls. Inside the code, call tools as `await tools.name(args)`, bind results to variables, filter or aggregate them in code, and display only what the next decision needs. Only the cell\'s completion value and `console.log` output enter the conversation; everything else stays in the REPL, and top-level bindings persist to later cells.',
     parameters: { code: { type: 'string', required: true, description: 'TypeScript source code for this cell.' } },
     output: {
       schema: {
@@ -297,6 +436,8 @@ export function apply(ctx: Context, config: Config): void {
               },
             ],
           },
+          contextTokens: { type: 'integer' },
+          contextWindow: { type: 'integer' },
         },
       },
       render: (_args, value) => [{ type: 'text', text: renderReplResult(value as ReplExecutionResult) }],
@@ -305,7 +446,16 @@ export function apply(ctx: Context, config: Config): void {
       if (exec.agent === undefined) throw new Error('repl requires an owning agent session')
       let realmId: string
       try { realmId = await identity.resolve(String(exec.agent.id)) } catch { throw new Error('repl session identity is unavailable') }
-      const leased = createReplBindings(ctx, exec, [continual.bindingFor(exec.agent)])
+      const context = await measureContext(ctx, exec.agent, exec.signal)
+      // The sub-model members join the existing `agents` namespace rather than a
+      // namespace of their own: a fifth injected global has crashed worker
+      // teardown (see docs/architecture.md, "Worker 销毁与注入全局数").
+      const leased = createReplBindings(
+        ctx,
+        exec,
+        [continual.bindingFor(exec.agent)],
+        createLlmFunctions(ctx, exec.agent, llmLimits, exec.signal),
+      )
       try {
         const outcome = await ctx.primeRealmRuntime.run(realmId, { program: args.code, bindings: leased.bindings, signal: exec.signal })
         if (outcome.error !== undefined) {
@@ -316,6 +466,7 @@ export function apply(ctx: Context, config: Config): void {
           logs: outcome.logs,
           ...(outcome.value === undefined ? {} : { result: outcome.value }),
           ...(outcome.presentation === undefined ? {} : { presentation: outcome.presentation }),
+          ...context,
         }
       } finally { await leased.finish() }
     },
@@ -334,7 +485,7 @@ export function apply(ctx: Context, config: Config): void {
     result.tools = [repl]
     result.sections = result.sections.filter(section =>
       section.name !== 'harness:identity' && !section.name.startsWith('tool:'))
-    const text = sdkText(ctx, context.agent)
+    const text = sdkText(ctx, context.agent, promptOptions)
     const sdk = result.sections.find(section => section.name === 'tools:sdk')
     if (sdk === undefined) result.sections.push({ name: 'tools:sdk', text })
     else sdk.text = text
@@ -352,3 +503,4 @@ export type {
   HarnessState,
   HarnessTransaction,
 } from './continual/types.js'
+export { LLM_BINDING_DEFAULTS, type LlmBindingLimits } from './llm/binding.js'

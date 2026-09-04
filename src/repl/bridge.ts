@@ -95,11 +95,17 @@ export interface ReplBindings {
   finish(): Promise<void>
 }
 
-/** Build one cell's leased host capabilities from the calling Agent's catalog. */
+/**
+ * Build one cell's leased host capabilities from the calling Agent's catalog.
+ * `agentFunctions` are extra members installed on the `agents` namespace next
+ * to the delegation aliases (they must not shadow an alias name); the namespace
+ * exists whenever it has at least one member.
+ */
 export function createReplBindings(
   ctx: Context,
   exec: ToolRunContext,
   extraBindings: readonly CodeBindingNamespace[] = [],
+  agentFunctions: Readonly<Record<string, CodeBindingFunction>> = {},
 ): ReplBindings {
   const agent = exec.agent
   if (agent === undefined) throw new Error('repl requires an owning agent session')
@@ -173,10 +179,18 @@ export function createReplBindings(
     Object.defineProperty(raw, schema.name, { enumerable: true, value: binding(schema.name) })
   }
 
-  const namespace = (global: string, aliases: Record<string, string>): CodeBindingNamespace | undefined => {
+  const namespace = (
+    global: string,
+    aliases: Record<string, string>,
+    extras: Readonly<Record<string, CodeBindingFunction>> = {},
+  ): CodeBindingNamespace | undefined => {
     const functions: Record<string, CodeBindingFunction> = Object.create(null) as Record<string, CodeBindingFunction>
     for (const [member, target] of Object.entries(aliases)) {
       if (available.has(target)) Object.defineProperty(functions, member, { enumerable: true, value: binding(target) })
+    }
+    for (const [member, fn] of Object.entries(extras)) {
+      if (Object.hasOwn(aliases, member)) throw new Error(`dsh-prime-agent: ${global}.${member} is a delegation alias and cannot be replaced`)
+      Object.defineProperty(functions, member, { enumerable: true, value: fn })
     }
     return Object.keys(functions).length === 0 ? undefined : { global, functions }
   }
@@ -185,7 +199,7 @@ export function createReplBindings(
   const agents = namespace('agents', {
     spawn: available.has('subagent') ? 'subagent' : 'subagent_fork',
     fork: 'subagent_fork', list: 'list_agents', send: 'send_message', interrupt: 'interrupt_agent',
-  })
+  }, agentFunctions)
   const jobs = namespace('jobs', { list: 'job_list', output: 'job_output', kill: 'job_kill' })
   if (agents !== undefined) bindings.push(agents)
   if (jobs !== undefined) bindings.push(jobs)
