@@ -114,9 +114,8 @@ not force another cell.
 Top-level \`await\` works; top-level \`return\` does not. Treat the REPL as a live
 notebook: successful top-level bindings remain available in later cells. Bind every
 read, search, and command result to a named \`let\` variable and continue from it in
-later cells: slice, filter, or transform the binding instead of repeating the call.
-A value bound in an earlier cell does not need to be re-read, printed, or
-reconstructed. Tool results are typed values (see \`ToolOutputMap\`): chain calls and
+later cells by slicing, filtering, or transforming it directly.
+Tool results are typed values (see \`ToolOutputMap\`): chain calls and
 access fields directly in one cell without displaying intermediate results. A parse
 failure executes nothing; fix the cell and retry.
 

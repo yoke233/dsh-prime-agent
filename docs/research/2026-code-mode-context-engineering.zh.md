@@ -2,6 +2,8 @@
 
 > 状态：调研结论；2026-09-04 已吸收第 1–14 条（5.1 全部八条提示词改动；5.2 的无状态子调用做成 `agents.query`/`agents.queryMany` 私有成员而非独立 `llm` 全局，原因见 `docs/architecture.md`「Worker 销毁与注入全局数」；`repl` 结果尾部 `Context: 已用 / 窗口 tokens` 行；DeepSeek 默认路由 `modelPolicies.thresholdRatio: 0.3`）。未做：5.2 第 10 条的变量目录、5.3 全部。第 6 节评测尚未运行。
 > 日期：2026-09-04
+> 增补：2026-09-05，第 9 节新增论文证据、当前实现核对与下一轮优化优先级。第 1–8 节保留初次调研背景；其中“尚无子调用 / 预算不可见”等诊断描述的是改动前状态，不能当作当前缺口。本文未运行新的模型评测。
+> 实现更新：2026-09-06，第 10 节记录 Codex 对照结论及 Prime 的历史窗口实现；当前行为以该节和 `docs/architecture.md` 为准。第 9 节的候选优先级保留为决策背景。
 > 范围：为什么模型拿到 Prime 的持久 REPL 后仍按 one-shot 工具调用使用，2026 年前沿（论文、官方博客、harness 源码）怎么解决同类问题，哪些可以吸收进本项目。
 > 证据等级约定：**A** 有对照评测的论文或官方评测；**B** 官方 API 文档/规范；**C** 官方工程博客（含厂商自测）；**D** 仅源码/README；**L** 本机会话日志统计。
 
@@ -413,3 +415,108 @@
 **版本锚点（2026-09-04）**：Codex `rust-v0.153.2` / main `8e6a44b428`；Gemini CLI `87a9c71d`（0.60.0-nightly）；Qwen Code `80497a74` / v0.23.0；OpenHands v1.16.0 + software-agent-sdk 无 release；SWE-agent v1.1.0（2025-05-22）；mini-swe-agent v2.4.6；kimi-cli / `@moonshot-ai/kimi-code@0.40.1`；DSH `dsh-v0.1.2-rc.1`（本机 `76fda72979`）；prime-agent v0.9.1（本机 `14e95fcf7`）；smolagents v1.26.0；`@cloudflare/codemode` 0.5.1；`@ai-sdk/code-mode` 1.0.49；alexzhang13/rlm v0.1.3。
 
 **arXiv**：2512.24601（RLM）、2608.23552（Prime Agent）、2608.21690（Scroll）、2606.30005（VISTA）、2603.01209（Agents Learn Their Runtime）、2607.10569（execute_code 消融）、2608.11386（Devil in the Interface）、2608.06370（Bitter Lesson of Tool Calling）、2607.22585（Scaffold Effect）、2608.08654（Scaffolding Matters）、2607.03691、2608.01347、2609.00006、2604.03515、2608.23953、2510.20909、2601.14914、2605.05247、2608.23992、2607.15593、2607.17598、2608.22752、2608.31057、2607.01916、2607.20064、2511.22729、2607.17937、2608.09290、2608.00101、2603.02615、2603.15653、2603.20105、2606.13643、2510.11967、2510.24699、2507.02259、2509.13313、2512.02556（DeepSeek-V3.2）、2605.18747、2402.01030、2508.21433（Complexity Trap）、2510.00615（ACON）、2606.10209（Less Context, Better Agents）、2607.12161（Token Reduction Is Not Cost Reduction）、2604.04979（Squeez）、2601.16746（SWE-Pruner）、2604.19572（TACO）、2608.06503（TRACE）、2605.30785（AdaCoM）、2510.04618（ACE）、2605.12366、2607.00151。技术报告：MoonshotAI Kimi-K2 / K2.5 / K3 `tech_report.pdf`。
+
+## 9. 2026-09-05 增补：从少输出转向有效状态与证据保真
+
+本轮只补研究与建议，不修改 runtime、preset 或模型 policy。新增论文均链接到一手来源；有实验不等于经过独立复现，下面的收益均属于作者所测环境，迁移到本项目的建议明确标为推论。原有来源列表未在本轮逐条重新审计。
+
+### 9.1 先校正当前基线
+
+核对 [当前架构](../architecture.md)、[子模型绑定](../../src/llm/binding.ts)、[结果计量](../../src/index.ts)、[policy](../../src/policy.ts) 与 [preset](../../agent-presets/prime/agent.cordis.yml) 后：
+
+- `agents.query/queryMany` 已存在：无工具、无父会话历史，只看到各自 `prompt/system`；返回文本与 `truncated`。批内单项失败会使整批拒绝，不能假设成功项仍会返回。下一步应研究调用质量与失败成本，而非再增加一个 `llm` 原语。
+- `Context:` 已存在，但测的是 **cell 开始前的 Session 上下文估计**，不是 REPL 输出累计、子模型账单或本次输出后的准确剩余额度。不能用这一行证明整体成本下降。
+- DeepSeek 的 `thresholdRatio: 0.3` 已配置。下一轮对照应以已实现版本为基线；旧 prompt 如需对照必须冻结为独立实验臂，不能把旧文档里的缺口当现状。
+- 普通变量跨 cell 存活，compaction 不清 heap；重启会丢失。**变量仍存在不代表值仍新鲜**。现有 policy 已提示 formatter/build 后重读，但“已有 binding 就不重跑”的总则仍需覆盖普通编辑、外部变化和并行 child 写入。
+
+旧文两处论证需要收窄：①稳定前缀与纯追加可避免由历史改写引起的缓存失效，不保证“KV cache 代价为零”；新输入、缓存容量与 provider 策略仍影响账单。②14k SDK 在 1M 窗口占 1.4%，在 128k 窗口占约 10.9%，不能说普遍“远低于 1–5%”。继续全量 SDK 可以是当前简单实现的选择，但动态发现应按实际模型窗口、catalog 规模及实测成本判定，不能凭原来的算术永久 Reject。
+
+### 9.2 新增论文与适用边界
+
+#### A. StateMemBench：记忆命中后仍可能使用已失效的事实
+
+**Can Agent Memory Systems Track Evolving State?**，2026-08-20，arXiv:2608.19652v1。已读摘要、方法与实验限制。234 个合成多会话场景区分当前事实、被替代事实与其他错误；DeepSeek-V4-Flash 上 StateMem 当前状态准确率为 0.363，同 backbone 最强基线为 0.205。作者明确说明自建陷阱与方法的针对性，收益应视作该环境内上界；模型关闭 thinking，不能直接移植到我们的编码轨迹。[原文 §3–6、附录 G–H](https://arxiv.org/html/2608.19652v1)
+
+**项目推论**：优先修正复用条件，而非增加记忆数据库。读取结果是某一时刻的快照；纯计算结果可持续复用，但源文件、约束或外部状态变化后，应重新读取受影响部分、重算派生索引。验收场景是“先读 A → 修改 A → 继续依赖 A”，以及“用户撤回旧约束后旧变量仍存在”。不引入自动依赖图，也不要求所有读操作额外计算哈希。
+
+#### B. ContextBench：输出压缩率不能代替上下文质量
+
+**ContextBench: A Benchmark for Context Retrieval in Coding Agents**，2026-02-05，arXiv:2602.05892v1。虽然不是最近一个月，原文未覆盖且与编码任务直接相关。包含 66 个仓库、8 种语言、1,136 个任务及人工核验的必要代码上下文，按文件、代码块和行衡量召回率、精确率与效率。人工 gold 以参考补丁和依赖追踪构造，不能假设它穷尽所有合法解法。[原文 §2、§3](https://arxiv.org/html/2602.05892v1)
+
+**项目推论**：给现有评测加一个小型“关键证据集合”，区分三个层次：工具已取得、模型实际见到、最终解法正确利用。数据在 Realm 里但没有被显示、计算或传给子模型，并不代表模型已掌握它；反之，通过代码精确计算出结论，也无需打印原始行。把第 6 节“归约占比达到 40%”降为诊断指标，真正验收是关键证据不漏、任务成功与成本改善。不要因少量重复读取或单调用本身判失败。
+
+#### C. CompressAgent：缩短工具文案也可能破坏操作协议
+
+**Control Under Compression: Reliability Frontiers for Tool-Using Agents**，2026-08-02，arXiv:2608.01056v1。已读方法、结果和限制：9 组控制上下文、225 个 held-out 任务、3 个固定 Qwen API 标识、15,525 次逻辑运行。保留 75% 文本的分节压缩成功率 92.4%，完整文本为 93.8%；降到 35% 时为 47.0%。但这是最多十步的模拟环境、文本 JSON 动作协议，且关闭 thinking；不是 REPL 或历史 compaction 的直接实验。[原文 §IV–VI](https://arxiv.org/html/2608.01056v1)
+
+**项目推论**：文案去重应按完整操作义务审阅：什么时候能调用、参数怎么形成、部分失败怎么办、何时需要刷新状态。精确保留 SDK 类型与标识符；不要按统一百分比裁短 policy。实际模型验证需覆盖截断回复、部分成功、stale edit、取消和重启后的动作选择；依然不写固定文案 substring/snapshot 单测。该论文不能证明本项目应采用 75% 压缩预算。
+
+#### D. Context Privilege Escalation：归约和持久化不能抹掉来源
+
+**What's in Your Agent's Context? Context Privilege Escalation Attacks against AI Agent Harness**，2026-09-01，arXiv:2609.01222v1。已读方法与限制。研究 12 个真实 harness，区分低信任内容进入更高 message role，以及越过原 scope 持久存在两类传播；结合静态分析与实际请求验证。论文区分“传播路径成立”和“模型执行了注入动作”，不能把前者都算成成功攻击，也没有证据说明 DSH 存在相同漏洞。[原文 §VI–VII](https://arxiv.org/html/2609.01222v1)
+
+**项目推论**：子模型摘要、child report、spill 回读都应保留材料来源与事实/指令边界。不要把网页原文放进 `query.system`，也不要把材料中的要求变成全局 policy。后续若研究摘要或学习入口，验证实际组装后的角色与作用域；本轮不改变 `refine` 设计或其审批流程。工具授权继续交给 DSH，来源标签只是信息保真措施，不能取代权限检查。
+
+#### E–H. 计划失效、定位复用、摘要质量与学习评测
+
+另四篇的版本、实验数字和局限详见 [补充论文核验笔记](2026-09-05-additional-papers.notes.zh.md)。这里仅保留影响取舍的结论：
+
+| 论文 / 核验版本 | 作者证据及边界 | 对 Prime 的推论 |
+| --- | --- | --- |
+| [Fresh Memory, Stale Plans / PlanFence](https://arxiv.org/html/2609.03340v1)，09-03 | 在规划后刻意插入修订的 30 个受控工作流中，仅刷新记忆仍执行旧计划；依赖版本检查避免了该错误。并非自然失败率，也未解决跨 owner 的原子校验与执行 | 刷新源变量之后，还要重新判断旧编辑计划是否成立；不立即照搬分布式依赖协议 |
+| [Beyond Context Windows: Persistent Discovery Context for Data-Centric Agents](https://arxiv.org/html/2609.02129v1)，09-02 | 125 个留出检索任务中定位映射有收益；错误映射会降质，自动生成记忆在一个环境未胜基线。只测数据对象检索 | 优先保存可回取的定位线索；目录是导航而非真相，路径移动/同名误导必须测试 |
+| [CompactionRL](https://arxiv.org/html/2607.05378v1)，07-06 | 固定执行模型，只换摘要模型，在抽样 200 个 SWE-bench Verified 任务上的 pass@1 相差 6.5pp；每设置两次运行、最多三次压缩。不是本项目路由 | 摘要质量是独立实验因子；固定触发点和预算比较，不只调 thresholdRatio。该工作测 compaction，不能据此声称已有 RLM × 编码基准证据 |
+| [Argus: A General-Purpose Agentic Reasoning Runtime for Long-Horizon Tasks](https://arxiv.org/html/2608.05144v2)，08-07 v2 | SWE-Bench Pro 全系统比较与后期 wave 的效率变化不能分离审阅、记忆和任务顺序影响 | 学习策略效果应冻结旧/新 revision、交叉任务顺序；不能因后期变快就归因于学习。这里仅建议实验，不改变 refine 三入口或基线 |
+
+### 9.3 优先级：能直接改善现有模式的最小改动
+
+以下是候选工作，不表示已经实现或经本机模型验证。
+
+| 优先级 | 建议 | 最小范围 | 可翻案的验证 |
+| --- | --- | --- | --- |
+| P0 | 复用变量前判断来源是否变化，变化后同时重算派生结果 | 修订已有 policy 的复用条件，保留普通变量实现 | 编辑、构建、child 写入、用户纠正后不使用旧事实；无变化时不增加重读 |
+| P0 | 归约保留决策证据 | 在任务样例中让摘要带来源位置、关键原文/数值和未决项，必要时从原变量取回 | 插入看似无关但决定正确性的边界条件；判断是否漏掉，不只比较字符数 |
+| P0 | 统计所有模型调用成本及失败重试 | 评测复用 Host usage；单列主模型、query 和 child，缺 usage 时标未知 | `queryMany` 部分失败、`truncated: true`、长尾任务计入成本；不能只数外层 repl |
+| P1 | 子调用结果先验证再归并 | 现有 `{ text, truncated }` 上做任务级解析、来源核对；确定性查找/计数继续用代码 | 缺项、重复项、伪造来源、截断 JSON、相互矛盾回复不被当作完整结果 |
+| P1 | compaction 后恢复一个小工作目录 | 先用普通任务文件/变量记下当前目标、有效证据位置、需刷新项和下一步；不造第二套状态存储 | 分别测试 compaction 保 heap 与 restart 丢 heap；不要把两者当同一实验 |
+| P1 | 单独比较摘要质量 | 固定执行模型、任务、触发点和摘要预算；独立摘要路由若无公开 seam，先离线评测 | 一次与三次压缩后的成功率、遗漏证据、恢复成本；不私建第二套 compaction 生命周期 |
+| P2 | 历史掩蔽、自动变量目录、动态 SDK 发现 | 保持候选；先确认实际公共 seam 和净收益 | 对照成功率、缓存读写、延迟、回取成本及过期 locator，而非只测 token |
+
+其中 `queryMany` 的失败语义是一个需要单独确认的工程问题：当前返回契约无法让调用者取回同批已成功项；但不能把它直接等同于“业务需要部分成功”。先测失败重试是否显著浪费、调用者能否安全利用独立结果，再决定是否改变公开契约。论文不为这项 API 变更提供直接结论。
+
+### 9.4 下一轮评测如何避免优化错目标
+
+沿用第 6 节的小任务集，但冻结 **当前已实现版本** 为基线。先分别比较“有条件复用”和“保留证据的归约”，不要同时混入新的 compaction 策略、模型路由或多 agent 规模。每格重复运行；少量样本只作筛选，不能用一次零失败宣称可靠性提高。
+
+增加四类故障任务：①读取之后外部状态变化；②长输出中有罕见但必要的否定条件；③子调用部分失败/截断；④同一任务分别经历 compaction 与 Worker 重启。评分同时看最终环境状态、证据可追溯、旧状态误用率、恢复是否重复产生副作用，以及总账单与 p90 延迟。
+
+取舍标准：**质量至少维持、总成本或完成时间下降，且没有把成本转移到隐藏子调用或失败重跑。** 批量率、变量引用率、可见输出比只能解释结果，不能作为必须追高的目标。普通任务文件与来源索引足以支持的能力，不新增数据库、自动依赖追踪或常驻 planner。
+
+## 10. 2026-09-06：从论文与 Codex 结论到 Prime 历史窗口
+
+用户明确要求吸收 history/notes/new_context 方向并优化项目。本次采用可回取历史窗口，不把“关闭压缩”解释为无限累积消息。
+
+### 10.1 已核实的依据与取舍
+
+- **Codex 版本事实**：官方 changelog 将默认关闭的 `features.context_management.experimental_mode` 记在 0.153.0，启用 token-budget context、history notes 与 `new_context`；0.153.4 的条目是 Astra model picker 与异步提问指导修复。实验模式限符合条件的 ChatGPT Plus/Pro/Pro Lite、Codex backend 会话，不适用于 API-key、自定义 provider 或临时结构化线程。因此这里是机制适配，不能把 Codex 开关直接用于 DeepSeek。[官方更新日志](https://learn.chatgpt.com/docs/changelog)
+- **Scroll**：工作窗口以外保留事件原文与地址，目录用于导航；不是依靠摘要保留未来所需的一切。采用“日志保留 + 代码回取 + 有界目录”，本次不用 SQLite、分层索引或第二套会话日志。[原文 §2](https://arxiv.org/html/2608.21690v1)
+- **StateMemBench / PlanFence**：数据仍在、甚至已读到最新数据，也不保证旧行动计划有效。采用有条件变量复用指导；不增加自动依赖图或拦截器。[StateMemBench](https://arxiv.org/html/2608.19652v1)、[PlanFence](https://arxiv.org/html/2609.03340v1)
+- **ContextBench / Context Privilege Escalation**：回取必须保留证据与来源，不能以输出量作为唯一目标，也不能把检索材料当更高层指令。history API 返回记录的内容投影，排除请求头、provider replay state 和私有 reasoning；不把任务笔记写进 continual state。[ContextBench](https://arxiv.org/html/2602.05892v1)、[CPE](https://arxiv.org/html/2609.01222v1)
+
+### 10.2 已实现的最小闭环
+
+Prime preset 以 `dsh-prime-agent/context-manager` 替换旧 LLM 摘要 backend；继承 DSH `BasicCompactionEngine`，只覆盖其明确支持的 `summarize()` hook，生成日志偏移范围、至多八条近期人类消息地址及短引用。旧 surface 退出窗口，DSH 原日志保留；不调用摘要模型。保留 DSH 自动压力处理、overflow retry、手动 `/compact`、工具配对、事务锁与持久化流程，移除 scoped pruner，保留其 isolation 以免误取 Host 服务。
+
+模型通过唯一 `repl` 内的 `tools.history_search/history_read` 检索、分页回取；`tools.notes_read/notes_write` 提供独立 Session 的有界任务笔记和 revision 检查；`tools.new_context` 在当前 cell 结算后请求缩小窗口。切换不创建 Session，不销毁 Realm，也不把能力注册成新的 Realm global。细节与上限见 [架构说明](../architecture.md)。
+
+实现过程中核对了 DSH 的已安装类型、导出与持久化契约：默认 backend 确实支持模板 summarizer；`Session.eventAt` 能访问被 surface shadow 的原始事件；外部自定义 Session 事件缺少可在公开 append 时声明的恢复契约，因此没有引入自定义 notes 事件，笔记改用单份 Session 文件，复用 DSH 原子写与文件锁。
+
+这里仍使用 DSH 的 checkpoint 外壳、`compaction/*` 审计事件和缓存失效语义；事件名不代表发起了 LLM 摘要。不是 Codex 服务端实现的完整复刻，也不承诺原始 canonical 工具值、图片或 spill 文件无限期可回取。已存在的旧摘要无法凭空还原摘要之前未被日志保存的内容。
+
+### 10.3 验证口径
+
+新增行为测试覆盖：原记录在重复 surface replacement 与 Session reconstruction 后可读；空搜索页继续分页；精确字符切片；私有信息排除；Session 隔离；notes 并发 revision 冲突、清空、取消与坏文件拒绝；真实 Agent Loop 的主动窗口切换、自动压力、provider overflow、手动切换、短窗口无收益时继续工作，以及切换后从同一 Realm 变量与笔记恢复。模型调用使用确定性回放，检查没有额外摘要请求。
+
+这些验证证明接口和生命周期闭环，不证明 DeepSeek 实际任务成功率或账单改善。尚未运行付费模型 A/B；后续仍以任务成功率、旧状态误用、关键证据回取、总模型成本及缓存读写评价收益，不以工具使用次数为目标。
+
+验证记录：最终 `npm run check` 通过（typecheck、build、100 个快速测试）；完整 integration suite 209 个测试通过，之后对字面量历史搜索的补充修复再次通过快速测试及 6 个 context-manager integration 用例。真实 Prime prompt dump 与 `npm pack --dry-run` 完成，打包契约覆盖新入口。一次 `check:all` 中未修改的 Realm identity 并发用例曾在 Windows `hmac.key.lock` 上出现 EPERM，单文件复跑与随后完整 integration 复跑均通过；保留为观察到的偶发失败，不记成已修复缺陷。未安装或改动本机运行中的 TUI profile。

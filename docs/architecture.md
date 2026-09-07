@@ -78,7 +78,7 @@ Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt ass
 
 - 支持顶层 `await`。
 - cell 的末尾表达式是结果，顶层 `return` 无效。
-- 普通顶层 binding 留在同一 live namespace，供后续 cell 直接使用；模型文案把 REPL 定义为 live notebook，要求把每个读取、搜索和命令结果绑定到命名 `let` 变量并从变量继续切片、过滤或转换，不重复已绑定的调用；更早 cell 绑定的值无需重读、打印或重建。
+- 普通顶层 binding 留在同一 live namespace，供后续 cell 直接使用；模型文案把 REPL 定义为 live notebook，要求把每个读取、搜索和命令结果绑定到命名 `let` 变量并从变量继续切片、过滤或转换，在来源仍有效时避免重复调用；输入或外部状态变化后刷新受影响证据与派生计划。
 - cell 内预加载三个绑定命名空间：`tools.*`（当前 Agent catalog 中除 `repl` 外的全部工具）、`agents.*`（`spawn`/`fork`/`list`/`send`/`interrupt` → `subagent`/`subagent_fork`/`list_agents`/`send_message`/`interrupt_agent`，外加私有子模型成员 `query`/`queryMany`，见「子模型调用」）、`jobs.*`（`list`/`output`/`kill` → `job_list`/`job_output`/`job_kill`）。程序始终得到 canonical value，SDK 从当前 catalog 生成真实 `ToolOutputMap`；对象结果若未经转换直接成为 completion，Worker 才用关联的官方 content 展示。SDK 只额外声明 `declare const $_: unknown`，不提供 completion id 或历史管理接口。
 - 固定 Agent 文案只教授唯一 `repl` 路由、cell 内预加载命名空间、declaration/JSDoc 的权威性、不可使用 `import`/`require`、code mode 的经济学（只有 completion 与 `console.log` 进入对话、每 cell 约 12 KB 的事前显示预算、先归约再显示、额外往返比额外输出更贵）、persistent TypeScript、把结果绑定到命名变量并跨 cell 复用、typed `ToolOutputMap` 的同 cell 串联、「单调用原样回流」红旗与「一次 grep 能定位就直接读」反向条款、合法参数对象字面量、解析失败不执行、已解析工具值、completion intrinsics、spill 后从变量继续而非重打印或重调用、preview 不可解析、Windows 路径优先 `/` 与紧凑 live 工作集；declaration 之前附三个归约型样例（批量 + 归约、先 grep 后范围 read、早停），仅当 `grep` 与 `read` 都在 catalog 中时渲染。共享 orchestration guidance 把 TypeScript 定位为编排语言，另要求不确定的文件路径从已知父目录 `glob`、不确定的目录路径通过 `pwsh` 检查父目录、package manager/formatter/build/codegen 后重新读取可能被重写的文件、委派判据（并行重上下文调研或独立实现交给 agent，单次已知查找/编辑/命令直接做，只要结论、计数、路径）以及 compaction checkpoint 与 `live namespace restarted` 通知的区别（前者变量仍在，后者才从文件重建）；不重复具体工具 schema，不拼接用户聊天、具体任务、仓库路径、历史失败或可选工具名。
 - 必须跨 Worker 或 host 重启保存的进度写入工作区文件。
@@ -127,7 +127,23 @@ cell 以严格模式和 V8 REPL 语义执行，支持顶层 `const`、`let`、`v
 
 DSH compaction 不遍历、序列化或清理 Realm heap，spill 也不会驱逐用户保留的 binding。live namespace 因此只应作为紧凑工作集：大源数据和结果放在任务文件或现有 spill artifact，Realm 长期保留路径、索引、函数和摘要。当前没有隐式的 binding 级 GC。
 
-Prime agent-plane 组合不挂载 Plan Mode。Compaction 仍由 DSH 官方 backend 拥有；preset 只通过 `compaction-basic.modelPolicies` 把 DSH 默认路由 `deepseek-official/deepseek-v4-flash` 的压力阈值降到 0.3（该 adapter 宣告 1M 窗口，出厂 0.8 意味着 80 万 token 前不会压缩，而 Prime cell 堆积工具输出远快于此；比例参照其他长上下文编码 agent 在 1M 窗口上 300K 触发的做法），其他路由沿用 DSH 默认值；preset 不注册或覆盖 provider，也不配置模型容量。
+Prime agent-plane 组合不挂载 Plan Mode。它用 `dsh-prime-agent/context-manager` 替换默认 LLM 摘要 backend，并移除该 scope 的 tool-result pruner；`toolResultPruner` 仍隔离，防止误取 Host 实例。`HistoryWindowEngine` 只覆盖 `BasicCompactionEngine.summarize()` 这个公开 hook，返回有界历史目录，不发起 LLM 请求。DSH 原有的压力计量、配对边界、compaction 锁、取消、原子 surface 提交、持久化检查与 overflow 重试完整保留；`/compact` 指向同一 service。非 Prime preset 不变。
+
+### 可回取历史与任务笔记
+
+`src/context/history.ts` 使用 owning `Agent.session` 的 `eventAt` 读取原始 append-origin 消息与 `tool/code-dispatch`，不从已缩减 surface 反推历史，也不扫描其他 Session 或直接打开 `~/.dsh` 日志文件。已授权的 fork 历史属于 child 的 Session 前缀，可由 child 回查；其他会话不可见。返回保留 role/source kind 的内容 JSON 投影，排除私有 reasoning 和 provider replay state；请求头、授权记录等非对话事件不可读。嵌套日志已 spill 时只回原有 locator，图片保持附件引用，不复制外部 artifact 或保证其永久存活。
+
+`tools.history_search({ query?, before?, limit? })` 使用大小写不敏感的字面量查询，默认从最新向前扫描，单页最多扫描 1000 个事件、返回 10 条（上限 20），每条 preview 最多 240 字符。`nextBefore` 是下一页的排他事件偏移；空页不等于耗尽，只有 null 才表示到达日志起点。`tools.history_read({ seq, offset?, limit? })` 返回精确 JSON 字符切片，默认及上限 8000 字符；`nextOffset` 非 null 时继续读取，拼完后才解析。字符单位是 JavaScript UTF-16 字符串索引，seq 来自同 Session 搜索或目录。
+
+窗口目录只包含当前日志的可搜索偏移范围、最近至多八条人类消息的地址与有界引用片段，以及回取动作；不是旧消息的语义摘要。所有原始记录仍留在 DSH 日志中，重复替换不会覆盖它们。目录仍使用 DSH 标准 checkpoint 外壳和 `compaction/*` 事件：`provider/model` 标明 `dsh-prime-agent/history-directory`，没有 `llmStreamCall` 或捏造的 provider usage。可移出片段不足以容纳目录与预留外壳空间时拒绝替换，保留原窗口；DSH 仍执行最终的实际缩减检查。目录与笔记不提高材料信任等级。
+
+`tools.notes_read()` / `tools.notes_write({ revision, content })` 使用 `src/context/notes.ts` 的单份 Session 任务笔记，6000 字符硬上限。空内容用于清空；写入要求读到的 revision，以 DSH `withFileLock` 串行跨进程修改、锁内复查 revision，再由 `writeFileAtomic` 发布。Session id 哈希构造文件名，路径不接收模型输入；文件位于配置 `stateDirectory/context-notes`，默认 preset 与 Prime runtime 的 stateDirectory 表达式一致。笔记独立于 Realm、continual store 和工作区文件；child 默认空笔记，不继承 parent 的独立文件。取消发生在原子发布期间时仍可能已经写入，调用方须先回读；底层原子写不承诺掉电 fsync 耐久性。
+
+`tools.new_context({})` 只登记本进程内、按 Session 隔离的待处理请求，返回 queued；下一 `agent/pre-step` 在整个 cell 及其工具结果结算后处理。若 DSH 自动处理已替换窗口，就不再重复；否则调用公开 `compactIfNeeded(..., 'context-overflow', ...)` 使用 DSH 最小安全尾部选择。没有可缩减范围或范围太小时保留当前窗口并提供当次通知，其他错误保持显式失败。排队请求不跨进程恢复，已保存的笔记可恢复；它不结束 turn、不创建新 Session、不销毁 Realm。
+
+context-manager 配置：`stateDirectory` 必填；`thresholdRatio` 默认 0.8、`retainTokens` 默认 16000，`modelPolicies` 复用 DSH 精确路由策略的校验。Prime preset 为 `deepseek-official/deepseek-v4-flash` 配置 thresholdRatio 0.3；正常压力下 recent-tail 预算由配对边界修正，主动切换和真正溢出按 DSH 的最小安全尾部策略处理。没有关闭自动生命周期后留着无人处理的溢出，也不额外调用学习或摘要模型。
+
+固定 policy 把变量复用限制为输入与来源仍有效；编辑、构建、外部写入或用户纠正后，刷新受影响证据并重新判断派生索引和计划。新上下文工具的细节仅放在生成 SDK；可用时 policy 增加保存任务笔记、读回历史以及材料信任边界的共享操作说明。
 
 ### binding lease
 
@@ -159,7 +175,7 @@ Worker 通过 Inspector 取得 cell 的末尾表达式并执行一次有界分�
 
 外层 `repl` canonical value 保持结构化：`logs`、可选 `result`、可选可信 `presentation` metadata 与可选 `contextTokens`/`contextWindow` 仍可由调用方程序化读取。模型 renderer 不再 `JSON.stringify({ logs, result })`：logs 和 scalar string 原样显示，full structured value 只 pretty-print 一次；retained preview 与 opaque reference 提示值仍在 `$_`，要求在下一个产生 completion 的 cell 前赋给命名变量，retained preview 还要求从该变量继续切片、过滤或计数而不再整体显示；unretained preview 只说明重新计算或从持久文件载入。renderer 不调用用户 hook，无 logs 且无 completion 时返回空文本，也不添加普通结果类型标题或 Markdown fence。preview 是观察文本而非可解析数据，后续计算必须回到命名变量或 `$_`。
 
-当 host `tokenMeter` 与路由模型宣告的 contextWindow 可用时，`repl` 在 cell 开始前测量当前 Session 的上下文用量，并在结果末尾追加一行 `Context: <已用> / <窗口> tokens`（窗口未知时只有已用数）。任何一步不可用或抛错都只是省略这一行，永不让 cell 失败；这一行纯追加、不改写历史，因此不影响 prompt cache。它对应研究文档所说的 continuous visibility：模型对自己烧了多少上下文不再是盲的。
+当 host `tokenMeter` 与路由模型宣告的 contextWindow 可用时，`repl` 在 cell 开始前测量当前 Session 的上下文用量，并在结果末尾追加一行 `Context: <已用> / <窗口> tokens`（窗口未知时只有已用数）。任何一步不可用或抛错都只是省略这一行，永不让 cell 失败；这一行纯追加，避免因改写旧消息而使前缀缓存失效；不代表新增输入、缓存容量或账单成本为零。它对应研究文档所说的 continuous visibility：模型对自己烧了多少上下文不再是盲的。
 
 工具调用的 canonical value、官方 content、日志与 spill locator 仍由 DSH 工具层管理。Prime binding 始终把 canonical value 返回给程序；非空官方 content 只与对象 identity 关联，并仅在该对象直接成为 completion 时替代其模型展示。提取字段、spread 或其他转换产生的新值继续走普通 completion 路径；primitive canonical value 保持原值。Prime preset 为模型可见的工具结果配置 12KB best-effort spill 阈值，超过预算时模型先继续使用已赋值的 canonical 变量；只有确需遗漏的格式化文本时才 read/grep notice 中的 locator，并在 TypeScript 字符串中规范化 Windows 反斜杠。Spill backend 不可用时保留 inline 成功结果并告警。
 

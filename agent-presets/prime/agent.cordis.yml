@@ -150,15 +150,15 @@
 
 # ── compaction ──────────────────────────────────────────────────────────────
 
-# `compaction-basic` reads `toolResultPrune` through `ctx.get`, so the pruner must
-# share this realm rather than sit outside it.
+# Keep the window engine private to Prime. Isolate toolResultPruner without
+# mounting one, so the inherited DSH lifecycle cannot pick up a host pruner.
 #
 # `tokenMeter` is deliberately NOT in this realm: the meter stays on the HOST
 # plane, and the rows here resolve that one instance. It takes no configuration,
 # keys every fold by Session, and owns the context-meter projection units the
 # browser reads for every session — behind a realm those units would come and go
 # with whichever presets happen to be mounted. What a preset chooses is whether
-# its agent compacts at all, which is `compaction-basic` below.
+# its agent rotates the working window, which is `prime-context-manager` below.
 #
 # `modelPolicies` lowers the pressure threshold for the DSH default DeepSeek
 # route only. Its adapter advertises a 1,000,000-token window, so the shipped
@@ -166,7 +166,8 @@
 # output far faster than that, and long contexts degrade the model well before
 # the window fills. 0.3 mirrors the 300k-in-1M trigger published by other
 # long-context coding agents. Other routes keep the DSH defaults; retention
-# inherits the top-level ratio.
+# uses the context manager's bounded recent tail. Older recorded content stays
+# retrievable through history_search/history_read; no LLM summary is generated.
 - id: compaction
   name: cordis:group
   group: true
@@ -174,9 +175,10 @@
     compaction: true
     toolResultPruner: true
   config:
-    - id: compaction-basic
-      name: '@deepseek-ai/dsh-compaction-basic'
+    - id: prime-context-manager
+      name: 'dsh-prime-agent/context-manager'
       config:
+        stateDirectory: !!js dshHomePath('prime-agent')
         modelPolicies:
           - provider: deepseek-official
             model: deepseek-v4-flash
@@ -184,13 +186,6 @@
 
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'
-
-    - id: tool-result-pruner
-      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
-      config:
-        thresholdChars: 8192
-        headChars: 4096
-        tailChars: 1024
 
 # ── delegation and workflows ────────────────────────────────────────────────
 

@@ -36,6 +36,8 @@ describe('Prime packaging boundary', () => {
       '@deepseek-ai/dsh-terminal',
       '@deepseek-ai/dsh-terminal-bash',
       '@deepseek-ai/dsh-tool-terminal',
+      '@deepseek-ai/dsh-compaction',
+      '@deepseek-ai/dsh-compaction-basic',
     ]
 
     for (const name of runtimePackages) {
@@ -51,6 +53,18 @@ describe('Prime packaging boundary', () => {
 
     expect(persona?.name).toBe('@deepseek-ai/dsh-persona')
     expect(persona?.config?.text).toMatch(/^You are a helpful software engineer assistant\./)
+  })
+
+  it('replaces Prime summarization with a packaged history window and isolates any host pruner', async () => {
+    const preset = await loadDialect('../agent-presets/prime/agent.cordis.yml')
+    const group = preset.find(row => row.id === 'compaction')!
+    const rows = group.config as unknown as Row[]
+    expect(group.isolate).toEqual({ compaction: true, toolResultPruner: true })
+    expect(rows.map(row => row.name)).toEqual(['dsh-prime-agent/context-manager', '@deepseek-ai/dsh-command-compact'])
+    expect(stateDirectoryExpr(rows[0])).toBe(stateDirectoryExpr(preset.find(row => row.id === 'prime-agent')))
+    const manifest = JSON.parse(await readFile(resolve(import.meta.dirname, '../package.json'), 'utf8'))
+    expect(manifest.exports['./context-manager'].default).toBe('./lib/context-manager.js')
+    await expect(readFile(resolve(import.meta.dirname, '../lib/context-manager.js'), 'utf8')).resolves.toBeTypeOf('string')
   })
 
   it('mounts one owner-isolated cross-platform persistent terminal stack', async () => {

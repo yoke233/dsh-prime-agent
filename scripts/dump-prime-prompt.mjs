@@ -20,6 +20,7 @@ const PRIME_AGENT_URL = pathToFileURL(join(PROJECT_ROOT, 'lib/index.js')).href
 const PRIME_REFINE_SKILL_URL = pathToFileURL(join(PROJECT_ROOT, 'lib/refine-skill-provider.js')).href
 const PRIME_RESTRICTIONS_URL = pathToFileURL(join(PROJECT_ROOT, 'lib/tool-restrictions.js')).href
 const PRIME_RUNTIME_URL = pathToFileURL(join(PROJECT_ROOT, 'lib/runtime.js')).href
+const PRIME_CONTEXT_URL = pathToFileURL(join(PROJECT_ROOT, 'lib/context-manager.js')).href
 const DEFAULT_OUTPUT = join(process.cwd(), 'prompt-dumps', 'prime-prompt.txt')
 
 function usage() {
@@ -129,6 +130,7 @@ async function copyPrimePreset(target) {
     .replace(/(^\s*name:\s*)dsh-prime-agent\s*$/m, '$1' + PRIME_AGENT_URL)
     .replace(/(^\s*name:\s*)dsh-prime-agent\/refine-skill-provider\s*$/m, '$1' + PRIME_REFINE_SKILL_URL)
     .replace(/(^\s*name:\s*)dsh-prime-agent\/tool-restrictions\s*$/m, '$1' + PRIME_RESTRICTIONS_URL)
+    .replace(/(^\s*name:\s*)['"]?dsh-prime-agent\/context-manager['"]?\s*$/m, '$1' + PRIME_CONTEXT_URL)
   await writeFile(join(target, 'agent.cordis.yml'), composition)
   await writeFile(join(target, 'preset.yml'), await readFile(join(PRIME_PRESET, 'preset.yml'), 'utf8'))
 }

@@ -1,6 +1,6 @@
 {
   "name": "dsh-prime-agent",
-  "version": "0.5.8",
+  "version": "0.6.0",
   "description": "Persistent TypeScript REPL control plane for DeepSeek Harness",
   "repository": {
     "type": "git",
@@ -28,6 +28,10 @@
     "./runtime": {
       "types": "./lib/runtime.d.ts",
       "default": "./lib/runtime.js"
+    },
+    "./context-manager": {
+      "types": "./lib/context-manager.d.ts",
+      "default": "./lib/context-manager.js"
     },
     "./tool-restrictions": {
       "types": "./lib/tool-restrictions.d.ts",
@@ -75,6 +79,8 @@
   },
   "dependencies": {
     "@deepseek-ai/dsh-code-runtime": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-compaction": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-compaction-basic": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-terminal": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-terminal-bash": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-tool-terminal": "^0.1.2-rc.1",
@@ -92,6 +98,7 @@
     "@deepseek-ai/dsh-spill-policy": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-subagent": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-system-prompt": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-token-meter": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-tools": "^0.1.2-rc.1"
   },
   "peerDependenciesMeta": {
@@ -123,6 +130,9 @@
       "optional": true
     },
     "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-token-meter": {
       "optional": true
     }
   },
@@ -157,6 +167,7 @@
     "@deepseek-ai/dsh-spill-policy": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-subagent": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-system-prompt": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-token-meter": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-tool-ask-user": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-tool-fs": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-tool-jobs": "^0.1.2-rc.1",
