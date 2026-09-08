@@ -129,6 +129,7 @@ function textOf(blocks: ContentBlock[]): string {
 }
 
 async function generate(ctx: Context, agent: Agent, request: QueryRequest, signal: AbortSignal): Promise<LlmReply> {
+  signal.throwIfAborted()
   const llm = ctx.get('llm')
   if (llm === undefined) throw new Error('the LLM service is unavailable in this session')
   const target = modelTarget(agent)
@@ -149,16 +150,43 @@ async function generate(ctx: Context, agent: Agent, request: QueryRequest, signa
   return { text: textOf(assembler.blocks()), truncated: finish.kind === 'max-tokens' }
 }
 
-async function mapBounded<T, R>(items: readonly T[], concurrency: number, operation: (item: T, index: number) => Promise<R>): Promise<R[]> {
+async function mapBounded<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  parentSignal: AbortSignal,
+  operation: (item: T, index: number, signal: AbortSignal) => Promise<R>,
+): Promise<R[]> {
+  parentSignal.throwIfAborted()
   const results = new Array<R>(items.length)
+  const batchAbort = new AbortController()
   let next = 0
+  let hasFailure = false
+  let failure: unknown
+  const stopForParent = (): void => {
+    batchAbort.abort(parentSignal.reason)
+  }
+  parentSignal.addEventListener('abort', stopForParent, { once: true })
   const worker = async (): Promise<void> => {
-    while (next < items.length) {
+    while (!batchAbort.signal.aborted && next < items.length) {
       const index = next++
-      results[index] = await operation(items[index] as T, index)
+      try {
+        results[index] = await operation(items[index] as T, index, batchAbort.signal)
+      } catch (error) {
+        if (!batchAbort.signal.aborted) {
+          hasFailure = true
+          failure = error
+          batchAbort.abort(error)
+        }
+      }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker))
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker))
+  } finally {
+    parentSignal.removeEventListener('abort', stopForParent)
+  }
+  parentSignal.throwIfAborted()
+  if (hasFailure) throw failure
   return results
 }
 
@@ -168,13 +196,13 @@ export function createLlmFunctions(ctx: Context, agent: Agent, limits: LlmBindin
     [LLM_QUERY_MEMBER]: async value => await generate(ctx, agent, parseQuery(value, limits), signal) as unknown as CodeJsonValue,
     [LLM_QUERY_MANY_MEMBER]: async (value) => {
       const request = parseBatch(value, limits)
-      const replies = await mapBounded(request.prompts, limits.maxConcurrency, async (prompt, index) => {
+      const replies = await mapBounded(request.prompts, limits.maxConcurrency, signal, async (prompt, index, batchSignal) => {
         try {
           return await generate(ctx, agent, {
             prompt,
             ...(request.system === undefined ? {} : { system: request.system }),
             maxTokens: request.maxTokens,
-          }, signal)
+          }, batchSignal)
         } catch (error) {
           throw new Error(`prompts[${index}]: ${error instanceof Error ? error.message : String(error)}`)
         }
@@ -197,9 +225,9 @@ export const LLM_NAMESPACE_DOC: readonly string[] = [
 /** The member lines (2-space indented) the generated `agents` declaration shows for these bindings. */
 export function renderLlmMembers(limits: LlmBindingLimits): string[] {
   return [
-    `  /** One prompt, one reply. \`prompt\` and \`system\` are each capped at ${limits.maxPromptChars.toLocaleString('en-US')} characters; \`maxTokens\` defaults to and is capped at ${limits.maxTokens.toLocaleString('en-US')}. */`,
+    `  /** One prompt, one reply. \`prompt\` and \`system\` are each capped at ${limits.maxPromptChars.toLocaleString('en-US')} characters; \`maxTokens\` defaults to and is capped at ${limits.maxTokens.toLocaleString('en-US')}. If \`truncated\` is true, retry with a smaller prompt or narrower request. */`,
     `  ${LLM_QUERY_MEMBER}: (args: { prompt: string; system?: string; maxTokens?: number }) => Promise<{ text: string; truncated: boolean }>;`,
-    `  /** Up to ${limits.maxBatchSize} prompts answered concurrently under one optional \`system\`; \`replies\` keeps the input order. */`,
+    `  /** Up to ${limits.maxBatchSize} prompts answered concurrently under one optional \`system\`; \`replies\` keeps the input order. One failed prompt cancels unfinished calls and returns no replies; inspect its input index, then rerun a corrected batch. Handle each reply whose \`truncated\` is true as incomplete. */`,
     `  ${LLM_QUERY_MANY_MEMBER}: (args: { prompts: string[]; system?: string; maxTokens?: number }) => Promise<{ replies: { text: string; truncated: boolean }[] }>;`,
   ]
 }

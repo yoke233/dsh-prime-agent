@@ -11,6 +11,7 @@ import { installLlmReplay, type ReplayEntry } from '@deepseek-ai/dsh-llm-replay'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import * as contextManager from '../src/context-manager.js'
 import * as primeAgent from '../src/index.js'
 import * as primeRuntime from '../src/runtime.js'
@@ -124,6 +125,67 @@ describe('Prime history window on the real DSH loop', () => {
     expect(summaries(agent)).toHaveLength(1)
     expect(requests).toHaveLength(4)
     expect(agent.session.snapshotEvents().filter(event => event.type === 'compaction/end').every(event => event.data.error === undefined)).toBe(true)
+  })
+
+  // Replay proves that recovery remains possible; the opt-in model suite checks
+  // whether a model chooses the right evidence without a scripted trajectory.
+  it.each(['empty', 'stale'] as const)('recovers an older correction after repeated automatic rotations with %s notes', async noteState => {
+    const originalLimit = 9, correctedLimit = 5
+    const initial = noteState === 'stale'
+      ? `let allocation = ${originalLimit}; await tools.notes_write({revision:0,content:"Allocate ${originalLimit} units"}); "prepared"`
+      : `let allocation = ${originalLimit}; "prepared"`
+    const recovery = `
+      let previousNote = await tools.notes_read({});
+      let matches = [], before;
+      do {
+        let page = await tools.history_search({query:"ALLOCATION-CORRECTION", ...(before === undefined ? {} : {before})});
+        matches.push(...page.hits.filter(hit => hit.kind === "user/message"));
+        before = page.nextBefore;
+      } while (before !== null);
+      let source = matches[0];
+      let encoded = "", offset = 0;
+      do {
+        let page = await tools.history_read({seq:source.seq,offset});
+        encoded += page.text;
+        offset = page.nextOffset;
+      } while (offset !== null);
+      let correction = JSON.parse(encoded).content.find(block => block.type === "text").text;
+      allocation = Number(correction.match(/current limit=(\\d+)/)[1]);
+      await tools.notes_write({revision:previousNote.revision,content:JSON.stringify({limit:allocation,evidence:source.seq})});
+      await tools.commit_allocation({limit:allocation,evidence:source.seq});
+    `
+    const { context, agent, requests, replay } = await setup([
+      cell(initial), answer(), answer(),
+      ...Array.from({ length: 10 }, () => answer()),
+      cell(recovery), answer(),
+    ], 0.2)
+    const commits: { limit: number; evidence: number }[] = []
+    context.tools.register(defineTool({
+      name: 'commit_allocation', description: 'Commit the allocation with its recorded source address.',
+      parameters: { limit: { type: 'integer', required: true }, evidence: { type: 'integer', required: true } },
+      output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      async execute(args) { commits.push(args); return args },
+    }))
+    await send(agent, `Prepare an allocation of ${originalLimit} units, subject to later corrections.`)
+    await send(agent, `ALLOCATION-CORRECTION: current limit=${correctedLimit}; this replaces the previous allocation. ${'source detail '.repeat(1000)}`)
+    const correctionEvent = agent.session.snapshotEvents().find(event => event.type === 'user/message'
+      && event.data.content.some(block => block.type === 'text' && block.text.startsWith('ALLOCATION-CORRECTION')))
+    expect(correctionEvent).toBeDefined()
+    for (let index = 0; index < 10; index++) {
+      await send(agent, `Background material ${index}. ${'unrelated reference '.repeat(1500)}`)
+    }
+    expect(summaries(agent).length).toBeGreaterThanOrEqual(2)
+    const noteBefore = await new TaskNotes(root!).read(agent.session.id)
+    expect(noteBefore.content).toBe(noteState === 'empty' ? '' : `Allocate ${originalLimit} units`)
+    // Neither the recent tail nor the eight-address directory carries this
+    // correction now. It must be recovered from the original event log.
+    expect(JSON.stringify(agent.session.deriveMessages())).not.toContain('ALLOCATION-CORRECTION')
+    await send(agent, 'Finish the allocation using the latest applicable correction and record its evidence address.')
+    replay.assertConsumed()
+    expect(commits).toEqual([{ limit: correctedLimit, evidence: correctionEvent!.seq }])
+    expect(JSON.parse((await new TaskNotes(root!).read(agent.session.id)).content)).toEqual({ limit: correctedLimit, evidence: correctionEvent!.seq })
+    expect(summaries(agent).every(event => event.data.llmStreamCall === undefined)).toBe(true)
+    expect(requests).toHaveLength(15)
   })
 
   it('fails closed without an owner and does not mutate a cancelled manual window', async () => {

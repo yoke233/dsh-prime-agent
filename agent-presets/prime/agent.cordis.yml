@@ -117,15 +117,10 @@
 
 # ── background jobs ────────────────────────────────────────────────────────
 
-# Only the model-facing controls. The task REGISTRY stays on the host plane:
-# its producers sit outside any realm this file could put it in — `tool-bash`
-# above resolves it with `ctx.get`, and an entry-local realm here is invisible
-# to every sibling row, so `run_in_background` would answer "background jobs
-# unavailable" while these controls sat in the catalog. The registry is keyed by
-# owning agent anyway, so one host instance serves every session. What a preset
-# chooses is whether its agent can collect and stop background work at all.
-- id: tool-jobs
-  name: '@deepseek-ai/dsh-tool-jobs'
+# Both the task registry and its model-facing controller stay on the host plane.
+# `tool-jobs` registers a completion listener as well as the three control tools;
+# mounting it again in this external preset would inject every owned completion
+# twice. Prime reuses the host tools through its generated `jobs` REPL binding.
 
 # ── skills ──────────────────────────────────────────────────────────────────
 

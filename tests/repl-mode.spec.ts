@@ -148,18 +148,10 @@ describe('Prime REPL composition', () => {
     expect(queryStart).toBeGreaterThan(agentsStart)
     expect(queryManyStart).toBeGreaterThan(queryStart)
     expect(jobsStart).toBeGreaterThan(queryManyStart)
-    expect(sdk.slice(sdk.lastIndexOf('/**', agentsStart), agentsStart)).toContain('stateless model calls')
     expect(sdk).not.toContain('declare const llm')
     expect(sdk).not.toContain('  query: {')
-    // The reduction-shaped examples render only when every tool they name exists.
-    expect(sdk).toContain('Patterns:')
-    expect(sdk).toContain('Map.groupBy(hits.matches')
-    expect(sdk.indexOf('Patterns:')).toBeLessThan(sdk.indexOf('Available functions and values:'))
-    // The prompt states the display budget the spill policy enforces.
-    expect(sdk).toContain('about 12 KB')
     const repl = initialAssembly.tools[0]
     expect(repl?.parameters.properties).toHaveProperty('code')
-    expect(repl?.description).toContain('orchestrate and compose tool calls')
     expect(initialAssembly.sections.some(section => section.name === 'prime-agent:rlm-policy')).toBe(true)
     expect(initialAssembly.sections.some(section => section.name.startsWith('tool:'))).toBe(false)
     expect(initialAssembly.sections.some(section => section.name === 'harness:identity')).toBe(false)

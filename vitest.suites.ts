@@ -20,4 +20,4 @@ export const integrationTests = [
   'tests/realm-worker.spec.ts',
 ]
 
-export const modelTests = ['tests/prime-model.e2e.spec.ts']
+export const modelTests = ['tests/prime-model.e2e.spec.ts', 'tests/context-engineering-model.e2e.spec.ts']

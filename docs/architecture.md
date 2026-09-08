@@ -143,7 +143,7 @@ Prime agent-plane 组合不挂载 Plan Mode。它用 `dsh-prime-agent/context-ma
 
 context-manager 配置：`stateDirectory` 必填；`thresholdRatio` 默认 0.8、`retainTokens` 默认 16000，`modelPolicies` 复用 DSH 精确路由策略的校验。Prime preset 为 `deepseek-official/deepseek-v4-flash` 配置 thresholdRatio 0.3；正常压力下 recent-tail 预算由配对边界修正，主动切换和真正溢出按 DSH 的最小安全尾部策略处理。没有关闭自动生命周期后留着无人处理的溢出，也不额外调用学习或摘要模型。
 
-固定 policy 把变量复用限制为输入与来源仍有效；编辑、构建、外部写入或用户纠正后，刷新受影响证据并重新判断派生索引和计划。新上下文工具的细节仅放在生成 SDK；可用时 policy 增加保存任务笔记、读回历史以及材料信任边界的共享操作说明。
+固定 policy 把变量复用限制为输入与来源仍有效；编辑、构建、外部写入或用户纠正后，刷新受影响证据并重新判断派生索引和计划。重要进展与用户纠正时更新现有任务笔记，主动切窗前保持笔记当前；自动 checkpoint 后若笔记为空或过时，使用历史原文恢复并核对当前目标与约束。Host 不自动撰写任务笔记，目录也不替模型选择证据。新上下文工具的细节仅放在生成 SDK；policy 只保留跨工具的恢复与材料信任说明。入口示例以保留来源、关键例外和未决项为准，不把单调用或输出压缩比当作失败判据。
 
 ### binding lease
 
@@ -160,6 +160,10 @@ context-manager 配置：`stateDirectory` 必填；`thresholdRatio` 默认 0.8�
 ### 子模型调用 `agents.query` / `agents.queryMany`
 
 `agents` 命名空间在委派别名之外还带两个私有成员：`agents.query({ prompt, system?, maxTokens? })` 返回 `{ text, truncated }`，`agents.queryMany({ prompts, system?, maxTokens? })` 按输入顺序返回 `{ replies }`。它们与 `refine` 走同一条私有 binding 路径：不注册为 DSH tool、不进入 `tools.*`/`ToolArgsMap`、不产生 `tool/code-dispatch` 记录，但写进生成的 `agents` 声明及其 JSDoc（上游 Prime 明令不得发明未声明的 wrapper）。每次调用用 `ctx.llm.stream()` 对当前 Agent 的路由（最近一次请求 envelope，否则创建选项）发起无工具的一次性请求，`sessionId` 归属当前 Session，取消信号来自本次 cell；回复至 `maxTokens` 截断时返回 `truncated: true` 而不是失败。预算由插件 `llm` 配置约束：单条 prompt/system 上限 `maxPromptChars`（默认 200,000 字符）、单批 `maxBatchSize`（默认 20）、批内并发 `maxConcurrency`（默认 8）、`maxTokens` 默认且上限 4096；越界在调用模型前拒绝，批内单条失败带下标整批拒绝。这是 RLM 范式里「对 N 个 chunk 各做一次无状态子调用并把结果收进变量」的原语；与 `agents.spawn` 的分工由声明的 JSDoc 说明：需要工具或多步推理的子任务用 `spawn`，对已在变量里的文本做语义归约用 `query`。它不经过 approval（不是工具调用），计费归当前 Session；UI 当前看不到这些子调用，是已知缺口。bridge 只允许把这类额外成员加到 `agents` 上，且不得与委派别名同名。
+
+`queryMany` 保持整批成功或失败的契约。每批持有独立取消控制器：首个失败停止队列领取，取消同批在途请求，等待所有已启动请求完成清理后才报告原始失败下标；父 cell 取消会转发并在收尾后报告取消。结束时移除父取消监听，批间不会相互取消，失败后可在同一 cell 捕获错误并发起修正后的调用。已完成项不作为部分结果返回。取消是协作式的，底层 adapter 若忽略 signal，收尾仍需等它自然结束，已产生的 provider 用量也不会撤销。
+
+`maxConcurrency` 是单批上限，不是 cell 或 Session 的子模型并发总额；并行调用多个批次会叠加。Realm 的 host-call 配额计数的是 binding 调用，一次 `queryMany` 在内部展开的请求不能解释成逐条占用该配额。这里不新增费用预算或部分结果 API。评测通过公开 `llm/stream` 边界记录所有可观察请求的 usage，区分失败、取消和缺失计量；token 与缓存用量不等于实际账单，详见 [任务级评测与成本归因](eval-context-engineering.zh.md)。
 
 ### Worker 销毁与注入全局数
 

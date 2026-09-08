@@ -176,7 +176,7 @@
     "@types/node": "^26.4.1",
     "dsh-tool-monitor": "https://github.com/yoke233/dsh-tool-monitor/archive/1e0f2cc14b4ddbc49c2e3cb2c2a7913c80b3083f.tar.gz",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.0"
   },
   "license": "MIT"
 }

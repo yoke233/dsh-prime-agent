@@ -163,6 +163,17 @@ describe('Prime packaging boundary', () => {
     expect(primeRows.filter(row => String(row.name ?? '').includes('subagent'))).toEqual([])
   })
 
+  it('inherits one host jobs controller without a duplicate preset completion listener', async () => {
+    const patches = load(await readFile(BASE_PATCH, 'utf8'), { schema: entryListSchema }) as Row[]
+    const hostRows = patches.flatMap(patch => patch.insert ?? [])
+    expect(hostRows.filter(row => row.id === 'tool-jobs')).toEqual([expect.objectContaining({
+      name: '@deepseek-ai/dsh-tool-jobs',
+    })])
+
+    const preset = await loadDialect('../agent-presets/prime/agent.cordis.yml')
+    expect(preset.filter(row => row.id === 'tool-jobs')).toEqual([])
+  })
+
   it('ships the prompt dump script and scoped restriction export', async () => {
     const manifest = JSON.parse(await readFile(resolve(import.meta.dirname, '../package.json'), 'utf8')) as {
       files?: string[]

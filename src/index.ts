@@ -107,22 +107,21 @@ Only the cell's completion value (its last expression) and \`console.log\` outpu
 enter the conversation; every \`tools.*\` result stays in the REPL until you display
 part of it. Visible output per cell is budgeted at about ${budget}: a larger display
 is spilled to a file and replaced by a preview, so filter, slice, count, or aggregate
-in code and display only what the next decision needs. Extra cells cost more than
-extra output: reduce round trips first, then keep displays small when doing so does
-not force another cell.
+in code and display only what the next decision needs. Combine related work when it
+clarifies the next decision, and keep each display focused. When reducing source
+material, retain paths and line numbers, decisive exceptions, and unresolved items.
 
 Top-level \`await\` works; top-level \`return\` does not. Treat the REPL as a live
-notebook: successful top-level bindings remain available in later cells. Bind every
-read, search, and command result to a named \`let\` variable and continue from it in
-later cells by slicing, filtering, or transforming it directly.
+notebook: successful top-level bindings remain available in later cells. Bind results
+you need to revisit to named \`let\` variables and continue from them in
+later cells by slicing, filtering, or transforming them directly.
 Tool results are typed values (see \`ToolOutputMap\`): chain calls and
 access fields directly in one cell without displaying intermediate results. A parse
 failure executes nothing; fix the cell and retry.
 
-If a cell is a single \`await tools.x(...)\` whose raw result becomes the completion,
-you are using the REPL as tool-call syntax: bind the result and reduce it instead.
-Conversely, when one grep or one ranged read already pins the answer, read it
-directly; do not build machinery for a one-line lookup.
+When one call already supplies the evidence needed for the next step, returning its
+result directly is fine. Otherwise bind the result and reduce or combine it before
+displaying. Do not build machinery for a one-line lookup.
 
 Pass TypeScript object literals, writing identifier keys as \`key: 'value'\`, not
 \`key': 'value'\`. Tool results are parsed JavaScript values; do not call
@@ -146,10 +145,10 @@ const REPL_PATTERNS = [
   'Patterns:',
   '',
   '```ts',
-  '// batch + reduce: many calls in one cell, small display',
+  '// search + select: retain the source locations and evidence needed next',
   "let hits = await tools.grep({ pattern: 'TODO', path: 'src' })",
-  'let byFile = Map.groupBy(hits.matches, m => m.path)',
-  "Array.from(byFile, ([p, ms]) => `${p}: ${ms.length}`).join('\\n')",
+  'let selected = hits.matches.slice(0, 20)',
+  ';({ evidence: selected.map(m => ({ path: m.path, line: m.lineNumber, text: m.line })), omitted: hits.matches.length - selected.length })',
   '```',
   '',
   '```ts',
@@ -157,7 +156,7 @@ const REPL_PATTERNS = [
   "let file = 'src/server.ts'",
   "let at = (await tools.grep({ pattern: 'listen\\\\(', path: file })).matches[0]?.lineNumber ?? 1",
   'let slice = await tools.read({ file_path: file, offset: Math.max(1, at - 10), limit: 40 })',
-  "slice.lines.map(l => `${l.number}: ${l.text}`).join('\\n')",
+  "slice.lines.map(l => `${file}:${l.number}: ${l.text}`).join('\\n')",
   '```',
   '',
   '```ts',
@@ -165,7 +164,8 @@ const REPL_PATTERNS = [
   'let found',
   'for (const p of candidates) {',
   '  const head = await tools.read({ file_path: p, limit: 5 })',
-  "  if (head.lines.some(l => l.text.includes('#!/usr/bin/env node'))) { found = p; break }",
+  "  const marker = head.lines.find(l => l.text.includes('#!/usr/bin/env node'))",
+  '  if (marker) { found = `${p}:${marker.number}`; break }',
   '}',
   "found ?? 'none'",
   '```',
