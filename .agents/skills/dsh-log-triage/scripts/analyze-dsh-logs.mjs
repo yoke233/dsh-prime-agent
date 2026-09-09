@@ -152,14 +152,15 @@ async function analyzeSession(file, expectedProject, startMs, endMs) {
     if (type === 'turn/end' && isRecord(data.reason) && data.reason.kind === 'error') {
       const failure = isRecord(data.reason.error) ? data.reason.error : {}
       const message = typeof failure.message === 'string' ? failure.message : 'unknown turn failure'
+      const code = typeof failure.code === 'string' ? failure.code : undefined
       errors.push({
         kind: 'turn',
         time: localIso(timestampMs),
         timestampMs,
         provider,
         model,
-        code: typeof failure.code === 'string' ? failure.code : undefined,
-        category: classify(message),
+        code,
+        category: classify(message, code),
         message: oneLine(redact(message)),
         session: path.basename(path.dirname(file)),
         eventLine: lineNumber,
@@ -309,15 +310,23 @@ function eventTimestamp(event) {
   return raw > 10_000_000_000 ? raw : raw * 1000
 }
 
-function classify(message) {
+function classify(message, code) {
+  if (code === 'UNKNOWN_MODEL') return 'provider model configuration'
   const text = message.toLowerCase()
   if (text.includes('regex parse error') || text.includes('grep pattern rejected')) return 'invalid regex or escaping'
-  if (text.includes('hunk context') || text.includes('file changed since') || text.includes('old_string was not found')) return 'stale or ambiguous edit'
+  if (['hunk context', 'file changed since', 'old_string was not found', 'old_string matched'].some(token => text.includes(token))) return 'stale or ambiguous edit'
   if (text.includes('workspace-relative path') || text.includes('not found') || text.includes('系统找不到指定')) return 'wrong or missing path'
   if (text.includes('dynamic_import_callback_missing') || text.includes('require is not defined')) return 'unsupported Realm module loading'
   if (text.includes('use the repl tool') || text.includes('only `run_code` is callable')) return 'direct tool call outside Prime REPL'
   if (text.includes('timed out') || text.includes('ceiling reached') || text.includes('budget exhausted')) return 'timeout or budget'
-  if (['expression expected', 'expected a semicolon', "expected ','", 'referenceerror:'].some(token => text.includes(token))) return 'generated REPL code error'
+  if (text.includes('rate limit') || text.includes('too many requests')) return 'external provider rate limit'
+  if (text.includes('no configured model') || text.includes('unknown_model')) return 'provider model configuration'
+  if ((text.includes('subagent') || text.includes('agent')) && text.includes('unavailable')) return 'agent lifecycle or availability'
+  if (text.includes('typescript parse failed before execution')
+    || text.includes('has already been declared')
+    || text.includes('cannot read properties of undefined')
+    || text.includes('referenceerror:')
+    || /\b[a-z_$][a-z0-9_$]* is not defined\b/i.test(message)) return 'generated REPL code error'
   if (['websocket', 'transport', 'authentication token', 'fetch failed'].some(token => text.includes(token))) return 'provider, transport, or authentication'
   return 'other'
 }

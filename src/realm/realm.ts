@@ -179,6 +179,7 @@ const PORTABLE_RESERVED_WORDS: ReadonlySet<string> = new Set([
  * model's own line/column positions intact.
  */
 const STRIP_WRAP = { prefix: 'async function __dsh_program__() {\n', suffix: '\n}' } as const
+const STRIP_WRAP_LINE_OFFSET = STRIP_WRAP.prefix.match(/\n/g)?.length ?? 0
 
 /**
  * The worker entry path: TypeScript source when this module runs unbuilt (Node
@@ -209,6 +210,35 @@ function messageOf(error: unknown): string {
   } catch {
     return 'unrenderable error value'
   }
+}
+
+/** Add the model's cell location without echoing source text from Node's parser stack. */
+function typeScriptParseMessage(error: unknown, program: string): string {
+  const detail = messageOf(error)
+  let location = ''
+  try {
+    const stack = error instanceof Error ? error.stack : undefined
+    if (typeof stack === 'string') {
+      const lines = stack.split(/\r?\n/)
+      const wrappedLine = Number(/^:(\d+)$/.exec(lines[0] ?? '')?.[1])
+      const diagnosticEnd = lines.findIndex((line, index) => index > 0 && line.startsWith('SyntaxError'))
+      const diagnosticLines = lines.slice(1, diagnosticEnd < 0 ? lines.length : diagnosticEnd)
+      const caret = diagnosticLines.find(line => /^[ \t]*\^/.test(line))
+      let cellLine = wrappedLine - STRIP_WRAP_LINE_OFFSET
+      let column = caret === undefined ? undefined : caret.indexOf('^') + 1
+      const programLines = program.split(/\r?\n/)
+      if (cellLine > programLines.length) {
+        cellLine = programLines.length
+        column = (programLines.at(-1)?.length ?? 0) + 1
+      }
+      if (Number.isSafeInteger(cellLine) && cellLine > 0) {
+        location = column === undefined ? ` at cell line ${cellLine}` : ` at cell line ${cellLine}, column ${column}`
+      }
+    }
+  } catch {
+    // A hostile Error stack must not replace the parser's actionable message.
+  }
+  return `TypeScript parse failed before execution${location}: ${detail}. Correct the syntax and retry the cell.`
 }
 
 /**
@@ -728,7 +758,7 @@ export class PersistentRealm {
       // worker, so it can neither disturb the live namespace nor cost a generation.
       this.settle(entry, entry.ledger.failure([], {
         kind: 'exception',
-        message: `TypeScript parse failed before execution: ${messageOf(error)}. Correct the syntax and retry the cell.`,
+        message: typeScriptParseMessage(error, entry.request.program),
       }))
       return
     }

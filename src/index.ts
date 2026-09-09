@@ -117,7 +117,7 @@ you need to revisit to named \`let\` variables and continue from them in
 later cells by slicing, filtering, or transforming them directly.
 Tool results are typed values (see \`ToolOutputMap\`): chain calls and
 access fields directly in one cell without displaying intermediate results. A parse
-failure executes nothing; fix the cell and retry.
+failure executes nothing; use its reported cell line and column to fix and retry.
 
 When one call already supplies the evidence needed for the next step, returning its
 result directly is fine. Otherwise bind the result and reduce or combine it before
@@ -133,9 +133,9 @@ another value-producing cell. When a result reports \`Full formatted result stor
 at:\`, your variable still holds the complete value: continue from it in the next
 cell (slice, filter, count, or grep it) rather than displaying it whole again or
 re-running the call, and read or grep the reported locator only for omitted
-formatted text. Convert Windows locator backslashes to forward slashes before
-putting the path in a string literal. Backslashes in JSON previews are notation,
-not extra characters. Prefer forward-slash Windows paths such as \`D:/work/project\`.
+formatted text. Use forward-slash Windows paths in TypeScript strings, such as
+\`D:/work/project\`; unescaped backslashes can make the cell fail to parse.
+Backslashes in JSON previews are notation, not extra characters.
 
 Keep large source material in files and only compact working state in the REPL.`
 }
@@ -154,7 +154,7 @@ const REPL_PATTERNS = [
   '```ts',
   '// locate before reading: grep for the anchor, then read only the relevant range',
   "let file = 'src/server.ts'",
-  "let at = (await tools.grep({ pattern: 'listen\\\\(', path: file })).matches[0]?.lineNumber ?? 1",
+  "let at = (await tools.grep({ pattern: /listen\\(/.source, path: file })).matches[0]?.lineNumber ?? 1",
   'let slice = await tools.read({ file_path: file, offset: Math.max(1, at - 10), limit: 40 })',
   "slice.lines.map(l => `${file}:${l.number}: ${l.text}`).join('\\n')",
   '```',
@@ -174,13 +174,14 @@ const REPL_PATTERNS = [
 const REPL_PATTERN_TOOLS = ['grep', 'read'] as const
 
 const OUTPUT_REDUCTION_GUIDANCE = 'Bind `stdout.text` and display only the lines you need, for example the last 40 or those matching an error pattern.'
+const PWSH_NATIVE_PATH_GUIDANCE = 'Paths use native Windows form (`C:\\...`); '
 
 const TOOL_AGENT_GUIDANCE: Readonly<Record<string, string>> = {
   bash: OUTPUT_REDUCTION_GUIDANCE,
   edit: 'Read the current file before editing; after a stale-file error, read it again before retrying.',
   glob: 'For directory names, use pwsh `Get-ChildItem -Directory`. Avoid a bare `*` under a broad root.',
   grep: 'A string value is still interpreted as a regular expression. For literal code search, omit punctuation when possible. When punctuation matters, use a no-flags literal `.source`, for example `pattern: /stream\\(options\\)/.source`. Run unrelated searches as separate parallel calls; simplify a rejected pattern before retrying. Aggregate `matches` (group by path, count, or filter) before displaying when there is more than a screenful.',
-  pwsh: `When a shell command contains single-quoted fragments, use a double-quoted TypeScript \`command\` value and escape any embedded double quotes. ${OUTPUT_REDUCTION_GUIDANCE}`,
+  pwsh: 'Bind a quote-heavy command separately with `String.raw`. Use small string fragments when it contains backticks or `${...}`, and split multi-stage work into sequential `tools.pwsh` calls. ' + OUTPUT_REDUCTION_GUIDANCE,
   read: 'For a file longer than a few hundred lines, grep first and read only the relevant range; keep `lines` in a variable and display a slice.',
   subagent: 'Give the prompt an objective, the expected report format, relevant paths, and boundaries. Ask for conclusions, counts, and file paths in a few hundred words; large material goes to a file the report names, never raw tool output.',
   subagent_fork: 'State what is new and the expected report format: conclusions, counts, and file paths in a few hundred words, with large material in a file the report names.',
@@ -188,7 +189,19 @@ const TOOL_AGENT_GUIDANCE: Readonly<Record<string, string>> = {
   write: 'Use this for file creation or complete replacement; prefer edit for targeted changes. Read an existing file before overwriting it.',
 }
 
-const TOOL_AGENT_DESCRIPTION_OVERRIDES: Readonly<Record<string, string>> = {
+type ToolAgentDescriptionOverride = string | ((description: string) => string)
+
+function withoutCanonicalPwshPath(description: string): string {
+  if (!description.includes('`pwsh -Command`')) return description
+  const segments = description.split(PWSH_NATIVE_PATH_GUIDANCE)
+  if (segments.length !== 2) {
+    throw new Error('dsh-prime-agent: canonical pwsh description must contain exactly one native Windows path instruction')
+  }
+  return segments.join('')
+}
+
+const TOOL_AGENT_DESCRIPTION_OVERRIDES: Readonly<Record<string, ToolAgentDescriptionOverride>> = {
+  pwsh: withoutCanonicalPwshPath,
   todo_write: 'Track user-visible progress only for long-running plans or genuinely parallel work. Each call replaces the entire list. Keep ordinary one-turn edits, builds, tests, and installs in the live notebook without a task list. When tracking is useful, update at meaningful phase boundaries and combine status changes from the same phase. Keep at least one item in_progress while work remains; use no in_progress item once all work is complete.',
 }
 
@@ -229,9 +242,12 @@ function sdkText(ctx: Context, agent: Agent, options: PromptOptions): string {
       if (definition === undefined) throw new Error(`dsh-prime-agent: capability disappeared during prompt assembly: ${schema.name}`)
       const override = TOOL_AGENT_DESCRIPTION_OVERRIDES[schema.name]
       const guidance = TOOL_AGENT_GUIDANCE[schema.name]
-      const description = override ?? (guidance === undefined
-        ? schema.description
-        : `${schema.description}\n\n${guidance}`)
+      const canonical = typeof override === 'function'
+        ? override(schema.description)
+        : override ?? schema.description
+      const description = guidance === undefined
+        ? canonical
+        : `${canonical}\n\n${guidance}`
       return { ...schema, description, output: definition.output.schema }
     })
   const available = new Set(schemas.map(schema => schema.name))

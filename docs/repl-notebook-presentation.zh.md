@@ -81,7 +81,7 @@ later cells: slice, filter, or transform the binding instead of repeating the ca
 A value bound in an earlier cell does not need to be re-read, printed, or
 reconstructed. Tool results are typed values (see `ToolOutputMap`): chain calls and
 access fields directly in one cell without displaying intermediate results. A parse
-failure executes nothing; fix the cell and retry.
+failure executes nothing; use its reported cell line and column to fix and retry.
 
 If a cell is a single `await tools.x(...)` whose raw result becomes the completion,
 you are using the REPL as tool-call syntax: bind the result and reduce it instead.
@@ -98,9 +98,9 @@ another value-producing cell. When a result reports `Full formatted result store
 at:`, your variable still holds the complete value: continue from it in the next
 cell (slice, filter, count, or grep it) rather than displaying it whole again or
 re-running the call, and read or grep the reported locator only for omitted
-formatted text. Convert Windows locator backslashes to forward slashes before
-putting the path in a string literal. Backslashes in JSON previews are notation,
-not extra characters. Prefer forward-slash Windows paths such as `D:/work/project`.
+formatted text. Use forward-slash Windows paths in TypeScript strings, such as
+`D:/work/project`; unescaped backslashes can make the cell fail to parse.
+Backslashes in JSON previews are notation, not extra characters.
 
 Keep large source material in files and only compact working state in the REPL.
 ```
@@ -115,7 +115,7 @@ Keep large source material in files and only compact working state in the REPL.
 - 上一 Session 或其他 Agent 的上下文；
 - 当前 catalog 中不存在的可选工具名。
 
-当前 Agent catalog 只负责生成实际可用的 `tools.*`、`agents.*`、`jobs.*` 参数与 canonical output 类型声明；`agents` 声明固定附带私有成员 `query`/`queryMany`，声明上方的 JSDoc 说明它们与 `spawn` 的分工，成员 JSDoc 携带当前预算（prompt 字符上限、单批条数、`maxTokens` 上限）。
+当前 Agent catalog 只负责生成实际可用的 `tools.*`、`agents.*`、`jobs.*` 参数与 canonical output 类型声明；`agents` 声明固定附带私有成员 `query`/`queryMany`，声明上方的 JSDoc 说明它们与 `spawn` 的分工，成员 JSDoc 携带当前预算（prompt 字符上限、单批条数、`maxTokens` 上限）。Prime 生成的 `pwsh` description 副本移除与外层 TypeScript 正斜杠规则冲突的 native path 句子，并在工具自身 JSDoc 中给出重引号命令和顺序拆分的可执行选择；共享 catalog 保持不变。
 
 ## 4. 内部结果类型
 
@@ -351,7 +351,7 @@ D:/work/project
 - 根据 Session JSONL 中的编码形式手工反转义；
 - 把 JSON preview 中的 `\\` 当成两个实际字符。
 
-只有模型直接编写 TypeScript string literal 时才处理语言字面量转义。
+模型直接编写 TypeScript string literal 时优先使用正斜杠路径；未转义的反斜杠会在执行前触发带 cell 行列的解析错误。
 
 ## 10. 不变量
 

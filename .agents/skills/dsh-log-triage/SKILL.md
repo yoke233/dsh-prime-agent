@@ -55,7 +55,7 @@ Count `type === "turn/end"` where:
 data.reason.kind === "error"
 ```
 
-Preserve `data.reason.error.code` and the redacted message. These identify provider, transport, authentication, WebSocket, and uncaught harness failures.
+Preserve `data.reason.error.code` and the redacted message. Classify a structured code before prose—for example, `UNKNOWN_MODEL` is a provider model configuration failure even when its message changes. Together they identify provider, transport, authentication, WebSocket, and uncaught harness failures.
 
 ### Nested tool/REPL failures
 
@@ -96,10 +96,13 @@ Use evidence-backed categories:
 - invalid regex or escaping;
 - wrong/missing path or unsupported absolute path;
 - stale/ambiguous edit or patch precondition;
-- generated REPL syntax/reference error;
+- generated REPL syntax/reference error, including every `TypeScript parse failed before execution` wording;
 - unsupported Realm operation such as dynamic `import()` or `require()`;
 - direct tool call rejected because Prime exposes only `repl`;
 - host binding timeout/budget/cancellation;
+- external provider rate limit;
+- provider model configuration failure;
+- agent lifecycle or availability failure;
 - provider transport/WebSocket/authentication failure;
 - harness/plugin exception.
 

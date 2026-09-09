@@ -227,13 +227,18 @@ describe('persistent REPL cells', () => {
       bindings: [tools({ touch: async () => { calls++; return null } })],
     })
     const failed = await realm.run({
-      program: 'await globalThis.tools.touch({})\nconst neverDeclared =',
+      program: "await globalThis.tools.touch({})\nconst neverDeclared = { label: 'unterminated }\nneverDeclared",
       bindings: [tools({ touch: async () => { calls++; return null } })],
     })
     expect(failed.error?.kind).toBe('exception')
     expect(failed.error?.message).toContain('parse failed before execution')
+    expect(failed.error?.message).toContain('at cell line 3, column 1')
+    expect(failed.error?.message).not.toContain('unterminated')
     expect(failed.error?.message).toContain('retry the cell')
     expect(calls).toBe(0)
+
+    const eof = await realm.run({ program: 'const incomplete =', bindings: [] })
+    expect(eof.error?.message).toContain('at cell line 1, column 19')
 
     const after = await realm.run({
       program: '({ before: beforeSyntaxFailure, missing: typeof neverDeclared })',
