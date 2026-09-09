@@ -137,6 +137,8 @@ Prime agent-plane 组合不挂载 Plan Mode。它用 `dsh-prime-agent/context-ma
 
 窗口目录只包含当前日志的可搜索偏移范围、最近至多八条人类消息的地址与有界引用片段，以及回取动作；不是旧消息的语义摘要。所有原始记录仍留在 DSH 日志中，重复替换不会覆盖它们。目录仍使用 DSH 标准 checkpoint 外壳和 `compaction/*` 事件：`provider/model` 标明 `dsh-prime-agent/history-directory`，没有 `llmStreamCall` 或捏造的 provider usage。可移出片段不足以容纳目录与预留外壳空间时拒绝替换，保留原窗口；DSH 仍执行最终的实际缩减检查。目录与笔记不提高材料信任等级。
 
+部分 TUI 组合会在挂载 Agent preset 的同时保留 base Host compactor；Host listener 注册更早时会先执行旧摘要，甚至在失败后才轮到 Prime。context-manager 因而在同一个 Agent-scope `ctx` 上额外注册 `prepend` pressure pass，并捕获刚挂载的隔离 `HistoryWindowEngine`：Prime 成功替换后，后续 Host 与引擎自带的 pressure listener 重新计量并跳过；Prime 失败时仍调用 `next()`，保留继承链作为可用性回退。作用域过滤使该顺序只覆盖 Prime Agent，非 Prime Session 继续使用 Host 行为。引擎自带的 `auto` 保持开启，因此官方 provider-overflow recovery 未被复制或关闭；本次顺序修复只覆盖 step-boundary pressure。
+
 `tools.notes_read()` / `tools.notes_write({ revision, content })` 使用 `src/context/notes.ts` 的单份 Session 任务笔记，6000 字符硬上限。空内容用于清空；写入要求读到的 revision，以 DSH `withFileLock` 串行跨进程修改、锁内复查 revision，再由 `writeFileAtomic` 发布。Session id 哈希构造文件名，路径不接收模型输入；文件位于配置 `stateDirectory/context-notes`，默认 preset 与 Prime runtime 的 stateDirectory 表达式一致。笔记独立于 Realm、continual store 和工作区文件；child 默认空笔记，不继承 parent 的独立文件。取消发生在原子发布期间时仍可能已经写入，调用方须先回读；底层原子写不承诺掉电 fsync 耐久性。
 
 `tools.new_context({})` 只登记本进程内、按 Session 隔离的待处理请求，返回 queued；下一 `agent/pre-step` 在整个 cell 及其工具结果结算后处理。若 DSH 自动处理已替换窗口，就不再重复；否则调用公开 `compactIfNeeded(..., 'context-overflow', ...)` 使用 DSH 最小安全尾部选择。没有可缩减范围或范围太小时保留当前窗口并提供当次通知，其他错误保持显式失败。排队请求不跨进程恢复，已保存的笔记可恢复；它不结束 turn、不创建新 Session、不销毁 Realm。

@@ -6,6 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { installLlmReplay, type ReplayEntry } from '@deepseek-ai/dsh-llm-replay'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -60,6 +61,41 @@ async function setup(script: ReplayEntry[], thresholdRatio = 0.99, runtimeLimits
   const agent = ctx.agentLoop.create(SessionId('context-owner'), { provider: 'context-test', model: 'model' })
   return { context: ctx, agent, requests, replay }
 }
+
+class HostProbeCompaction extends BasicCompactionEngine {
+  summarizeCalls = 0
+
+  protected override async summarize() {
+    this.summarizeCalls += 1
+    return { summary: [{ type: 'text' as const, text: 'host summary' }], provider: 'host-probe', model: 'host-probe' }
+  }
+}
+
+async function setupCompetingCompactors(script: ReplayEntry[], mountPrime = true) {
+  root = await mkdtemp(join(tmpdir(), 'prime-context-order-'))
+  ctx = new Context()
+  await ctx.plugin(SessionProjectionRegistry)
+  await mountAgentLoopTestDependencies(ctx)
+  await ctx.plugin(TokenMeter)
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(HostProbeCompaction, { thresholdRatio: 0.2, retainTokens: 3000 })
+  const hostCompaction = ctx.compaction as HostProbeCompaction
+  await ctx.plugin(primeRuntime, { stateDirectory: root })
+  await ctx.plugin(primeAgent, { stateDirectory: root, requireOrchestrationTools: false })
+  const overrideFile = join(root, 'replay.json')
+  await writeFile(overrideFile, JSON.stringify(script))
+  const replay = installLlmReplay(ctx, {
+    file: join(root, 'absent.jsonl'), overrideFile,
+    providers: [{ id: 'context-test', models: [{ id: 'model', contextWindow: 100000 }] }],
+  })
+  const agent = ctx.agentLoop.create(SessionId('context-order-owner'), { provider: 'context-test', model: 'model' })
+  if (mountPrime) {
+    const primeScope = agent.ctx.isolate('compaction').isolate('toolResultPruner')
+    await primeScope.plugin(contextManager, { stateDirectory: root, thresholdRatio: 0.2, retainTokens: 3000 })
+  }
+  return { agent, hostCompaction, replay }
+}
+
 async function send(agent: Agent, text: string) {
   agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
   await agent.whenIdle()
@@ -68,6 +104,30 @@ async function send(agent: Agent, text: string) {
 function summaries(agent: Agent) { return agent.session.snapshotEvents().filter(event => event.type === 'compaction/summary') }
 
 describe('Prime history window on the real DSH loop', () => {
+  it('wins Prime pressure ordering over an inherited Host backend', async () => {
+    const { agent, hostCompaction, replay } = await setupCompetingCompactors([
+      cell('let alive = 91; "new-tail".repeat(2000)'), answer(),
+    ])
+    await send(agent, 'evidence '.repeat(12000))
+    replay.assertConsumed()
+    expect(hostCompaction.summarizeCalls).toBe(0)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'compaction/start')).toHaveLength(1)
+    expect(summaries(agent)).toHaveLength(1)
+    expect(summaries(agent)[0]!.data.provider).toBe('dsh-prime-agent')
+    expect(summaries(agent)[0]!.data.llmStreamCall).toBeUndefined()
+  })
+
+  it('leaves a non-Prime agent on the inherited Host backend', async () => {
+    const { agent, hostCompaction, replay } = await setupCompetingCompactors([
+      cell('"host-tail".repeat(2000)'), answer(),
+    ], false)
+    await send(agent, 'sibling evidence '.repeat(12000))
+    replay.assertConsumed()
+    expect(hostCompaction.summarizeCalls).toBe(1)
+    expect(summaries(agent)).toHaveLength(1)
+    expect(summaries(agent)[0]!.data.provider).toBe('host-probe')
+  })
+
   it('keeps a small window usable when a requested rotation would increase its size', async () => {
     const { agent, replay } = await setup([cell('await tools.new_context({})'), answer()])
     await send(agent, 'small task')
