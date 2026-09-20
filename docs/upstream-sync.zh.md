@@ -125,7 +125,7 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 - Prime 的 child answer 可以进入 parent 仍在进行的计算。DSH 已原生实现该不变量。DSH 0.1.2-rc.1 撤下了 child 专用的 `tool-subagent-report` row，改为在官方 `tool-subagent-control` 上对 parent 与 child 统一暴露一个 `send_message({ agent_id, message })`。每条被接受的消息都走 `Agent.steer()`，运行中的目标在最近 step 消费，空闲目标开启新一轮；continuation manager 同时维护唤醒记账，以及消息先于后续 settled notice 的 next-step FIFO 顺序。本插件直接组合该能力，不再替换消息 row 或维护私有 adapter。
 - Prime 的 Python heap 能保存活对象和函数；当前适配用可信 `exec.agent.id` 解析的 Realm identity 选择 Persistent TypeScript Realm，在同一 Worker generation 中保留 TypeScript live objects。IPython 只用于参考行为与失败语义，不是产品 backend。
 - Prime preset 相比 shipped `code` preset 不重复注册 scoped `tool-skill`：Host 已有正式 catalog/loader；保留第二个同名注册会 shadow Host tool，使 visibility-matched pre-step hook 无法把合并后的 Skill 目录加入首个模型请求。preset 仍保留 scoped filesystem provider，以贡献项目与用户 Skill roots。
-- Prime preset 有意不挂载 Plan Mode。它以 `dsh-prime-agent/context-manager` 替换默认 LLM 摘要 row，移除 scoped tool-result pruner 但继续隔离该 service，保留 `/compact`；通过 DSH 公开 `summarize()` hook 生成历史回取目录，自动/手动生命周期仍归 DSH。默认近期保留预算 16000 tokens，默认路由 `deepseek-official/deepseek-v4-flash` 的 thresholdRatio 仍为 0.3。新增 history/notes/new_context 工具只经 repl 可见；notes 使用与 Prime row 相同的 stateDirectory 表达式。同步 preset 时保留这些差异。
+- Prime preset 有意不挂载 Plan Mode。它以 `dsh-prime-agent/context-manager` 替换默认 LLM 摘要 row，移除 scoped tool-result pruner 但继续隔离该 service，保留 `/compact`；通过 DSH 公开 `summarize()` hook 生成历史回取目录，自动/手动生命周期仍归 DSH。默认近期保留预算 16000 tokens，默认路由 `deepseek-official/deepseek-v4-flash` 的 thresholdRatio 仍为 0.3；context-manager 另配置 16384-token 的每窗口一次 task-note checkpoint reminder。新增 history/notes/new_context 工具只经 repl 可见；notes 使用与 Prime row 相同的 stateDirectory 表达式。同步 preset 时保留这些差异。
 - Prime preset 额外组合 DSH 官方 owner-isolated Terminal：POSIX 选择 Bash，Windows 选择 PowerShell。正则输出订阅由 profile 同行安装的 `dsh-tool-monitor` bundle 提供；Monitor 只替换具体 `jobs-local` adapter，不复制 Terminal、Jobs 所有权、sandbox 或取消策略。Host 已组合唯一的 `tool-jobs` controller；Prime preset 不再重复挂载它，避免同一 owned completion 同时命中 Host 与 preset listener，但继续通过 `jobs` REPL binding 使用三个控制工具。Prime 同时通过 scoped restriction 关闭全局 `workflow`/`ralph` 工具，并移除 preset 内重复的 `tool-ralph` row；Subagent 的内部 spawn provider 保持不变。
 - 当前跨 Agent 上下文使用共享工作区 handoff file。写后不改是 policy 约定，不存在独立 Capsule store、`share`/`mount` 或文件访问授权。
 - 模型可加载 `refine` Skill 并主动安排 turn-end refinement，人类也可调用 `/refine`；两者复用同一个有界 planner 和 revision-checked store。interval/compaction auto-refine 与效果观察仍未启用。
@@ -138,3 +138,11 @@ git -C ../prime-agent diff "$baseline..origin/main" -- packages/coding-agent/CHA
 ### 2026-09-06 上下文窗口变更的 preset 审阅
 
 本次不推进 Prime Agent 或 DSH 的已审阅 commit 基线。旧文所指 `apps/cli/config/agent-presets/code/agent.cordis.yml` 在当前只读 checkout 已不存在；实际安装的 `@deepseek-ai/dsh-agent-presets@0.1.2-rc.1` 提供 `presets/standard/agent.cordis.yml` 和 `presets/ptc/agent.cordis.yml`。已逐行审阅安装包 standard 与 Prime 的完整 diff：除上述上下文 row 变更，原有 persona、REPL、Terminal、Skill、Goal、Plan Mode、委派、工具排除、web fetch 与 spill 差异均维持。本次不借机吸收 standard 的其他新配置，也不修改同级 checkout。
+
+## DSH 0.1.6-alpha.2 依赖适配
+
+本次仅推进 npm 依赖契约，不改变已审阅的源码 commit 基线。已逐行比较安装包 standard preset 与 Prime：保留现有 Prime 差异；persona 改用 prefix，workflow backend 改为 workflow-ptc；删除对上游已移除 str_replace_editor 和默认关闭 ralph 的 restrict 引用，继续限制 workflow。其余标准 preset 新增能力不在本次引入。
+
+运行 seam 从 dsh-code-runtime 改为 dsh-ptc-runtime，官方独立执行 provider 改为 dsh-ptc-runtime-node；嵌套事件采用 tool/ptc-dispatch-start 与 tool/ptc-dispatch。系统提示现在位于 system/message，窗口缩减估算排除 summarizer 输入中额外前置、不会被替换的 system head。prompt dump 从 system messages 读取系统提示；评测直接读取嵌入的 assistant stream，并使用官方 session-format-catalog 解码当前持久格式。
+
+配套 monitor 固定到 244e8eb1f4828c2c6cc4eee664b6d895b8e6e315，其 DSH peer 与当前 Alpha 基线一致；无需根 overrides。

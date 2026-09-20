@@ -47,7 +47,7 @@ describe('Prime prompt dump script', () => {
     expect(dump).not.toMatch(/\$out\b/)
     expect(dump).toContain(root)
     expect(dump).toContain('## Messages')
-    expect(dump).toContain('### 1. user / user')
+    expect(dump).toMatch(/### \d+\. user \/ user/)
     expect(dump).toContain('user / plugin')
     expect(dump).toContain('Current runtime context.')
     expect(dump).toContain('user / skill-catalog')
@@ -68,7 +68,7 @@ describe('Prime prompt dump script', () => {
     expect(dump).not.toContain('\"format\":')
   }, 90_000)
 
-  it('keeps system-only output limited to the captured request system field', async () => {
+  it('keeps system-only output limited to the captured request system messages', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-prime-prompt-system-only-'))
     const { stdout, stderr } = await execFileAsync(process.execPath, [SCRIPT, '--cwd', root, '--system-only', '--stdout'], {
       cwd: resolve(import.meta.dirname, '..'),

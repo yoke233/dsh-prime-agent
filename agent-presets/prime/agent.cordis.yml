@@ -24,7 +24,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You are a helpful software engineer assistant. Your working directory is {{cwd}}.
 
 - id: agent-instructions
@@ -101,9 +101,7 @@
   name: dsh-prime-agent/tool-restrictions
   config:
     deny:
-      - str_replace_editor
       - workflow
-      - ralph
 
 # Both register into the host `tools` registry and provide nothing, so
 # they need no realm. The `fs` service and its policy stay in the host.
@@ -166,6 +164,8 @@
 # long-context coding agents. Other routes keep the DSH defaults; retention
 # uses the context manager's bounded recent tail. Older recorded content stays
 # retrievable through history_search/history_read; no LLM summary is generated.
+# One reminder is emitted within 16384 tokens of that pressure threshold so a
+# long-running task can refresh its bounded recovery checkpoint before rotation.
 - id: compaction
   name: cordis:group
   group: true
@@ -177,6 +177,7 @@
       name: 'dsh-prime-agent/context-manager'
       config:
         stateDirectory: !!js dshHomePath('prime-agent')
+        checkpointReminderTokens: 16384
         modelPolicies:
           - provider: deepseek-official
             model: deepseek-v4-flash
@@ -250,8 +251,8 @@
         backgroundMode: one-shot
         maxDepth: provider-managed
 
-    - id: workflow-worker-thread
-      name: '@deepseek-ai/dsh-workflow-worker-thread'
+    - id: workflow-ptc
+      name: '@deepseek-ai/dsh-workflow-ptc'
       config:
         provider: spawn
 

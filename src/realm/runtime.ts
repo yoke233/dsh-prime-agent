@@ -1,7 +1,7 @@
 /**
  * The host plane's trusted persistent-Realm service, mounted under the
  * uniquely named `ctx.primeRealmRuntime` service — deliberately NOT the
- * official `ctx.codeRuntime` seam, which the host keeps for the shipped
+ * official `ctx.ptcRuntime` seam, which the host keeps for the shipped
  * one-shot runtime.
  *
  * The seam is trusted: the caller hands over the Realm identity it has
@@ -17,7 +17,7 @@
 import { join } from 'node:path'
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
-import type { CodeRunFailure, CodeRunRequest } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcRunFailure, PtcRunRequest } from '@deepseek-ai/dsh-ptc-runtime'
 import {
   MIN_OUTPUT_BYTES,
   OutputLedger,
@@ -228,7 +228,7 @@ export class PrimeRealmRuntime extends Service {
    * @returns the run's outcome per the seam contract; rejects only on caller
    *   misuse (disposed runtime, unusable Realm identity).
    */
-  async run(realmId: string, request: CodeRunRequest): Promise<PrimeRunResult> {
+  async run(realmId: string, request: PtcRunRequest): Promise<PrimeRunResult> {
     if (this.disposed) throw new Error('dsh-prime-agent: prime realm runtime run() after disposal')
     if (typeof realmId !== 'string' || realmId.length === 0) {
       throw new Error('dsh-prime-agent: realm id must not be empty')
@@ -242,7 +242,7 @@ export class PrimeRealmRuntime extends Service {
   }
 
   /** Admit the run into its realm and append a fresh-namespace notice when needed. */
-  private async execute(realmId: string, request: CodeRunRequest): Promise<PrimeRunResult> {
+  private async execute(realmId: string, request: PtcRunRequest): Promise<PrimeRunResult> {
     // Re-checked after the admission awaits: teardown may have run while the
     // lease claim was in flight, and admitting here would build a realm
     // and a worker that nothing is left to dispose.
@@ -279,7 +279,7 @@ export class PrimeRealmRuntime extends Service {
    */
   private async admit(
     realmId: string,
-    request: CodeRunRequest,
+    request: PtcRunRequest,
     onStart: (notice: RealmRunNotice) => void,
   ): Promise<RealmAdmission | undefined> {
     if (this.disposed) return undefined
@@ -422,7 +422,7 @@ export class PrimeRealmRuntime extends Service {
    * because a pre-worker diagnostic interpolates a message from the host's tool
    * pipeline and must not be the one result that ignores the output cap.
    */
-  private failure(error: CodeRunFailure): PrimeRunResult {
+  private failure(error: PtcRunFailure): PrimeRunResult {
     // No realm ran, so no notice is appended and the whole cap is available.
     return new OutputLedger(this.outputBytes).failure([], error)
   }

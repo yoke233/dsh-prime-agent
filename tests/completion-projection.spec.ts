@@ -1,7 +1,7 @@
 /** Bounded completion previews for the single retained `$_` slot. */
 
 import { afterEach, describe, expect, it } from 'vitest'
-import type { CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcRunResult } from '@deepseek-ai/dsh-ptc-runtime'
 import { PersistentRealm } from '../src/realm/realm.js'
 import type {
   RealmBudgets,
@@ -48,14 +48,14 @@ interface Envelope {
   truncated: true
 }
 
-function envelopeOf(result: CodeRunResult): Envelope {
+function envelopeOf(result: PtcRunResult): Envelope {
   expect(result.error).toBeUndefined()
   const envelope = result.value as Envelope
   expect(envelope?.truncated).toBe(true)
   return envelope
 }
 
-function valueBytes(result: CodeRunResult): number {
+function valueBytes(result: PtcRunResult): number {
   return Buffer.byteLength(JSON.stringify(result.value), 'utf8')
 }
 

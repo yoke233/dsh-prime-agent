@@ -32,7 +32,7 @@ describe('Prime packaging boundary', () => {
       peerDependenciesMeta?: Record<string, unknown>
     }
     const runtimePackages = [
-      '@deepseek-ai/dsh-code-runtime',
+      '@deepseek-ai/dsh-ptc-runtime',
       '@deepseek-ai/dsh-terminal',
       '@deepseek-ai/dsh-terminal-bash',
       '@deepseek-ai/dsh-tool-terminal',
@@ -52,7 +52,7 @@ describe('Prime packaging boundary', () => {
       .find(row => row.id === 'persona')
 
     expect(persona?.name).toBe('@deepseek-ai/dsh-persona')
-    expect(persona?.config?.text).toMatch(/^You are a helpful software engineer assistant\./)
+    expect(persona?.config?.prefix).toMatch(/^You are a helpful software engineer assistant\./)
   })
 
   it('replaces Prime summarization with a packaged history window and isolates any host pruner', async () => {
@@ -61,6 +61,10 @@ describe('Prime packaging boundary', () => {
     const rows = group.config as unknown as Row[]
     expect(group.isolate).toEqual({ compaction: true, toolResultPruner: true })
     expect(rows.map(row => row.name)).toEqual(['dsh-prime-agent/context-manager', '@deepseek-ai/dsh-command-compact'])
+    expect(rows[0]?.config).toMatchObject({
+      checkpointReminderTokens: 16384,
+      modelPolicies: [{ provider: 'deepseek-official', model: 'deepseek-v4-flash', thresholdRatio: 0.3 }],
+    })
     expect(stateDirectoryExpr(rows[0])).toBe(stateDirectoryExpr(preset.find(row => row.id === 'prime-agent')))
     const manifest = JSON.parse(await readFile(resolve(import.meta.dirname, '../package.json'), 'utf8'))
     expect(manifest.exports['./context-manager'].default).toBe('./lib/context-manager.js')
@@ -127,7 +131,7 @@ describe('Prime packaging boundary', () => {
       devDependencies?: Record<string, string>
     }
     expect(manifest.devDependencies?.['dsh-tool-monitor']).toBe(
-      'https://github.com/yoke233/dsh-tool-monitor/archive/1e0f2cc14b4ddbc49c2e3cb2c2a7913c80b3083f.tar.gz',
+      'https://github.com/yoke233/dsh-tool-monitor/archive/244e8eb1f4828c2c6cc4eee664b6d895b8e6e315.tar.gz',
     )
 
     const base = load(await readFile(BASE_PATCH, 'utf8'), { schema: entryListSchema }) as Row[]
@@ -187,7 +191,7 @@ describe('Prime packaging boundary', () => {
     expect(preset).toContainEqual({
       id: 'prime-tool-restrictions',
       name: 'dsh-prime-agent/tool-restrictions',
-      config: { deny: ['str_replace_editor', 'workflow', 'ralph'] },
+      config: { deny: ['workflow'] },
     })
     expect(preset).toContainEqual({ id: 'prime-refine-skill', name: 'dsh-prime-agent/refine-skill-provider' })
     expect(preset.find(row => row.id === 'tool-skill')).toBeUndefined()

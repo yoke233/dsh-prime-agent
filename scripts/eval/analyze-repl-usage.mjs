@@ -75,7 +75,7 @@ async function analyze(file) {
       if (data.name === 'repl') anyRepl = true
       continue
     }
-    if (type === 'tool/code-dispatch') {
+    if (type === 'tool/ptc-dispatch') {
       const parent = data.parentCallId
       if (typeof parent !== 'string') continue
       const list = dispatches.get(parent) ?? []
@@ -85,7 +85,7 @@ async function analyze(file) {
       const a = isRecord(data.arguments) ? data.arguments : {}
       list.push({ name: data.name, bytes: textBytes(data.content), isError: data.isError === true, repeated, rangedRead: data.name === 'read' && (a.offset !== undefined || a.limit !== undefined) })
       dispatches.set(parent, list)
-      if (probe && probeShown.dispatch < 1) { probeShown.dispatch++; console.error('PROBE code-dispatch keys:', Object.keys(data)) }
+      if (probe && probeShown.dispatch < 1) { probeShown.dispatch++; console.error('PROBE ptc-dispatch keys:', Object.keys(data)) }
       continue
     }
     if (type === 'tool/result') {

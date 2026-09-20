@@ -8,7 +8,7 @@
  * there with a pointer back to this file.
  * @module dsh-prime-agent/realm/protocol
  */
-import type { CodeJsonValue, CodeRunFailure, CodeRunResult } from '@deepseek-ai/dsh-code-runtime';
+import type { PtcJsonValue, PtcRunFailure, PtcRunResult } from '@deepseek-ai/dsh-ptc-runtime';
 /**
  * Trusted, content-free metadata describing how a Realm completion should be
  * presented. It is derived only from a nonce-authenticated worker envelope;
@@ -31,7 +31,7 @@ export type ReplPresentation = {
     valueType: string;
 };
 /** Realm run result plus optional trusted presentation metadata. */
-export interface PrimeRunResult extends CodeRunResult {
+export interface PrimeRunResult extends PtcRunResult {
     presentation?: ReplPresentation;
 }
 /**
@@ -153,7 +153,7 @@ export interface RealmCompletionEnvelope {
      */
     opaque?: true;
     /** The bounded projection of the value; absent on a minimal preview. */
-    projection?: CodeJsonValue;
+    projection?: PtcJsonValue;
     /** Why the value was not retained, present only alongside `retained: false`. */
     reason?: string;
     truncated: true;
@@ -288,9 +288,9 @@ export declare class OutputLedger {
     /** Finalize a run that completed without producing a value. */
     success(logs: string[]): PrimeRunResult;
     /** Finalize a completion whose serialized size the worker already measured. */
-    completion(logs: string[], value: CodeJsonValue, serializedBytes: number): PrimeRunResult;
+    completion(logs: string[], value: PtcJsonValue, serializedBytes: number): PrimeRunResult;
     /** Finalize a failure diagnostic, with output-limit taking precedence when the combined bytes exceed the cap. */
-    failure(logs: string[], error: CodeRunFailure): PrimeRunResult;
+    failure(logs: string[], error: PtcRunFailure): PrimeRunResult;
     /**
      * Build the explicit output-limit failure, retaining the longest whole-entry
      * prefix of the logs that still fits beside the fixed diagnostic. Entries are

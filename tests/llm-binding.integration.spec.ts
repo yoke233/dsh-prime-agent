@@ -7,7 +7,6 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LlmAdapter, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as primeAgent from '../src/index.js'
 import * as primeRuntime from '../src/runtime.js'
 
@@ -105,7 +104,6 @@ describe('LLM bindings through the real Prime Realm', () => {
   it('drains a failed queryMany before a same-cell retry without tool dispatch', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-prime-llm-binding-'))
     ctx = new Context()
-    await ctx.plugin(SessionProjectionRegistry)
     await mountAgentLoopTestDependencies(ctx)
     await ctx.plugin(AgentLoop, { agents: [] })
     await ctx.plugin(primeRuntime, { stateDirectory: root })
@@ -116,7 +114,7 @@ describe('LLM bindings through the real Prime Realm', () => {
     })
     const adapter = new QueryManyAdapter()
     ctx.llm.registerAdapter(['query-many-integration'], adapter)
-    const agent = ctx.agentLoop.create(SessionId('query-many-integration'), {
+    const agent = await ctx.agentLoop.create(SessionId('query-many-integration'), {
       provider: 'query-many-integration',
       model: 'model',
     })
@@ -128,7 +126,7 @@ describe('LLM bindings through the real Prime Realm', () => {
     expect(adapter.aborted).toEqual(['slow'])
     expect(adapter.activeWhenRetryStarted).toBe(0)
     expect(adapter.active).toBe(0)
-    expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/code-dispatch')).toHaveLength(0)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/ptc-dispatch')).toHaveLength(0)
     const result = agent.session.snapshotEvents().filter(event => event.type === 'tool/result').at(-1)
     expect(JSON.stringify(result?.data)).toContain('prompts[0]')
     expect(JSON.stringify(result?.data)).toContain('retry-ok')

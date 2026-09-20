@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { CodeBindingFunction, CodeBindingNamespace } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcBindingFunction, PtcBindingNamespace } from '@deepseek-ai/dsh-ptc-runtime'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type {
   PtcDispatchLog,
@@ -91,7 +91,7 @@ async function dispatchLogContent(
 }
 
 export interface ReplBindings {
-  bindings: CodeBindingNamespace[]
+  bindings: PtcBindingNamespace[]
   finish(): Promise<void>
 }
 
@@ -104,8 +104,8 @@ export interface ReplBindings {
 export function createReplBindings(
   ctx: Context,
   exec: ToolRunContext,
-  extraBindings: readonly CodeBindingNamespace[] = [],
-  agentFunctions: Readonly<Record<string, CodeBindingFunction>> = {},
+  extraBindings: readonly PtcBindingNamespace[] = [],
+  agentFunctions: Readonly<Record<string, PtcBindingFunction>> = {},
 ): ReplBindings {
   const agent = exec.agent
   if (agent === undefined) throw new Error('repl requires an owning agent session')
@@ -113,7 +113,7 @@ export function createReplBindings(
   let dispatchNumber = 0
   let commitTail: Promise<void> = Promise.resolve()
 
-  const binding = (toolName: string): CodeBindingFunction => async (argumentsValue: unknown): Promise<JsonValue> => {
+  const binding = (toolName: string): PtcBindingFunction => async (argumentsValue: unknown): Promise<JsonValue> => {
     const subCallId = ToolCallId(String(exec.callId) + ':repl:' + String(++dispatchNumber))
     const rootCallId = exec.rootCallId ?? exec.callId
     const input: ToolExecutionInput = {
@@ -131,7 +131,7 @@ export function createReplBindings(
     commitTail = new Promise<void>(resolve => { releaseCommit = resolve })
     try {
       const result = await queue.enqueue(mode, async () => {
-        agent.session.append('tool/code-dispatch-start', {
+        agent.session.append('tool/ptc-dispatch-start', {
           rootCallId,
           parentCallId: exec.callId,
           subCallId,
@@ -149,7 +149,7 @@ export function createReplBindings(
         isError: result.isError,
         content: result.content,
       })
-      agent.session.append('tool/code-dispatch', {
+      agent.session.append('tool/ptc-dispatch', {
         rootCallId,
         parentCallId: exec.callId,
         subCallId,
@@ -171,7 +171,7 @@ export function createReplBindings(
     }
   }
 
-  const raw: Record<string, CodeBindingFunction> = Object.create(null) as Record<string, CodeBindingFunction>
+  const raw: Record<string, PtcBindingFunction> = Object.create(null) as Record<string, PtcBindingFunction>
   const available = new Set<string>()
   for (const schema of ctx.tools.schemas(exec.agent)) {
     if (schema.name === REPL_TOOL_NAME) continue
@@ -182,9 +182,9 @@ export function createReplBindings(
   const namespace = (
     global: string,
     aliases: Record<string, string>,
-    extras: Readonly<Record<string, CodeBindingFunction>> = {},
-  ): CodeBindingNamespace | undefined => {
-    const functions: Record<string, CodeBindingFunction> = Object.create(null) as Record<string, CodeBindingFunction>
+    extras: Readonly<Record<string, PtcBindingFunction>> = {},
+  ): PtcBindingNamespace | undefined => {
+    const functions: Record<string, PtcBindingFunction> = Object.create(null) as Record<string, PtcBindingFunction>
     for (const [member, target] of Object.entries(aliases)) {
       if (available.has(target)) Object.defineProperty(functions, member, { enumerable: true, value: binding(target) })
     }
@@ -195,7 +195,7 @@ export function createReplBindings(
     return Object.keys(functions).length === 0 ? undefined : { global, functions }
   }
 
-  const bindings: CodeBindingNamespace[] = [{ global: 'tools', functions: raw, errorClass: { name: 'ToolCallError', memberNameProperty: 'toolName' } }]
+  const bindings: PtcBindingNamespace[] = [{ global: 'tools', functions: raw, errorClass: { name: 'ToolCallError', memberNameProperty: 'toolName' } }]
   const agents = namespace('agents', {
     spawn: available.has('subagent') ? 'subagent' : 'subagent_fork',
     fork: 'subagent_fork', list: 'list_agents', send: 'send_message', interrupt: 'interrupt_agent',

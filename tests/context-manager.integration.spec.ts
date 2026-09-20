@@ -10,7 +10,6 @@ import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { installLlmReplay, type ReplayEntry } from '@deepseek-ai/dsh-llm-replay'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import * as contextManager from '../src/context-manager.js'
@@ -40,16 +39,27 @@ function answer(text = 'done'): ReplayEntry {
   ]
   return { kind: 'chunks', chunks }
 }
-async function setup(script: ReplayEntry[], thresholdRatio = 0.99, runtimeLimits: { maxWallMs?: number } = {}) {
+interface SetupOptions {
+  thresholdRatio?: number
+  runtimeLimits?: { maxWallMs?: number }
+  checkpointReminderTokens?: number
+}
+
+async function setup(script: ReplayEntry[], options: SetupOptions = {}) {
+  const { thresholdRatio = 0.99, runtimeLimits = {}, checkpointReminderTokens } = options
   root = await mkdtemp(join(tmpdir(), 'prime-context-'))
   ctx = new Context()
-  await ctx.plugin(SessionProjectionRegistry)
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(TokenMeter)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(primeRuntime, { stateDirectory: root, ...runtimeLimits })
   await ctx.plugin(primeAgent, { stateDirectory: root, requireOrchestrationTools: false })
-  await ctx.plugin(contextManager, { stateDirectory: root, thresholdRatio, retainTokens: 3000 })
+  await ctx.plugin(contextManager, {
+    stateDirectory: root,
+    thresholdRatio,
+    retainTokens: 3000,
+    ...(checkpointReminderTokens === undefined ? {} : { checkpointReminderTokens }),
+  })
   const requests: GenerateOptions[] = []
   ctx.on('llm/stream', (options, next) => { requests.push(options); return next() })
   const overrideFile = join(root, 'replay.json')
@@ -58,7 +68,7 @@ async function setup(script: ReplayEntry[], thresholdRatio = 0.99, runtimeLimits
     file: join(root, 'absent.jsonl'), overrideFile,
     providers: [{ id: 'context-test', models: [{ id: 'model', contextWindow: 100000 }] }],
   })
-  const agent = ctx.agentLoop.create(SessionId('context-owner'), { provider: 'context-test', model: 'model' })
+  const agent = await ctx.agentLoop.create(SessionId('context-owner'), { provider: 'context-test', model: 'model' })
   return { context: ctx, agent, requests, replay }
 }
 
@@ -71,10 +81,13 @@ class HostProbeCompaction extends BasicCompactionEngine {
   }
 }
 
-async function setupCompetingCompactors(script: ReplayEntry[], mountPrime = true) {
+async function setupCompetingCompactors(
+  script: ReplayEntry[],
+  mountPrime = true,
+  primeConfig: { thresholdRatio?: number; checkpointReminderTokens?: number } = {},
+) {
   root = await mkdtemp(join(tmpdir(), 'prime-context-order-'))
   ctx = new Context()
-  await ctx.plugin(SessionProjectionRegistry)
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(TokenMeter)
   await ctx.plugin(AgentLoop, { agents: [] })
@@ -82,18 +95,28 @@ async function setupCompetingCompactors(script: ReplayEntry[], mountPrime = true
   const hostCompaction = ctx.compaction as HostProbeCompaction
   await ctx.plugin(primeRuntime, { stateDirectory: root })
   await ctx.plugin(primeAgent, { stateDirectory: root, requireOrchestrationTools: false })
+  const requests: GenerateOptions[] = []
+  ctx.on('llm/stream', (options, next) => { requests.push(options); return next() })
   const overrideFile = join(root, 'replay.json')
   await writeFile(overrideFile, JSON.stringify(script))
   const replay = installLlmReplay(ctx, {
     file: join(root, 'absent.jsonl'), overrideFile,
     providers: [{ id: 'context-test', models: [{ id: 'model', contextWindow: 100000 }] }],
   })
-  const agent = ctx.agentLoop.create(SessionId('context-order-owner'), { provider: 'context-test', model: 'model' })
+  const agent = await ctx.agentLoop.create(SessionId('context-order-owner'), { provider: 'context-test', model: 'model' })
+  let primeScope: Context | undefined
   if (mountPrime) {
-    const primeScope = agent.ctx.isolate('compaction').isolate('toolResultPruner')
-    await primeScope.plugin(contextManager, { stateDirectory: root, thresholdRatio: 0.2, retainTokens: 3000 })
+    primeScope = agent.ctx.isolate('compaction').isolate('toolResultPruner')
+    await primeScope.plugin(contextManager, {
+      stateDirectory: root,
+      thresholdRatio: primeConfig.thresholdRatio ?? 0.2,
+      retainTokens: 3000,
+      ...(primeConfig.checkpointReminderTokens === undefined
+        ? {}
+        : { checkpointReminderTokens: primeConfig.checkpointReminderTokens }),
+    })
   }
-  return { agent, hostCompaction, replay }
+  return { agent, hostCompaction, primeScope, requests, replay }
 }
 
 async function send(agent: Agent, text: string) {
@@ -104,6 +127,10 @@ async function send(agent: Agent, text: string) {
 function summaries(agent: Agent) { return agent.session.snapshotEvents().filter(event => event.type === 'compaction/summary') }
 
 describe('Prime history window on the real DSH loop', () => {
+  it('rejects a reminder lead too small to carry its own message', async () => {
+    await expect(setup([], { checkpointReminderTokens: 511 })).rejects.toThrow()
+  })
+
   it('wins Prime pressure ordering over an inherited Host backend', async () => {
     const { agent, hostCompaction, replay } = await setupCompetingCompactors([
       cell('let alive = 91; "new-tail".repeat(2000)'), answer(),
@@ -115,6 +142,24 @@ describe('Prime history window on the real DSH loop', () => {
     expect(summaries(agent)).toHaveLength(1)
     expect(summaries(agent)[0]!.data.provider).toBe('dsh-prime-agent')
     expect(summaries(agent)[0]!.data.llmStreamCall).toBeUndefined()
+  })
+
+  it('makes a reminder visible only after inherited pressure listeners settle', async () => {
+    const { agent, hostCompaction, primeScope, requests, replay } = await setupCompetingCompactors([
+      cell('"tail"'), answer(),
+    ], true, { thresholdRatio: 0.99, checkpointReminderTokens: 100000 })
+    primeScope!.on('agent/pre-step', async ({ agent: current, signal }, next) => {
+      await hostCompaction.compactIfNeeded(current, 'context-overflow', signal)
+      return next()
+    })
+    await send(agent, 'evidence '.repeat(12000))
+    const reminderSource = contextManager.name + '/checkpoint-reminder'
+    const reminder = agent.session.snapshotEvents().find(event => event.type === 'user/message'
+      && event.data.source.kind === 'plugin' && event.data.source.plugin === reminderSource)
+    expect(hostCompaction.summarizeCalls).toBe(1)
+    expect(reminder?.seq).toBeGreaterThan(summaries(agent)[0]!.seq)
+    expect(requests.at(-1)?.messages.at(-1)?.source).toEqual({ kind: 'plugin', plugin: reminderSource })
+    replay.assertConsumed()
   })
 
   it('leaves a non-Prime agent on the inherited Host backend', async () => {
@@ -135,6 +180,47 @@ describe('Prime history window on the real DSH loop', () => {
     expect(summaries(agent)).toHaveLength(0)
     expect(searchHistory(agent.session, 'small task').hits.length).toBeGreaterThan(0)
   })
+
+  it('records trusted note freshness and emits one checkpoint reminder per working window', async () => {
+    const { agent, requests, replay } = await setup([
+      cell('let note = await tools.notes_read({}); await tools.notes_write({revision:note.revision,content:"Goal: keep the current recovery checkpoint"})'),
+      answer(), answer('later'), answer('after removal'),
+    ], { checkpointReminderTokens: 100000 })
+    await send(agent, 'Begin a task that will continue across several steps. ' + 'source material '.repeat(12000))
+    const saved = await new TaskNotes(root!).read(agent.session.id)
+    expect(saved.updatedAtSessionOffset).not.toBeNull()
+    expect(saved.updatedAtSessionOffset).toBeLessThanOrEqual(agent.session.seq)
+    const reminderSource = contextManager.name + '/checkpoint-reminder'
+    const reminderCount = () => agent.session.snapshotEvents().filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'plugin' && event.data.source.plugin === reminderSource).length
+    expect(reminderCount()).toBe(1)
+    expect(requests.some(request => request.messages.at(-1)?.source?.kind === 'plugin'
+      && request.messages.at(-1)?.source?.plugin === reminderSource)).toBe(true)
+    const reminder = agent.session.snapshotEvents().find(event => event.type === 'user/message'
+      && event.data.source.kind === 'plugin' && event.data.source.plugin === reminderSource)!
+    const earlierUser = agent.session.snapshotEvents().find(event => event.type === 'user/message'
+      && event.data.source.kind === 'user')!
+    agent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Replace an earlier node while keeping the live reminder.' }],
+      source: { kind: 'plugin', plugin: 'context-manager-test' },
+    }), {
+      surfaceOp: { op: 'replace', startSeq: earlierUser.seq, endSeq: earlierUser.seq },
+      sourceEventSeqs: [earlierUser.seq],
+    })
+    await send(agent, 'Continue while the original reminder remains visible.')
+    expect(reminderCount()).toBe(1)
+    agent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Remove the prior reminder from this working surface.' }],
+      source: { kind: 'plugin', plugin: 'context-manager-test' },
+    }), {
+      surfaceOp: { op: 'replace', startSeq: reminder.seq, endSeq: reminder.seq },
+      sourceEventSeqs: [reminder.seq],
+    })
+    await send(agent, 'Continue after replacing the reminder itself.')
+    expect(reminderCount()).toBe(2)
+    replay.assertConsumed()
+  })
+
   it('rotates after a settled cell, keeps the Realm, and recovers evidence and persisted notes without a model summary', async () => {
     const { agent, requests, replay } = await setup([
       cell('let retained = 777; let n = await tools.notes_read({}); await tools.notes_write({ revision:n.revision, content:"Goal: retain the blue exception; evidence is in the initial user message" }); "x".repeat(12000)'),
@@ -160,7 +246,10 @@ describe('Prime history window on the real DSH loop', () => {
   })
 
   it('automatically reduces pressure and supports manual rotation without invoking a summarizer', async () => {
-    const { context, agent, requests, replay } = await setup([cell('let alive = 91; "new-tail".repeat(2000)'), answer(), answer('later')], 0.2)
+    const { context, agent, requests, replay } = await setup(
+      [cell('let alive = 91; "new-tail".repeat(2000)'), answer(), answer('later')],
+      { thresholdRatio: 0.2 },
+    )
     await send(agent, 'evidence '.repeat(12000))
     expect(summaries(agent).length).toBeGreaterThan(0)
     expect(requests).toHaveLength(2)
@@ -218,7 +307,7 @@ describe('Prime history window on the real DSH loop', () => {
       cell(initial), answer(), answer(),
       ...Array.from({ length: 10 }, () => answer()),
       cell(recovery), answer(),
-    ], 0.2)
+    ], { thresholdRatio: 0.2 })
     const commits: { limit: number; evidence: number }[] = []
     context.tools.register(defineTool({
       name: 'commit_allocation', description: 'Commit the allocation with its recorded source address.',
@@ -264,7 +353,7 @@ describe('Prime history window on the real DSH loop', () => {
       cell('for (;;) {}'),
       cell('let note = await tools.notes_read({}); let hits = await tools.history_search({query:"source proof"}); if (typeof oldHeap !== "undefined" || note.content !== "Resume from source proof" || hits.hits.length === 0) throw new Error("recovery failed"); "recovered"'),
       answer(),
-    ], 0.99, { maxWallMs: 800 })
+    ], { runtimeLimits: { maxWallMs: 800 } })
     await send(agent, 'Keep this source proof after a restart.')
     replay.assertConsumed()
     const results = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')

@@ -10,7 +10,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import type { CodeBindingFunction } from '@deepseek-ai/dsh-code-runtime';
+import type { PtcBindingFunction } from '@deepseek-ai/dsh-ptc-runtime';
 /** Budgets bounding one cell's sub-model calls. */
 export interface LlmBindingLimits {
     /** Maximum UTF-16 length of one prompt (system text is counted separately under the same cap). */
@@ -34,7 +34,7 @@ export interface LlmReply {
     truncated: boolean;
 }
 /** Build the leased sub-model members for one cell of `agent`, cancelled with `signal`. */
-export declare function createLlmFunctions(ctx: Context, agent: Agent, limits: LlmBindingLimits, signal: AbortSignal): Record<string, CodeBindingFunction>;
+export declare function createLlmFunctions(ctx: Context, agent: Agent, limits: LlmBindingLimits, signal: AbortSignal): Record<string, PtcBindingFunction>;
 /** JSDoc lines placed above the `agents` declaration that carries these members. */
 export declare const LLM_NAMESPACE_DOC: readonly string[];
 /** The member lines (2-space indented) the generated `agents` declaration shows for these bindings. */

@@ -2,7 +2,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { CodeBindingNamespace, CodeJsonValue } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcBindingNamespace, PtcJsonValue } from '@deepseek-ai/dsh-ptc-runtime'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { runRefinement, type RefineCommandConfig } from './command.js'
@@ -31,7 +31,7 @@ export interface RefineStatus {
 
 export interface ContinualRuntime {
   store: HarnessStore
-  bindingFor(agent: Agent): CodeBindingNamespace
+  bindingFor(agent: Agent): PtcBindingNamespace
 }
 
 function continualGuidance(): string {
@@ -132,12 +132,12 @@ export function registerContinual(ctx: Context, config: ContinualConfig): Contin
 
   return {
     store,
-    bindingFor(agent): CodeBindingNamespace {
+    bindingFor(agent): PtcBindingNamespace {
       return {
         global: 'refine',
         functions: {
-          status: async value => await status(agent, value) as unknown as CodeJsonValue,
-          run: async value => await run(agent, value) as unknown as CodeJsonValue,
+          status: async value => await status(agent, value) as unknown as PtcJsonValue,
+          run: async value => await run(agent, value) as unknown as PtcJsonValue,
         },
       }
     },

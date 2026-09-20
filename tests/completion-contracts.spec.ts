@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcRunResult } from '@deepseek-ai/dsh-ptc-runtime'
 import { PersistentRealm } from '../src/realm/realm.js'
 import type { RealmBudgets } from '../src/realm/realm.js'
 import * as primeRuntime from '../src/runtime.js'
@@ -90,7 +90,7 @@ function realmId(seed: string): string {
 }
 
 /** The runtime's own namespace notices, separate from program output. */
-function notices(result: CodeRunResult): string[] {
+function notices(result: PtcRunResult): string[] {
   return result.logs.filter(line => line.startsWith('[prime-realm] '))
 }
 
@@ -99,7 +99,7 @@ function notices(result: CodeRunResult): string[] {
  * serialized log array plus the serialized completion or diagnostic. This is the
  * number `maxOutputBytes` bounds whichever rung the degradation chain ends on.
  */
-function wireBytes(result: CodeRunResult): number {
+function wireBytes(result: PtcRunResult): number {
   const logs = Buffer.byteLength(JSON.stringify(result.logs), 'utf8')
   if (result.error) return logs + jsonStringBytes(result.error.message)
   return logs + (Object.hasOwn(result, 'value') ? Buffer.byteLength(JSON.stringify(result.value), 'utf8') : 0)
@@ -117,7 +117,7 @@ interface Envelope {
 }
 
 /** Read one result as a projection envelope, failing loudly when it is not one. */
-function envelopeOf(result: CodeRunResult): Envelope {
+function envelopeOf(result: PtcRunResult): Envelope {
   expect(result.error).toBeUndefined()
   const value = result.value as Envelope
   expect(value?.truncated).toBe(true)

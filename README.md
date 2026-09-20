@@ -30,18 +30,18 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
   <img src="./assets/readme/architecture.svg" width="100%" alt="repl {code} 经 Agent scope 用可信 exec.agent.id 解析 Realm identity,host primeRealmRuntime 服务准入持久 Realm Worker;官方 code-runtime row 未改动,非 Prime 会话继续官方 one-shot">
 </p>
 
-- 模型 catalog 只含 `repl`。其他 DSH 工具不直接可见：prompt assembly 把 tools 列表过滤到只剩 `repl`，并移除固定 Harness identity 与隐藏能力各自的 `tool:*` 独立提示；前者不提供操作事实，后者按外层直接工具编写，会与 Prime 路由冲突。生成 SDK 的 declaration/JSDoc 是 cell 内能力的唯一使用契约。直接调用其他工具会被 guard 拒绝，这些能力作为 cell 内预加载绑定出现；Prime preset 通过 `prime-tool-restrictions.config.deny` 明确排除重复的 `str_replace_editor`、通用 `workflow` 和 `ralph`，通用 scoped 插件仅应用该配置；保留 `read`/`write`/`edit`/`apply_patch` 及其他所需能力。`tools.*` 调用向 Realm 程序返回 canonical value；若对象结果未经转换直接成为 cell completion，则使用 DSH 官方 `result.content` 展示，避免把 `edit.before/after` 等大 DTO 展开进上下文。`agents.*`（spawn/fork/list/send/interrupt）与 `jobs.*`（list/output/kill）是 continuable child 与后台任务的薄适配。Agent 固定提示与具体对话、任务、仓库和历史错误无关。`repl` 自身的 description 说明它用于在持久 cell 内编排/组合工具调用，且只有 completion 与 `console.log` 进入对话；固定提示在 declaration 之前给出三个归约型 TypeScript 样例（批量 + 归约、先 grep 定位再范围 read、跨候选早停），仅当 `grep` 与 `read` 都在 catalog 中时渲染。
+- 模型 catalog 只含 `repl`。其他 DSH 工具不直接可见：prompt assembly 把 tools 列表过滤到只剩 `repl`，并移除固定 Harness identity 与隐藏能力各自的 `tool:*` 独立提示；前者不提供操作事实，后者按外层直接工具编写，会与 Prime 路由冲突。生成 SDK 的 declaration/JSDoc 是 cell 内能力的唯一使用契约。直接调用其他工具会被 guard 拒绝，这些能力作为 cell 内预加载绑定出现；Prime preset 通过 `prime-tool-restrictions.config.deny` 明确排除通用 `workflow`（上游已移除 `str_replace_editor` 并默认关闭 `ralph`），通用 scoped 插件仅应用该配置；保留 `read`/`write`/`edit`/`apply_patch` 及其他所需能力。`tools.*` 调用向 Realm 程序返回 canonical value；若对象结果未经转换直接成为 cell completion，则使用 DSH 官方 `result.content` 展示，避免把 `edit.before/after` 等大 DTO 展开进上下文。`agents.*`（spawn/fork/list/send/interrupt）与 `jobs.*`（list/output/kill）是 continuable child 与后台任务的薄适配。Agent 固定提示与具体对话、任务、仓库和历史错误无关。`repl` 自身的 description 说明它用于在持久 cell 内编排/组合工具调用，且只有 completion 与 `console.log` 进入对话；固定提示在 declaration 之前给出三个归约型 TypeScript 样例（批量 + 归约、先 grep 定位再范围 read、跨候选早停），仅当 `grep` 与 `read` 都在 catalog 中时渲染。
 - 路由信任 Agent 执行上下文。`repl` 要求拥有 Agent 会话:插件用可信 `exec.agent.id` 从共享 `realm-identity` 存储解析该会话稳定的不透明 Realm id,再把程序、本轮租约绑定与取消信号交给 host 侧的 `ctx.primeRealmRuntime.run(...)`。没有握手、没有模型可见的身份工具;缺少可信执行上下文或无法解析 Realm id 时明确失败,绝不降级。
 - Host 服务与官方运行时并存。`cordis.patch.yml` 只是把 `dsh-prime-agent/runtime` 作为新 row 插入,官方 `code-runtime` row 原样保留;非 Prime 会话继续使用官方 one-shot 语义,不存在 fallback。
 - Realm 内的绑定经跨 run 稳定的 Proxy 与 per-run binding lease 调用:schema、审批、沙箱、日志、并发和取消仍由 DSH 执行,run 结束立即撤销授权。
 - 多个 TUI 进程可共享 Prime 持久状态并同时运行不同 Session；同一 Session 的 live Realm 同时只允许一个进程持有，owner 退出后另一进程以空 namespace 接管。
 - Prime 不封装搜索 provider：`tools.grep` 仍调用 DSH 正式 `grep`。提示词组装按工具名复制 schema；Prime 的 `pwsh` 副本移除与外层 TypeScript 正斜杠规则冲突的 native path 句子，各工具 description 只追加自身缺失的关键约束；`grep` 说明普通文本使用字符串，正则语法使用无 flags literal 的 `.source`（例如 `pattern: /stream\(options\)/.source`），并要求 parse error 后修正再重试。生成 SDK 与 Realm interface 都保持 DSH canonical `pattern: string`，不扩展公开类型，也不修改 catalog 中共享定义；Host binding seam 只接收 lossless JSON。
-- Prime 额外注册本地组合能力 `tools.apply_patch({ patch })`：对齐 OpenAI Codex `apply_patch` 的 marker/heredoc parser、顺序 hunk、EOF/纯追加和 exact → rstrip → trim → Unicode 归一化匹配语义，并一次预检同文件多 hunk 或多文件 Add/Update；Add 与 Codex 一样允许覆盖已有目标。相对或绝对目标路径原样交给 Agent catalog 中正式的 DSH `read`/`write` nested calls，路径解析与授权、sandbox、approval、observation、日志、取消和单文件原子发布仍由 DSH 拥有。每个 REPL nested call 按官方 `tool/code-dispatch-start` / `tool/code-dispatch` 协议记录，因此官方 Web 与兼容 TUI 都能递归显示；`apply_patch` 投影标准 `card: 'diff'`，失败结果走 generic error fallback。`edit` 继续用于一次精确的原位替换；`apply_patch` 负责相关的多 hunk/多文件变更，两者不互相替代。
+- Prime 额外注册本地组合能力 `tools.apply_patch({ patch })`：对齐 OpenAI Codex `apply_patch` 的 marker/heredoc parser、顺序 hunk、EOF/纯追加和 exact → rstrip → trim → Unicode 归一化匹配语义，并一次预检同文件多 hunk 或多文件 Add/Update；Add 与 Codex 一样允许覆盖已有目标。相对或绝对目标路径原样交给 Agent catalog 中正式的 DSH `read`/`write` nested calls，路径解析与授权、sandbox、approval、observation、日志、取消和单文件原子发布仍由 DSH 拥有。每个 REPL nested call 按官方 `tool/ptc-dispatch-start` / `tool/ptc-dispatch` 协议记录，因此官方 Web 与兼容 TUI 都能递归显示；`apply_patch` 投影标准 `card: 'diff'`，失败结果走 generic error fallback。`edit` 继续用于一次精确的原位替换；`apply_patch` 负责相关的多 hunk/多文件变更，两者不互相替代。
 - Profile 显式安装的 DSH Host MCP client 把 server tools 注册进统一 catalog，repl 单元自动获得对应 `tools.*` 绑定；Prime 不复制 Python kernel-owned MCP runtime。
 - Prime preset 挂载 DSH 官方持久 Terminal：POSIX 使用 Bash，Windows 使用 PowerShell；`terminal_open`/`terminal_send`/`terminal_read`/`terminal_signal`/`terminal_close`/`terminal_list` 通过 `tools.*` 调用。同行安装的 `dsh-tool-monitor` 可对后台 `terminal_send` 产生的 `pty-send-*` Job 做逐行 JavaScript 正则订阅。
 - Prime preset 不挂载 DSH Plan Mode。默认上下文管理改为可回取历史的工作窗口：旧消息退出窗口后保留目录，模型通过 `tools.history_search/history_read` 回查本 Session 的已记录内容，通过 `tools.notes_read/notes_write` 保存任务进度。不会调用模型生成历史摘要；DSH 继续拥有配对、持久化、计量和溢出恢复。非 Prime preset 不受影响。
-- `dsh-prime-agent/context-manager` 的压力阈值默认 0.8，Prime preset 为 `deepseek-official/deepseek-v4-flash` 保留 0.3；普通压力处理保留约 16000 tokens 的最近尾部，并按工具配对边界调整。仍保留 base Host compactor 的 TUI 组合中，Prime 会以前置的 Agent-scope pressure pass 先替换窗口；成功后 Host listener 读取到已降压的 surface 并跳过，Prime 失败时才继续走继承的恢复链。模型可先保存笔记，再调用 `tools.new_context({})` 请求下一 step 切换；主动切换与溢出恢复使用 DSH 的最小安全尾部策略。`/compact` 也使用同一目录替换方式。preset 不注册 provider、不修改模型窗口容量。
-- 任务笔记与 `refine` 学习状态分开：笔记是最多 6000 字符的单份当前工作记录，位于 `DSH_HOME/prime-agent/context-notes/<Session id 的 SHA-256>.json`，带 revision 检查，重启后可读，child 有自己的笔记。历史接口不暴露请求头或私有推理；日志中的 spill locator 与图片附件仍是引用，回取依赖原有 artifact 的保留和访问能力，不能视为无限期保真存储。
+- `dsh-prime-agent/context-manager` 的压力阈值默认 0.8，Prime preset 为 `deepseek-official/deepseek-v4-flash` 保留 0.3，并在阈值前 16384 tokens 每个工作窗口至多注入一次 task-note checkpoint 提醒；插件默认关闭该提醒，显式设置 `checkpointReminderTokens` 才启用。普通压力处理保留约 16000 tokens 的最近尾部，并按工具配对边界调整。仍保留 base Host compactor 的 TUI 组合中，Prime 会以前置的 Agent-scope pressure pass 先替换窗口；成功后 Host listener 读取到已降压的 surface 并跳过，Prime 失败时才继续走继承的恢复链。模型可先保存笔记，再调用 `tools.new_context({})` 请求下一 step 切换；主动切换与溢出恢复使用 DSH 的最小安全尾部策略。`/compact` 也使用同一目录替换方式。preset 不注册 provider、不修改模型窗口容量。
+- 任务笔记与 `refine` 学习状态分开：笔记是最多 6000 字符的单份当前恢复快照，不是追加式流水账；位于 `DSH_HOME/prime-agent/context-notes/<Session id 的 SHA-256>.json`，带 revision 检查和 Host 写入的 `updatedAtSessionOffset` 新鲜度位置，重启后可读，child 有自己的笔记。旧文件读作未知新鲜度并在下一次成功写入时升级。该位置不证明笔记内容正确；后续用户纠正和外部变化仍须核验。历史接口不暴露请求头或私有推理；日志中的 spill locator 与图片附件仍是引用，回取依赖原有 artifact 的保留和访问能力，不能视为无限期保真存储。
 - `tools.*` 返回值始终遵循 canonical `ToolOutputMap`，可直接访问 `read.lines`、`edit.before/after` 等字段；对象结果直接成为 completion 时只改变模型展示为官方 content，不改变程序拿到的值。不要对返回值盲目再次 `JSON.parse`。notebook 结构化 preview 中的 `\\` 只是 JSON notation；模型自行编写 Windows 路径时优先使用 `D:/work/project` 形式，避免额外转义层。工具参数使用 TypeScript 对象字面量；完整 cell 会在执行前解析；语法失败不会执行其中任何代码或 tool call，并报告不含源码片段的 cell 行列与 parser message，模型据此修正后重试。
 - `agents.*` 还带两个无状态子模型调用：`agents.query({ prompt, system?, maxTokens? })` 返回 `{ text, truncated }`，`agents.queryMany({ prompts, system?, maxTokens? })` 按输入顺序返回 `{ replies }`。它们对已在 REPL 变量里的文本做一次性模型调用（摘要、分类、抽取、比较），走当前 Agent 的模型路由；与 `refine` 一样不注册为 DSH tool、不进入 `tools.*`、不产生 dispatch 日志，但写进生成的 `agents` 声明及其 JSDoc。回复只有被显示时才进入对话。预算由插件 `llm` 配置约束：单条 prompt 上限 200,000 字符、单批最多 20 条、批内并发 8、`maxTokens` 默认且上限 4096；越界在调用模型前拒绝。批内一项失败后停止领取新请求、取消同批在途请求并等其收尾，再报告失败下标；整批不返回成功项。并发限制按单批计算，多批并行会叠加；它不是会话级费用上限。`truncated: true` 的回复需作为不完整材料处理。需要工具或多步推理的子任务仍用 `agents.spawn`。它们挂在 `agents` 下而不是独立全局，是因为向 Realm 注入第五个全局会在两个 Realm 同时销毁时触发 Worker 的 V8 fatal（见架构文档）。
 
@@ -66,7 +66,7 @@ repl({ code: `await review('a') // Map 和函数都还活着` })
 ```sh
 npm install
 npm run check:all
-dsh plugin --profile web add ./dsh-prime-agent https://github.com/yoke233/dsh-tool-monitor/archive/1e0f2cc14b4ddbc49c2e3cb2c2a7913c80b3083f.tar.gz
+dsh plugin --profile web add ./dsh-prime-agent https://github.com/yoke233/dsh-tool-monitor/archive/244e8eb1f4828c2c6cc4eee664b6d895b8e6e315.tar.gz
 ```
 
 安装命令同时加入两个独立 bundle：`dsh-prime-agent` 的 patch 仍只在官方 `code-runtime` row 旁纯插入 `dsh-prime-agent/runtime` host row；`dsh-tool-monitor` 的 patch 以兼容 Registry 替换 Host 的具体 `jobs-local` 实现并注册 `job_monitor`。Prime preset 复用 Host 唯一的 `tool-jobs` controller，避免重复注册 completion listener；`jobs` REPL binding 仍提供 `job_output`、`job_list` 和 `job_kill`。Prime preset 在启动时落位到 `$DSH_HOME/.agent-presets`（仅缺失时），并挂载官方持久 Terminal。启用 Prime 模式只是为某个会话选中 Prime preset；默认 preset 与其他 preset 保持官方 one-shot 语义。落位后的 preset 不会被覆盖，删除 `$DSH_HOME/.agent-presets/prime` 并重启即可重新落位当前快照。
@@ -82,7 +82,7 @@ npm pack
 $primePackage = Get-ChildItem -Filter 'dsh-prime-agent-*.tgz' |
   Sort-Object LastWriteTime -Descending |
   Select-Object -First 1 -ExpandProperty FullName
-dsh plugin --profile tui add $primePackage https://github.com/yoke233/dsh-tool-monitor/archive/1e0f2cc14b4ddbc49c2e3cb2c2a7913c80b3083f.tar.gz
+dsh plugin --profile tui add $primePackage https://github.com/yoke233/dsh-tool-monitor/archive/244e8eb1f4828c2c6cc4eee664b6d895b8e6e315.tar.gz
 ```
 
 使用 `dsh --profile tui --dump-config` 核验组合结果中存在 `agent-presets`、`prime-code-runtime`、`monitor-jobs`、`tool-monitor`、官方 `tool-subagent-control` 和 `tui`，然后运行 `dsh --profile tui`。
@@ -267,7 +267,7 @@ Prime 注册一个随包 `refine` Skill provider。Host 的正式 `dsh-tool-skil
 
 ## 开发
 
-开发、类型检查和测试统一解析 `package-lock.json` 锁定的 npm 发布包；同级 `../deepseek-harness` checkout 仅用于审阅上游 diff 与 preset 快照，不参与模块解析。宿主提供的 DSH peer range 限制在兼容的 `0.1.x` 系列并标记为 optional，避免重复安装宿主服务；`@deepseek-ai/dsh-code-runtime` 是例外，由 Prime 包作为生产依赖直接交付，repl bridge 与 Realm seam 复用其官方 run/binding 类型契约（官方运行时本体仍由宿主提供）。
+开发、类型检查和测试统一解析 `package-lock.json` 锁定的 npm 发布包；同级 `../deepseek-harness` checkout 仅用于审阅上游 diff 与 preset 快照，不参与模块解析。宿主提供的 DSH peer range 限制在兼容的 `0.1.x` 系列并标记为 optional，避免重复安装宿主服务；`@deepseek-ai/dsh-ptc-runtime` 是例外，由 Prime 包作为生产依赖直接交付，repl bridge 与 Realm seam 复用其官方 run/binding 类型契约（官方运行时本体仍由宿主提供）。
 
 ```sh
 npm run typecheck

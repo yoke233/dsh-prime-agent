@@ -1,9 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis';
-import type { CodeBindingFunction, CodeBindingNamespace } from '@deepseek-ai/dsh-code-runtime';
+import type { PtcBindingFunction, PtcBindingNamespace } from '@deepseek-ai/dsh-ptc-runtime';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
 export declare const REPL_TOOL_NAME = "repl";
 export interface ReplBindings {
-    bindings: CodeBindingNamespace[];
+    bindings: PtcBindingNamespace[];
     finish(): Promise<void>;
 }
 /**
@@ -12,5 +12,5 @@ export interface ReplBindings {
  * to the delegation aliases (they must not shadow an alias name); the namespace
  * exists whenever it has at least one member.
  */
-export declare function createReplBindings(ctx: Context, exec: ToolRunContext, extraBindings?: readonly CodeBindingNamespace[], agentFunctions?: Readonly<Record<string, CodeBindingFunction>>): ReplBindings;
+export declare function createReplBindings(ctx: Context, exec: ToolRunContext, extraBindings?: readonly PtcBindingNamespace[], agentFunctions?: Readonly<Record<string, PtcBindingFunction>>): ReplBindings;
 //# sourceMappingURL=bridge.d.ts.map

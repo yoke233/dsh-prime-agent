@@ -11,7 +11,7 @@
  * violations hard-kill it and start a new generation.
  * @module dsh-prime-agent/realm/realm
  */
-import type { CodeRunRequest } from '@deepseek-ai/dsh-code-runtime';
+import type { PtcRunRequest } from '@deepseek-ai/dsh-ptc-runtime';
 import type { PrimeRunResult, RealmCompletionProjectionLimits, RealmCompletionRetentionLimits } from './protocol.js';
 export type { RealmCompletionProjectionLimits, RealmCompletionRetentionLimits, } from './protocol.js';
 /**
@@ -135,7 +135,7 @@ export declare class PersistentRealm {
      *   actually inherits the new heap.
      * @returns the run's outcome; rejects only on caller misuse.
      */
-    run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<PrimeRunResult>;
+    run(request: PtcRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<PrimeRunResult>;
     /**
      * Stop admission, terminate the worker, and await complete settlement: no
      * worker, timer, or unsettled run outlives this call.

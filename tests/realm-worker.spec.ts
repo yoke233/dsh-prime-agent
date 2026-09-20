@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { CodeBindingFunction, CodeBindingNamespace, CodeJsonValue } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcBindingFunction, PtcBindingNamespace, PtcJsonValue } from '@deepseek-ai/dsh-ptc-runtime'
 import { PersistentRealm } from '../src/realm/realm.js'
 import type { RealmBudgets } from '../src/realm/realm.js'
 
@@ -22,8 +22,8 @@ function createRealm(budgets: Partial<RealmBudgets> = {}): PersistentRealm {
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- test bindings receive already-validated JSON */
-function tools(functions: Record<string, (args: any) => Promise<CodeJsonValue>>): CodeBindingNamespace {
-  return { global: 'tools', functions: functions as Record<string, CodeBindingFunction> }
+function tools(functions: Record<string, (args: any) => Promise<PtcJsonValue>>): PtcBindingNamespace {
+  return { global: 'tools', functions: functions as Record<string, PtcBindingFunction> }
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -281,7 +281,7 @@ describe('binding leases', () => {
 
   it('routes a binding rejection through the declared error class', async () => {
     const realm = createRealm()
-    const namespace: CodeBindingNamespace = {
+    const namespace: PtcBindingNamespace = {
       global: 'tools',
       functions: { boom: () => Promise.reject(new Error('host refused')) },
       errorClass: { name: 'ToolError', memberNameProperty: 'tool' },
@@ -416,7 +416,7 @@ describe('host call settlement', () => {
   it('wall-times out and hard-kills a cell whose accepted void host call never settles', async () => {
     const realm = createRealm({ maxWallMs: 150 })
     const started = deferred<void>()
-    const parked = deferred<CodeJsonValue>()
+    const parked = deferred<PtcJsonValue>()
 
     const pending = realm.run({
       program: 'const keptBeforeDetachedTimeout = "v1"\nvoid globalThis.tools.park({})\n"unreachable completion"',
@@ -481,7 +481,7 @@ describe('host call settlement', () => {
 describe('serialization and abort', () => {
   it('runs strictly in admission order', async () => {
     const realm = createRealm()
-    const gate = deferred<CodeJsonValue>()
+    const gate = deferred<PtcJsonValue>()
     const first = realm.run({
       program: 'await globalThis.tools.wait({})\nconst admittedOrder = ["first"]\n"first"',
       bindings: [tools({ wait: () => gate.promise })],
@@ -496,7 +496,7 @@ describe('serialization and abort', () => {
 
   it('cancels a queued run without disturbing the active one', async () => {
     const realm = createRealm()
-    const gate = deferred<CodeJsonValue>()
+    const gate = deferred<PtcJsonValue>()
     const controller = new AbortController()
     const first = realm.run({
       program: 'await globalThis.tools.wait({})\n"first"',
@@ -676,7 +676,7 @@ describe('substrate failures and disposal', () => {
 
   it('rejects a namespace with no functions record instead of throwing synchronously', async () => {
     const realm = createRealm()
-    const pending = realm.run({ program: '1', bindings: [{ global: 'tools' } as CodeBindingNamespace] })
+    const pending = realm.run({ program: '1', bindings: [{ global: 'tools' } as PtcBindingNamespace] })
     await expect(pending).rejects.toThrow('must declare a functions record')
     expect(realm.idle).toBe(true)
   })
@@ -711,7 +711,7 @@ describe('substrate failures and disposal', () => {
 
   it('aborts an in-flight run on dispose and rejects later runs', async () => {
     const realm = createRealm()
-    const gate = deferred<CodeJsonValue>()
+    const gate = deferred<PtcJsonValue>()
     const pending = realm.run({
       program: 'await globalThis.tools.wait({})\n"never"',
       bindings: [tools({ wait: () => gate.promise })],
@@ -798,7 +798,7 @@ describe('hostile program code', () => {
         console.log('a log line');
         ({ interceptedPorts, echoedThroughPrivatePort, capturedOwnPort: capturedPort === ownChannel.port1 })
       `,
-      bindings: [tools({ echo: async args => args as CodeJsonValue })],
+      bindings: [tools({ echo: async args => args as PtcJsonValue })],
     })
     expect(result.error).toBeUndefined()
     expect(result.value).toEqual({

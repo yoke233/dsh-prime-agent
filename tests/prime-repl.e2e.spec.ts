@@ -159,7 +159,7 @@ describe('Prime realm through the sole repl transport', () => {
     expect(refineStatus.result).toEqual({ pending: false, in_flight: false })
     const refineRun = await runRepl(alpha.agent, "await refine.run('validated focus')")
     expect(refineRun.result).toEqual({ pending: true, in_flight: false, scheduled: true })
-    expect(alpha.events.filter(event => event.type === 'tool/code-dispatch')).toEqual([])
+    expect(alpha.events.filter(event => event.type === 'tool/ptc-dispatch')).toEqual([])
 
     const first = await runRepl(alpha.agent, `
       const lookup = new Map([['a', { id: 'a' }]])
@@ -230,9 +230,9 @@ describe('Prime realm through the sole repl transport', () => {
 
     // Ordinary nested tools use official dispatch records; the private refine
     // Skill bridge above did not manufacture a tool call.
-    const dispatches = alpha.events.filter(event => event.type === 'tool/code-dispatch')
+    const dispatches = alpha.events.filter(event => event.type === 'tool/ptc-dispatch')
     expect(dispatches.length).toBeGreaterThan(0)
     expect(JSON.stringify(dispatches)).not.toContain('refine')
-    expect(beta.events.filter(event => event.type === 'tool/code-dispatch')).toEqual([])
+    expect(beta.events.filter(event => event.type === 'tool/ptc-dispatch')).toEqual([])
   })
 })

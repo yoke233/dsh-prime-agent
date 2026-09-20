@@ -13,10 +13,10 @@ describe('recoverable conversation history', () => {
     const evidence = 'Condition: only update the blue file. 中文🙂'
     const original = prompt(session, evidence)
     const replacement = session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'directory' }], source: { kind: 'plugin', plugin: 'test' } }), {
-      surfaceOp: { op: 'replace', start: original.seq, end: original.seq }, sourceEventSeqs: [original.seq],
+      surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq }, sourceEventSeqs: [original.seq],
     })
     session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'next directory' }], source: { kind: 'plugin', plugin: 'test' } }), {
-      surfaceOp: { op: 'replace', start: replacement.seq, end: replacement.seq }, sourceEventSeqs: [replacement.seq],
+      surfaceOp: { op: 'replace', startSeq: replacement.seq, endSeq: replacement.seq }, sourceEventSeqs: [replacement.seq],
     })
     const restored = Session.fromRestore(session.id, session.snapshotEvents(), session.header, session.inheritedEventCount)
     expect(searchHistory(restored, 'BLUE').hits.map(hit => hit.seq)).toEqual([original.seq])

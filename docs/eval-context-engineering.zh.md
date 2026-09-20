@@ -68,9 +68,9 @@ node scripts/eval/model-usage.mjs --input D:\eval\main\session.jsonl.zstd --inpu
 node scripts/eval/model-usage.mjs D:\eval\main\session.jsonl.zstd D:\eval\child\session.jsonl.zstd
 ```
 
-DSH 当前把 Agent Loop 成功调用的 usage 放在 `assistant/message`，并把流式 `usage` 与 terminal `finish` 保存在 `assistant/chunk`。脚本优先按每个 terminal stream attempt 计数，因此失败后重试不会折叠成一次；缺原始 chunk 的日志才以 `assistant/message` 补一条成功或中止记录。child 日志的继承前缀按 header `seedLength` 跳过，避免与 parent 重复计算。相同来源与 seq 的重复事件只读一次，相同 `callId` 的完全重复记录只聚合一次；冲突记录降为 unknown 并写入 diagnostics，不选择其中一个值。
+DSH 将已结算模型尝试的流保存在 `assistant/message.stream` 或 `assistant/attempt.stream`，usage 可同时出现在消息字段中。脚本每个持久尝试只计一次，并通过官方 `expandAssistantStream` 提取末次 usage 和 finish；无 finish 且未产生消息的尝试保持 unknown。child 继承前缀按官方格式解码器返回的 `inheritedEventCount` 跳过。相同来源与 seq 的重复事件只读一次，相同 `callId` 的完全重复记录只聚合一次；冲突记录降为 unknown 并写入 diagnostics。
 
-离线日志有明确边界：Prime `agents.query/queryMany` 直接调用 `ctx.llm.stream()`，只传同一个 `sessionId`，不会写 `assistant/message` 或独立工具日志；因此现有 Session JSONL 既看不到这些 query，也无法区分它与 main。脚本不会据此生成 query 或把缺失成本算成零。要比较完整任务成本，必须使用上一节的 middleware 采集；离线 CLI 用来复核已持久化的 main/child 调用及失败流。一次调用若在写出任何 `assistant/chunk` 前失败，Session 日志只有 turn 失败而没有可识别的物理调用，脚本不会凭 turn 边界虚造调用；这部分仍须由 middleware 采集。compaction 只有 `llmStreamCall: true` 时才能确认发生模型调用，但它不属于四种任务调用归因，脚本保守放入 unknown。session title 等未持久化 usage 的 consumer 同样只能由 middleware 捕获。
+离线日志有明确边界：Prime `agents.query/queryMany` 直接调用 `ctx.llm.stream()`，只传同一个 `sessionId`，不会写 `assistant/message` 或独立工具日志；因此现有 Session JSONL 既看不到这些 query，也无法区分它与 main。脚本不会据此生成 query 或把缺失成本算成零。要比较完整任务成本，必须使用上一节的 middleware 采集；离线 CLI 用来复核已持久化的 main/child 调用及失败流。一次调用若在写出任何 `assistant/message` 或 `assistant/attempt` 前失败，Session 日志只有 turn 失败而没有可识别的物理调用，脚本不会凭 turn 边界虚造调用；这部分仍须由 middleware 采集。compaction 只有 `llmStreamCall: true` 时才能确认发生模型调用，但它不属于四种任务调用归因，脚本保守放入 unknown。session title 等未持久化 usage 的 consumer 同样只能由 middleware 捕获。
 
 ## 与任务级模型评测搭配
 

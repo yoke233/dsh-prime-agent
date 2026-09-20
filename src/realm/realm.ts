@@ -19,7 +19,7 @@ import { MessageChannel, MessagePort, Worker } from 'node:worker_threads'
 import type { EventLoopUtilization } from 'node:perf_hooks'
 import type { Readable } from 'node:stream'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
-import type { CodeBindingNamespace, CodeJsonValue, CodeRunFailure, CodeRunRequest } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcBindingNamespace, PtcJsonValue, PtcRunFailure, PtcRunRequest } from '@deepseek-ai/dsh-ptc-runtime'
 import {
   LAST_RESULT_GLOBAL,
   MIN_OUTPUT_BYTES,
@@ -145,7 +145,7 @@ const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /**
  * Backend-owned program globals, mirroring `RESERVED_BINDING_GLOBALS` in
- * `@deepseek-ai/dsh-code-runtime`. The seam package is imported type-only here
+ * `@deepseek-ai/dsh-ptc-runtime`. The seam package is imported type-only here
  * so the realm never pulls it into the plugin's runtime dependency graph.
  */
 const RESERVED_BINDING_GLOBALS: ReadonlySet<string> = new Set([
@@ -153,15 +153,15 @@ const RESERVED_BINDING_GLOBALS: ReadonlySet<string> = new Set([
 ])
 
 
-/** Mirrors `RESERVED_ERROR_MEMBERS` in `@deepseek-ai/dsh-code-runtime`. */
+/** Mirrors `RESERVED_ERROR_MEMBERS` in `@deepseek-ai/dsh-ptc-runtime`. */
 const RESERVED_ERROR_MEMBERS: ReadonlySet<string> = new Set([
   'name', 'message', 'stack', 'args', 'with_traceback', 'add_note',
 ])
 
-/** Mirrors `DUNDER_MEMBER` in `@deepseek-ai/dsh-code-runtime`. */
+/** Mirrors `DUNDER_MEMBER` in `@deepseek-ai/dsh-ptc-runtime`. */
 const DUNDER_MEMBER = /^__.+__$/
 
-/** Mirrors `PORTABLE_RESERVED_WORDS` in `@deepseek-ai/dsh-code-runtime` (ECMAScript union Python). */
+/** Mirrors `PORTABLE_RESERVED_WORDS` in `@deepseek-ai/dsh-ptc-runtime` (ECMAScript union Python). */
 const PORTABLE_RESERVED_WORDS: ReadonlySet<string> = new Set([
   'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do',
   'else', 'enum', 'export', 'extends', 'false', 'finally', 'for', 'function', 'if', 'import', 'in',
@@ -194,7 +194,7 @@ const WORKER_PATH = fileURLToPath(new URL(
 ))
 
 /** The realm's answer to any traffic the worker had no business sending. */
-const PROTOCOL_VIOLATION: CodeRunFailure = {
+const PROTOCOL_VIOLATION: PtcRunFailure = {
   kind: 'worker-exit',
   message: 'realm worker violated the control protocol and was terminated',
 }
@@ -333,9 +333,9 @@ function parseRunMetrics(raw: unknown): RealmRunMetrics {
  * content-free presentation metadata. Shape alone never reaches this function:
  * `onDone` first proves that the worker quoted this run's private nonce.
  */
-function parseCompletionPresentation(value: CodeJsonValue): ReplPresentation | undefined {
+function parseCompletionPresentation(value: PtcJsonValue): ReplPresentation | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const envelope = value as Record<string, CodeJsonValue>
+  const envelope = value as Record<string, PtcJsonValue>
   if (envelope.truncated !== true) return undefined
   if (envelope.retained !== undefined && typeof envelope.retained !== 'boolean') return undefined
   if (typeof envelope.type !== 'string') return undefined
@@ -435,8 +435,8 @@ interface RealmSession {
 
 /** One admitted run, queued or active. */
 interface RunEntry {
-  readonly request: CodeRunRequest
-  readonly bindings: Map<string, CodeBindingNamespace>
+  readonly request: PtcRunRequest
+  readonly bindings: Map<string, PtcBindingNamespace>
   readonly onStart: ((notice: RealmRunNotice) => void) | undefined
   readonly resolve: (result: PrimeRunResult) => void
   readonly finished: Promise<void>
@@ -557,9 +557,9 @@ export class PersistentRealm {
    *   actually inherits the new heap.
    * @returns the run's outcome; rejects only on caller misuse.
    */
-  run(request: CodeRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<PrimeRunResult> {
+  run(request: PtcRunRequest, onStart?: (notice: RealmRunNotice) => void): Promise<PrimeRunResult> {
     if (this.disposed) return Promise.reject(new Error('dsh-prime-agent: realm run() after disposal'))
-    let bindings: Map<string, CodeBindingNamespace>
+    let bindings: Map<string, PtcBindingNamespace>
     try {
       bindings = this.validateBindings(request)
       this.validateInjectedGlobalSchema(bindings)
@@ -619,7 +619,7 @@ export class PersistentRealm {
    */
   async dispose(): Promise<void> {
     this.disposed = true
-    const abort: CodeRunFailure = { kind: 'abort', message: 'realm disposed' }
+    const abort: PtcRunFailure = { kind: 'abort', message: 'realm disposed' }
     for (const entry of this.queue.splice(0)) this.settle(entry, entry.ledger.failure([], abort))
     const session = this.session
     const active = this.activeRun
@@ -636,8 +636,8 @@ export class PersistentRealm {
   }
 
   /** Reject malformed binding globals or typed-error declarations as caller misuse. */
-  private validateBindings(request: CodeRunRequest): Map<string, CodeBindingNamespace> {
-    const bindings = new Map<string, CodeBindingNamespace>()
+  private validateBindings(request: PtcRunRequest): Map<string, PtcBindingNamespace> {
+    const bindings = new Map<string, PtcBindingNamespace>()
     for (const namespace of request.bindings) {
       // Ahead of the identifier test on purpose: a realm-owned name must be
       // refused BECAUSE it is reserved, not incidentally because of the
@@ -687,7 +687,7 @@ export class PersistentRealm {
    * omit and restore known namespaces or change their leased function members,
    * but cannot change globals already installed in the live namespace.
    */
-  private validateInjectedGlobalSchema(bindings: ReadonlyMap<string, CodeBindingNamespace>): void {
+  private validateInjectedGlobalSchema(bindings: ReadonlyMap<string, PtcBindingNamespace>): void {
     const candidate = new Map<string, InjectedErrorClassSchema | null>()
     for (const [global, namespace] of bindings) {
       const descriptor = namespace.errorClass
@@ -996,9 +996,9 @@ export class PersistentRealm {
       this.settle(entry, entry.ledger.success(entry.logs))
       return
     }
-    let value: CodeJsonValue
+    let value: PtcJsonValue
     try {
-      value = JSON.parse(message.json) as CodeJsonValue
+      value = JSON.parse(message.json) as PtcJsonValue
     } catch {
       this.settle(entry, entry.ledger.failure(entry.logs, { kind: 'invalid-output', message: 'program completion must be lossless JSON' }))
       return
@@ -1025,7 +1025,7 @@ export class PersistentRealm {
       }
       this.counters.completionsProjected += 1
       this.counters.projectionBytes += bytes
-      if ((value as Record<string, CodeJsonValue>).projection === undefined) this.counters.completionsMinimal += 1
+      if ((value as Record<string, PtcJsonValue>).projection === undefined) this.counters.completionsMinimal += 1
     } else {
       this.counters.completionsFull += 1
     }
@@ -1081,7 +1081,7 @@ export class PersistentRealm {
       reply({ type: 'reply', runId: message.runId, id: message.id, ok: false, message: 'binding arguments must be lossless JSON' })
       return
     }
-    let resolved: CodeJsonValue
+    let resolved: PtcJsonValue
     try {
       resolved = await fn(args)
     } catch (error: unknown) {
@@ -1090,7 +1090,7 @@ export class PersistentRealm {
       reply({ type: 'reply', runId: message.runId, id: message.id, ok: false, message: messageOf(error) })
       return
     }
-    let value: CodeJsonValue | undefined
+    let value: PtcJsonValue | undefined
     try {
       value = snapshotJsonValue(resolved)
     } catch {

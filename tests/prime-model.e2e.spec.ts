@@ -53,7 +53,7 @@ describe.skipIf(process.env.DSH_RUN_MODEL_E2E !== '1' || !process.env.DEEPSEEK_A
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SystemPrompt, {
-      persona: 'You are testing persistent REPL bindings. Follow the user instructions exactly.',
+      personaPrefix: 'You are testing persistent REPL bindings. Follow the user instructions exactly.',
     })
     await ctx.plugin(ToolRuntime, { mode: 'ptc' })
     await ctx.plugin(AgentRegistry)
@@ -62,7 +62,7 @@ describe.skipIf(process.env.DSH_RUN_MODEL_E2E !== '1' || !process.env.DEEPSEEK_A
     await ctx.plugin(primeRuntime, { stateDirectory })
     await ctx.plugin(primeAgent, { stateDirectory })
 
-    const agent = ctx.agentLoop.create(SessionId('prime-real-model'), {
+    const agent = await ctx.agentLoop.create(SessionId('prime-real-model'), {
       provider: 'deepseek-official',
       model: 'deepseek-v4-flash',
     })

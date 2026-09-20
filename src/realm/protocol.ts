@@ -9,7 +9,7 @@
  * @module dsh-prime-agent/realm/protocol
  */
 
-import type { CodeJsonValue, CodeRunFailure, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcJsonValue, PtcRunFailure, PtcRunResult } from '@deepseek-ai/dsh-ptc-runtime'
 
 /**
  * Trusted, content-free metadata describing how a Realm completion should be
@@ -36,7 +36,7 @@ export type ReplPresentation =
   }
 
 /** Realm run result plus optional trusted presentation metadata. */
-export interface PrimeRunResult extends CodeRunResult {
+export interface PrimeRunResult extends PtcRunResult {
   presentation?: ReplPresentation
 }
 
@@ -198,7 +198,7 @@ export interface RealmCompletionEnvelope {
    */
   opaque?: true
   /** The bounded projection of the value; absent on a minimal preview. */
-  projection?: CodeJsonValue
+  projection?: PtcJsonValue
   /** Why the value was not retained, present only alongside `retained: false`. */
   reason?: string
   truncated: true
@@ -342,13 +342,13 @@ export class OutputLedger {
   }
 
   /** Finalize a completion whose serialized size the worker already measured. */
-  completion(logs: string[], value: CodeJsonValue, serializedBytes: number): PrimeRunResult {
+  completion(logs: string[], value: PtcJsonValue, serializedBytes: number): PrimeRunResult {
     if (serializedBytes > this.remaining()) return this.limit(logs)
     return { logs, value }
   }
 
   /** Finalize a failure diagnostic, with output-limit taking precedence when the combined bytes exceed the cap. */
-  failure(logs: string[], error: CodeRunFailure): PrimeRunResult {
+  failure(logs: string[], error: PtcRunFailure): PrimeRunResult {
     if (jsonStringBytes(error.message) > this.remaining()) return this.limit(logs)
     return { logs, error }
   }

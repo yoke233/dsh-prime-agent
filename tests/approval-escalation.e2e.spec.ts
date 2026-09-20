@@ -20,7 +20,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -106,7 +106,7 @@ async function bootFs(options: { mode: 'read-only' | 'workspace-write'; approval
   ctx = context
   const id = SessionId('escalation-agent')
   const session = Session.create(id, undefined, {
-    version: 0,
+    version: SESSION_FORMAT_VERSION,
     id,
     createdAt: Date.now(),
     isSeeded: false,

@@ -29,7 +29,7 @@ function usage() {
     '',
     'Runs one normal Prime Agent turn and captures the final request at the LLM stream boundary.',
     'The plain-text dump defaults to ./prompt-dumps/prime-prompt.txt.',
-    '--system-only prints only request.system; injected messages such as the skill catalog are shown by the default dump.',
+    '--system-only prints system messages; injected messages such as the skill catalog are shown by the default dump.',
   ].join('\n')
 }
 
@@ -83,11 +83,14 @@ function renderTool(tool) {
   return '### ' + tool.name + '\n\n' + JSON.stringify(tool, null, 2)
 }
 
+function systemText(request) {
+  return request.messages.filter(message => message.role === 'system').map(message => renderContent(message.content)).join('\n\n')
+}
+
 function contextUsage(request) {
-  const system = request.system ?? ''
   const messages = JSON.stringify(request.messages)
   const tools = JSON.stringify(request.tools ?? [])
-  const characters = system.length + messages.length + tools.length
+  const characters = messages.length + tools.length
   return { characters, tokens: Math.ceil(characters / 4) }
 }
 
@@ -111,7 +114,7 @@ function renderDump(request) {
     '',
     '## System Prompt',
     '',
-    request.system ?? '(empty)',
+    systemText(request) || '(empty)',
     '',
     '## Messages',
     '',
@@ -231,7 +234,7 @@ async function main() {
     if (capturedRequest === undefined) throw new Error('Prime Agent completed without issuing a model request')
 
     const output = options.systemOnly
-      ? renderUsageLine(contextUsage(capturedRequest)) + '\n\n' + (capturedRequest.system ?? '') + '\n'
+      ? renderUsageLine(contextUsage(capturedRequest)) + '\n\n' + systemText(capturedRequest) + '\n'
       : renderDump(capturedRequest)
     if (options.stdout) process.stdout.write(output)
     else {

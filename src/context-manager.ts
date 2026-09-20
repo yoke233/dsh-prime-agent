@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { BasicCompactionEngine, type ModelCompactPolicyConfig } from '@deepseek-ai/dsh-compaction-basic'
 import { createUserMessage, type Message } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { Session } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
@@ -15,12 +15,15 @@ export interface Config {
   stateDirectory: string
   thresholdRatio?: number
   retainTokens?: number
+  /** Emit one task-note checkpoint reminder this many tokens before pressure compaction; omit to disable it. */
+  checkpointReminderTokens?: number
   modelPolicies?: Pick<ModelCompactPolicyConfig, 'provider' | 'model' | 'thresholdRatio' | 'retainTokens'>[]
 }
 export const Config: z<Config> = z.object({
   stateDirectory: z.string().min(1).required(),
   thresholdRatio: z.number(),
   retainTokens: z.number().step(1).min(0),
+  checkpointReminderTokens: z.number().step(1).min(512),
   modelPolicies: z.array(z.object({
     provider: z.string().required(), model: z.string().required(),
     thresholdRatio: z.number(), retainTokens: z.number().step(1).min(0),
@@ -29,12 +32,39 @@ export const Config: z<Config> = z.object({
 
 class NoUsefulWindow extends Error {}
 
+const checkpointReminderSource = `${name}/checkpoint-reminder`
+
+interface ReminderState { readonly generation: number; readonly emitted: boolean }
+
+function restoredReminderState(session: Session, generation: number): ReminderState {
+  for (const seq of session.surface.nodes) {
+    if (!session.isOwnSeq(seq)) continue
+    const event = session.eventAt(seq)
+    if (event?.type !== 'user/message') continue
+    const message = event as SessionEvent<'user/message'>
+    if (message.data.source.kind === 'plugin'
+      && message.data.source.plugin === checkpointReminderSource) return { generation, emitted: true }
+  }
+  return { generation, emitted: false }
+}
+
+function pressureHeadroom(ctx: Context, engine: HistoryWindowEngine, session: Session): number | undefined {
+  const target = session.requestContext()
+  if (target === undefined || target.contextWindow === undefined) return undefined
+  const override = engine.config.modelPolicies.find(policy => policy.provider === target.provider && policy.model === target.model)
+  const thresholdRatio = override?.thresholdRatio ?? engine.config.thresholdRatio
+  const thresholdTokens = Math.floor(target.contextWindow * thresholdRatio)
+  return thresholdTokens - ctx.tokenMeter.measure(session).totalTokens
+}
+
 /** Replace only the supported summarizer hook; DSH still owns transactions, pairing, metering and recovery. */
 export class HistoryWindowEngine extends BasicCompactionEngine {
   protected override async summarize(input: { readonly messages: readonly Message[] }, agent: Agent, signal?: AbortSignal) {
     signal?.throwIfAborted()
     const text = historyDirectory(agent.session)
-    const sourceTokens = input.messages.reduce((sum, message) => sum + this.ctx.tokenMeter.estimateMessage(message), 0)
+    // DSH prepends the retained system head; it is outside the replaced region.
+    const region = input.messages[0]?.role === 'system' ? input.messages.slice(1) : input.messages
+    const sourceTokens = region.reduce((sum, message) => sum + this.ctx.tokenMeter.estimateMessage(message), 0)
     const directoryTokens = this.ctx.tokenMeter.estimateMessage(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: name } }))
     // Leave room for DSH's checkpoint envelope. Its own exact shrink check remains authoritative.
     if (sourceTokens <= directoryTokens + 512) throw new NoUsefulWindow('keep the current window: its removable history is too small for a useful directory')
@@ -52,6 +82,8 @@ function owner(exec: ToolRunContext): Agent {
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const notes = new TaskNotes(config.stateDirectory)
   const pending = new WeakMap<Session, number>()
+  const reminderStates = new WeakMap<Session, ReminderState>()
+  const checkpointReminderTokens = config.checkpointReminderTokens ?? 0
   await ctx.plugin(HistoryWindowEngine, {
     thresholdRatio: config.thresholdRatio ?? 0.8,
     retainTokens: config.retainTokens ?? 16000,
@@ -63,7 +95,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // presets without the web bundle's Host-row disables. Run the Agent-scoped
   // engine first; a successful replacement makes inherited pressure listeners
   // observe the reduced surface and no-op, while a failure still falls through
-  // to their normal recovery behavior.
+  // to their normal recovery behavior. Only after that chain settles may a
+  // reminder enter the final surface that the next model request will observe.
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     if (!signal.aborted) {
       try {
@@ -76,11 +109,49 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         ctx.logger.warn('Prime priority compaction failed: ' + message + '; falling through to inherited listeners')
       }
     }
-    return next()
+    const decision = await next()
+    if (!signal.aborted && decision.kind === 'enter' && checkpointReminderTokens > 0) {
+      const generation = agent.session.surface.replaceGeneration
+      let state = reminderStates.get(agent.session)
+      if (state?.generation !== generation) {
+        state = restoredReminderState(agent.session, generation)
+        reminderStates.set(agent.session, state)
+      }
+      if (!state.emitted) {
+        try {
+          const enteringTokens = decision.messages.reduce(
+            (total, message) => total + ctx.tokenMeter.estimateMessage(message),
+            0,
+          )
+          const baseHeadroom = pressureHeadroom(ctx, engine, agent.session)
+          const headroom = baseHeadroom === undefined ? undefined : baseHeadroom - enteringTokens
+          if (headroom !== undefined && headroom <= checkpointReminderTokens) {
+            const message = createUserMessage({
+              content: [{ type: 'text', text: `A context checkpoint is approaching (about ${headroom} tokens before the current pressure threshold). If this task must continue, read its current task note and update the recovery checkpoint now. Do not begin another large step until it is current.` }],
+              source: { kind: 'plugin', plugin: checkpointReminderSource },
+            })
+            if (headroom > ctx.tokenMeter.estimateMessage(message)) {
+              // The Agent loop appends admitted messages after pre-step. Put
+              // the reminder last so it follows the triggering user/context
+              // messages, and invalidate the cache until that append exists.
+              reminderStates.delete(agent.session)
+              return { ...decision, messages: [...decision.messages, message] }
+            }
+          }
+        } catch (error) {
+          if (!signal.aborted) {
+            const message = error instanceof Error ? error.message : String(error)
+            ctx.logger.warn('Prime checkpoint reminder skipped: ' + message)
+          }
+        }
+      }
+    }
+    return decision
   }, { prepend: true })
   const render = (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }]
   const noteOutput = { schema: { type: 'object', additionalProperties: false, properties: {
     revision: { type: 'integer', required: true }, content: { type: 'string', required: true },
+    updatedAtSessionOffset: { oneOf: [{ type: 'integer' }, { type: 'null' }], description: 'Exclusive Session history offset observed at the last successful write; null means freshness is unknown.', required: true },
   } } as const, render }
   ctx.tools.register(defineTool({
     name: 'history_search',
@@ -104,14 +175,17 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     async execute(args, exec) { return readHistory(owner(exec).session, args.seq, args.offset, args.limit) },
   }))
   ctx.tools.register(defineTool({
-    name: 'notes_read', description: 'Read this session’s saved task progress and revision. Notes survive context changes and process restarts; a child has its own notes. Treat notes as fallible working material and verify facts that may have changed.',
+    name: 'notes_read', description: 'Read this session’s saved task progress and revision. Notes survive context changes and process restarts; a child has its own notes. Use updatedAtSessionOffset to spot later history that may supersede the note. Treat notes as fallible working material and verify facts that may have changed.',
     parameters: {}, output: noteOutput, isConcurrencySafe: () => true,
     async execute(_args, exec) { return notes.read(owner(exec).session.id) },
   }))
   ctx.tools.register(defineTool({
-    name: 'notes_write', description: 'Replace this session’s task note using the revision from notes_read. Save the current goal, corrections, verified progress, evidence addresses or file paths, and next steps before changing context. Keep large material in files. Empty content clears the note. On cancellation, read back before retrying.',
+    name: 'notes_write', description: 'Replace this session’s task note using the revision from notes_read. Keep one current recovery checkpoint: goal; constraints and user corrections; verified progress with evidence seqs or file paths; key decisions and reasons; open questions and next steps; external state or assumptions to recheck. Remove superseded entries instead of appending a timeline. Keep large material in files. Empty content clears the note. On cancellation, read back before retrying.',
     parameters: { revision: { type: 'integer', required: true }, content: { type: 'string', description: 'Complete replacement note, at most 6000 characters.', required: true } }, output: noteOutput,
-    async execute(args, exec) { return notes.write(owner(exec).session.id, args.revision, args.content, exec.signal) },
+    async execute(args, exec) {
+      const session = owner(exec).session
+      return notes.write(session.id, { revision: args.revision, content: args.content, updatedAtSessionOffset: session.seq }, exec.signal)
+    },
   }))
   ctx.tools.register(defineTool({
     name: 'new_context', description: 'Request a smaller working window at the next model step, after this cell settles. Save task notes first. Recent messages and live REPL variables remain; older recorded evidence is retrievable through history tools. No change is made when there is no safely removable history.',

@@ -9,7 +9,6 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { createUserMessage, isAgentLoopRequest, type GenerateOptions, type StreamChunk, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LocalSpillStore from '@deepseek-ai/dsh-spill-local'
 import * as SpillPolicy from '@deepseek-ai/dsh-spill-policy'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
@@ -165,9 +164,8 @@ async function setup(scenario: string, source: FixtureSource, queryFaults = fals
   const state: ScenarioState = { source, commits: [] }
   const records: UsageRecord[] = []
   ctx = new Context()
-  await ctx.plugin(SessionProjectionRegistry)
   await mountAgentLoopTestDependencies(ctx, {
-    systemPrompt: { persona: 'Complete the task through the persistent TypeScript REPL. Treat fixture evidence IDs and commit decisions as exact business data.' },
+    systemPrompt: { personaPrefix: 'Complete the task through the persistent TypeScript REPL. Treat fixture evidence IDs and commit decisions as exact business data.' },
   })
   await ctx.plugin(TokenMeter)
   await ctx.plugin(LocalSpillStore, { root: join(root, 'spill'), cleanupPeriodDays: 0 })
@@ -183,7 +181,7 @@ async function setup(scenario: string, source: FixtureSource, queryFaults = fals
   })
   await ctx.plugin(contextManager, { stateDirectory, thresholdRatio: 0.99, retainTokens: 2000 })
   const control = observeCalls(ctx, records, queryFaults)
-  const agent = ctx.agentLoop.create(SessionId(`context-engineering-${scenario}`), {
+  const agent = await ctx.agentLoop.create(SessionId(`context-engineering-${scenario}`), {
     provider: 'deepseek-official',
     model: 'deepseek-v4-flash',
     maxTokens: 2048,
@@ -275,7 +273,11 @@ describe.skipIf(!runModel)('Prime context-engineering tasks with a real DeepSeek
       await send(agent, `Read fixture_read and identify the decision and evidenceId needed later. Do not commit yet. ${'Older turn padding. '.repeat(1600)}`)
       const notes = new TaskNotes(stateDirectory)
       const current = await notes.read(agent.session.id)
-      await notes.write(agent.session.id, current.revision, 'STALE: this note predates the latest evidence and must be recovered from history.', new AbortController().signal)
+      await notes.write(agent.session.id, {
+        revision: current.revision,
+        content: 'STALE: this note predates the latest evidence and must be recovered from history.',
+        updatedAtSessionOffset: agent.session.seq,
+      }, new AbortController().signal)
       const compacted = await context.compaction.compactNow(agent, new AbortController().signal)
       expect(compacted).not.toBeNull()
       await send(agent, 'Continue the task after the window switch. Recover any needed evidence, verify the current source, and call fixture_commit exactly once with the supported decision and evidenceId.')

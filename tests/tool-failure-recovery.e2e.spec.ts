@@ -265,7 +265,7 @@ describe('ordinary tool failure inside a Prime program', () => {
     expect(observed.maxInFlight).toBe(2)
     expect(observed.reads.sort()).toEqual([READABLE_PATH, MISSING_PATH].sort())
     // Alpha.2 records each nested PTC settlement durably for presentation and replay.
-    const dispatches = alpha.events.filter(event => event.type === 'tool/code-dispatch')
+    const dispatches = alpha.events.filter(event => event.type === 'tool/ptc-dispatch')
     expect(dispatches.map(event => event.data.name)).toEqual(['probe_read', 'probe_read'])
     expect(dispatches.map(event => event.data.isError)).toEqual([false, true])
   }, 30_000)

@@ -5,7 +5,8 @@ import path from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
-import { decodeStorageRecord } from '@deepseek-ai/dsh-session'
+import { sessionFormatCatalog } from '@deepseek-ai/dsh-session-format-catalog'
+import { expandAssistantStream } from '@deepseek-ai/dsh-llm'
 
 const ATTRIBUTIONS = ['main', 'query', 'child', 'unknown']
 const OUTCOMES = ['success', 'failure', 'aborted', 'unknown']
@@ -43,89 +44,34 @@ export function aggregateModelUsage(records) {
 
 /** Convert one decoded Session log to call records. Query calls are not present in Session logs. */
 export function recordsFromSessionEvents(header, events, source = String(header?.id ?? 'session')) {
-  const child = header?.origin === 'subagent' && typeof header?.parentSession === 'string'
-  const attribution = child ? 'child' : 'main'
-  const inherited = Number.isSafeInteger(header?.seedLength) ? header.seedLength : 0
-  const own = events.filter(event => Number.isSafeInteger(event?.seq) && event.seq >= inherited)
-  const seenSeq = new Set()
-  const attempts = new Map()
-  const messages = new Map()
-  const pendingMessagePair = new Map()
+  const attribution = header?.origin === 'subagent' && typeof header?.parentSession === 'string' ? 'child' : 'main'
+  const inherited = Number.isSafeInteger(header?.inheritedEventCount) ? header.inheritedEventCount : 0
+  const records = new Map()
   let context = {}
-
-  const finalize = (stepKey, state, outcome) => {
-    if (state === undefined || state.touched !== true) return
-    const [turn, step] = stepKey.split(':')
-    const callId = `${source}:${turn}:${step}:${state.index}`
-    messages.set(callId, { callId, attribution, outcome, usage: state.usage, provider: context.provider, model: context.model })
-    pendingMessagePair.set(stepKey, callId)
-    attempts.set(stepKey, { index: state.index + 1 })
-  }
-
-  for (const event of own) {
-    const eventKey = `${source}:${event.seq}`
-    if (seenSeq.has(eventKey)) continue
-    seenSeq.add(eventKey)
+  for (const event of events) {
+    if (!Number.isSafeInteger(event?.seq) || event.seq < inherited) continue
     const data = isRecord(event.data) ? event.data : {}
-    if (event.type === 'request/context' && isRecord(event.data)) context = data
+    if (event.type === 'request/context') context = data
     if (event.type === 'request/header' && isRecord(data.header?.config)) context = { ...context, ...data.header.config }
-    const stepKey = `${data.turn}:${data.step}`
-    if (event.type === 'assistant/chunk' && isRecord(data.chunk)) {
-      const state = attempts.get(stepKey) ?? { index: 0 }
-      state.touched = true
-      if (data.chunk.type === 'usage') {
-        // DSH permits one usage chunk per stream. If a malformed/imported log
-        // repeats it without a retry boundary, the last report is the only
-        // observable terminal accounting for that still-single attempt.
-        state.usage = data.chunk.usage
+    if (event.type === 'assistant/message' || event.type === 'assistant/attempt') {
+      let usage = data.usage
+      let outcome = data.interrupted === true ? 'aborted' : event.type === 'assistant/message' ? 'success' : 'unknown'
+      for (const { chunk } of expandAssistantStream(data.stream ?? [])) {
+        if (chunk.type === 'usage') usage = chunk.usage
+        if (chunk.type === 'finish') {
+          const reason = typeof chunk.reason === 'string' ? chunk.reason : chunk.reason.kind
+          outcome = reason === 'error' ? 'failure' : reason === 'aborted' ? 'aborted' : ['stop', 'tool-calls', 'max-tokens'].includes(reason) ? 'success' : 'unknown'
+        }
       }
-      if (data.chunk.type === 'finish') {
-        const reason = isRecord(data.chunk.reason) ? data.chunk.reason.kind : data.chunk.reason
-        const outcome = reason === 'error' ? 'failure' : reason === 'aborted' ? 'aborted' : reason === 'stop' || reason === 'tool-calls' || reason === 'max-tokens' ? 'success' : 'unknown'
-        finalize(stepKey, state, outcome)
-      } else attempts.set(stepKey, state)
-    }
-    if (event.type === 'llm/retry-started') {
-      finalize(stepKey, attempts.get(stepKey), 'failure')
-      pendingMessagePair.delete(stepKey)
-    }
-    if (event.type === 'assistant/message') {
-      const outcome = data.interrupted === true ? 'aborted' : 'success'
-      const pending = attempts.get(stepKey)
-      if (pending?.touched === true) {
-        if (pending.usage === undefined) pending.usage = data.usage
-        finalize(stepKey, pending, outcome)
-        pendingMessagePair.delete(stepKey)
-      } else if (pendingMessagePair.has(stepKey)) {
-        const callId = pendingMessagePair.get(stepKey)
-        const record = messages.get(callId)
-        if (record !== undefined && record.usage === undefined && data.usage !== undefined) record.usage = data.usage
-        pendingMessagePair.delete(stepKey)
-      } else {
-        const state = pending ?? { index: 0 }
-        state.touched = true
-        state.usage = data.usage
-        finalize(stepKey, state, outcome)
-        pendingMessagePair.delete(stepKey)
-      }
-    }
-    if (event.type === 'turn/end') {
-      const reason = isRecord(data.reason) ? data.reason.kind : undefined
-      const outcome = reason === 'error' ? 'failure' : reason === 'aborted' || reason === 'interrupted' ? 'aborted' : 'unknown'
-      for (const [key, state] of attempts) {
-        if (!key.startsWith(`${data.turn}:`)) continue
-        finalize(key, state, outcome)
-        attempts.delete(key)
-        pendingMessagePair.delete(key)
-      }
+      const callId = source + ':' + event.seq
+      records.set(callId, { callId, attribution, outcome, usage, provider: context.provider, model: context.model })
     }
     if (event.type === 'compaction/summary' && data.llmStreamCall === true) {
-      const callId = `${source}:compaction:${String(data.compactionId)}`
-      messages.set(callId, { callId, attribution: 'unknown', outcome: 'success', usage: data.usage, provider: data.provider, model: data.model })
+      const callId = source + ':compaction:' + String(data.compactionId)
+      records.set(callId, { callId, attribution: 'unknown', outcome: 'success', usage: data.usage, provider: data.provider, model: data.model })
     }
   }
-  for (const [key, state] of attempts) finalize(key, state, 'unknown')
-  return [...messages.values()]
+  return [...records.values()]
 }
 
 /** Read one explicitly named DSH JSONL or multi-frame JSONL.zstd artifact. */
@@ -136,8 +82,10 @@ export async function readSessionLog(file) {
   if (lines.length === 0) throw new Error(`empty session log: ${file}`)
   const header = JSON.parse(lines[0])
   if (!isRecord(header) || header.type !== 'session') throw new Error(`first line is not a Session header: ${file}`)
-  const events = lines.slice(1).flatMap(line => decodeStorageRecord(JSON.parse(line)))
-  return { header, events }
+  const restore = sessionFormatCatalog.createRestore(header, { recovery: 'strict', validation: 'current' })
+  for (const line of lines.slice(1)) restore.decodeRow(JSON.parse(line))
+  const artifact = restore.finish()
+  return { header: { ...artifact.header, inheritedEventCount: artifact.inheritedEventCount }, events: artifact.events }
 }
 
 function normalizeRecord(raw) {

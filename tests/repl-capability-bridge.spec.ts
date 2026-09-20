@@ -84,36 +84,36 @@ describe('REPL capability bridge', () => {
     const slow = tools.slow!({ order: 1 })
     const fast = tools.fast!({ order: 2 })
     expect(h.events.map(event => event.type)).toEqual([
-      'tool/code-dispatch-start',
-      'tool/code-dispatch-start',
+      'tool/ptc-dispatch-start',
+      'tool/ptc-dispatch-start',
     ])
 
     releases.get('fast')!()
     await Promise.resolve()
     expect(h.events.map(event => event.type)).toEqual([
-      'tool/code-dispatch-start',
-      'tool/code-dispatch-start',
+      'tool/ptc-dispatch-start',
+      'tool/ptc-dispatch-start',
     ])
     releases.get('slow')!()
     await Promise.all([slow, fast])
 
     expect(h.events).toEqual([
       {
-        type: 'tool/code-dispatch-start',
+        type: 'tool/ptc-dispatch-start',
         data: {
           rootCallId: 'root-call', parentCallId: 'outer-call', subCallId: 'outer-call:repl:1',
           name: 'slow', arguments: { order: 1 },
         },
       },
       {
-        type: 'tool/code-dispatch-start',
+        type: 'tool/ptc-dispatch-start',
         data: {
           rootCallId: 'root-call', parentCallId: 'outer-call', subCallId: 'outer-call:repl:2',
           name: 'fast', arguments: { order: 2 },
         },
       },
       {
-        type: 'tool/code-dispatch',
+        type: 'tool/ptc-dispatch',
         data: {
           rootCallId: 'root-call', parentCallId: 'outer-call', subCallId: 'outer-call:repl:1',
           name: 'slow', arguments: { order: 1 }, isError: false,
@@ -121,7 +121,7 @@ describe('REPL capability bridge', () => {
         },
       },
       {
-        type: 'tool/code-dispatch',
+        type: 'tool/ptc-dispatch',
         data: {
           rootCallId: 'root-call', parentCallId: 'outer-call', subCallId: 'outer-call:repl:2',
           name: 'fast', arguments: { order: 2 }, isError: false,

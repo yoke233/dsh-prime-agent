@@ -9,6 +9,8 @@ export interface Config {
     stateDirectory: string;
     thresholdRatio?: number;
     retainTokens?: number;
+    /** Emit one task-note checkpoint reminder this many tokens before pressure compaction; omit to disable it. */
+    checkpointReminderTokens?: number;
     modelPolicies?: Pick<ModelCompactPolicyConfig, 'provider' | 'model' | 'thresholdRatio' | 'retainTokens'>[];
 }
 export declare const Config: z<Config>;

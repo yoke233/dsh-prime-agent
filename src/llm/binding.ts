@@ -11,7 +11,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { CodeBindingFunction, CodeJsonValue } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcBindingFunction, PtcJsonValue } from '@deepseek-ai/dsh-ptc-runtime'
 import { BlockAssembler, createUserMessage, type ContentBlock, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { modelTarget } from '../continual/command.js'
 
@@ -191,9 +191,9 @@ async function mapBounded<T, R>(
 }
 
 /** Build the leased sub-model members for one cell of `agent`, cancelled with `signal`. */
-export function createLlmFunctions(ctx: Context, agent: Agent, limits: LlmBindingLimits, signal: AbortSignal): Record<string, CodeBindingFunction> {
+export function createLlmFunctions(ctx: Context, agent: Agent, limits: LlmBindingLimits, signal: AbortSignal): Record<string, PtcBindingFunction> {
   return {
-    [LLM_QUERY_MEMBER]: async value => await generate(ctx, agent, parseQuery(value, limits), signal) as unknown as CodeJsonValue,
+    [LLM_QUERY_MEMBER]: async value => await generate(ctx, agent, parseQuery(value, limits), signal) as unknown as PtcJsonValue,
     [LLM_QUERY_MANY_MEMBER]: async (value) => {
       const request = parseBatch(value, limits)
       const replies = await mapBounded(request.prompts, limits.maxConcurrency, signal, async (prompt, index, batchSignal) => {
@@ -207,7 +207,7 @@ export function createLlmFunctions(ctx: Context, agent: Agent, limits: LlmBindin
           throw new Error(`prompts[${index}]: ${error instanceof Error ? error.message : String(error)}`)
         }
       })
-      return { replies } as unknown as CodeJsonValue
+      return { replies } as unknown as PtcJsonValue
     },
   }
 }

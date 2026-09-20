@@ -1,7 +1,7 @@
 /** Single-slot retention for NON-JSON live completions. */
 
 import { afterEach, describe, expect, it } from 'vitest'
-import type { CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcRunResult } from '@deepseek-ai/dsh-ptc-runtime'
 import { PersistentRealm } from '../src/realm/realm.js'
 import type { RealmBudgets, RealmCompletionRetentionLimits } from '../src/realm/realm.js'
 
@@ -39,7 +39,7 @@ interface OpaqueEnvelope {
   truncated: true
 }
 
-function envelopeOf(result: CodeRunResult): OpaqueEnvelope {
+function envelopeOf(result: PtcRunResult): OpaqueEnvelope {
   expect(result.error).toBeUndefined()
   const value = result.value as OpaqueEnvelope
   expect(value?.truncated).toBe(true)

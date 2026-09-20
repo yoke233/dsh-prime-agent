@@ -1,7 +1,7 @@
 /**
  * The host plane's trusted persistent-Realm service, mounted under the
  * uniquely named `ctx.primeRealmRuntime` service — deliberately NOT the
- * official `ctx.codeRuntime` seam, which the host keeps for the shipped
+ * official `ctx.ptcRuntime` seam, which the host keeps for the shipped
  * one-shot runtime.
  *
  * The seam is trusted: the caller hands over the Realm identity it has
@@ -15,7 +15,7 @@
  */
 import { Service } from '@deepseek-ai/cordis';
 import type { Context } from '@deepseek-ai/cordis';
-import type { CodeRunRequest } from '@deepseek-ai/dsh-code-runtime';
+import type { PtcRunRequest } from '@deepseek-ai/dsh-ptc-runtime';
 import type { PrimeRunResult, RealmCompletionProjectionLimits, RealmCompletionRetentionLimits } from './protocol.js';
 import type { RealmBudgets, RealmMetrics } from './realm.js';
 /** Everything the runtime needs that is not a per-run input. */
@@ -92,7 +92,7 @@ export declare class PrimeRealmRuntime extends Service {
      * @returns the run's outcome per the seam contract; rejects only on caller
      *   misuse (disposed runtime, unusable Realm identity).
      */
-    run(realmId: string, request: CodeRunRequest): Promise<PrimeRunResult>;
+    run(realmId: string, request: PtcRunRequest): Promise<PrimeRunResult>;
     /** Admit the run into its realm and append a fresh-namespace notice when needed. */
     private execute;
     /**

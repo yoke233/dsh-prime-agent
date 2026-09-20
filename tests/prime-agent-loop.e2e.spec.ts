@@ -9,7 +9,6 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { installLlmReplay, type ReplayEntry } from '@deepseek-ai/dsh-llm-replay'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LocalSpillStore from '@deepseek-ai/dsh-spill-local'
 import * as SpillPolicy from '@deepseek-ai/dsh-spill-policy'
 import * as primeAgent from '../src/index.js'
@@ -80,7 +79,6 @@ describe('Prime realm across deterministic agent-loop turns', () => {
 
     ctx = new Context()
     // Native tool presentation: the Prime plugin itself owns the `repl` surface.
-    await ctx.plugin(SessionProjectionRegistry)
     await mountAgentLoopTestDependencies(ctx)
     await ctx.plugin(LocalSpillStore, { root: join(root, 'spill') })
     await ctx.plugin(SpillPolicy, { maxInlineBytes: 1024 })
@@ -98,7 +96,7 @@ describe('Prime realm across deterministic agent-loop turns', () => {
       providers: [{ id: 'prime-e2e', models: [{ id: 'scripted' }] }],
     })
 
-    const agent = ctx.agentLoop.create(SessionId('prime-agent-loop'), {
+    const agent = await ctx.agentLoop.create(SessionId('prime-agent-loop'), {
       provider: 'prime-e2e',
       model: 'scripted',
     })
@@ -150,7 +148,7 @@ describe('Prime realm across deterministic agent-loop turns', () => {
 
     // No handshake/bootstrap dispatch exists any more: the realm is routed by
     // the plugin's own identity resolution, and nothing probes a bootstrap tool.
-    const dispatches = agent.session.snapshotEvents().filter(event => event.type === 'tool/code-dispatch')
+    const dispatches = agent.session.snapshotEvents().filter(event => event.type === 'tool/ptc-dispatch')
     expect(dispatches).toHaveLength(0)
 
     const final = agent.session.snapshotEvents().findLast(event => event.type === 'assistant/message')

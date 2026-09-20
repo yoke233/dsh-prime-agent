@@ -72,7 +72,7 @@ Prime preset 在独立 `terminals` realm 中装配官方 `dsh-terminal` registry
 
 ## 唯一模型控制面
 
-Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt assembly 先走完整流程，再在 `next()` 之后把 tools 列表过滤到只剩 `repl`，同时删除固定 `harness:identity` 和名称以 `tool:` 开头的隐藏能力独立提示：identity 只陈述实现身份，不提供操作事实；工具提示按外层直接调用编写，会与 Prime 的唯一 `repl` 路由冲突。`refine`、Subagent、Jobs、文件系统、MCP 及其他工具不进入模型 schema，只作为 cell 内预加载的隐藏绑定出现，其生成 declaration/JSDoc 是模型使用能力的唯一工具级契约。模型直接调用 `repl` 之外的任何工具都会被 guard 拒绝，并返回包含被拒工具名及对应 `tools.<name>(args)` 恢复路径的纠错消息；组合不满足该不变量时，assembly 明确失败。Prime preset 的 `prime-tool-restrictions.config.deny` 声明要排除的 base 全局工具，scope-local 通用插件只负责调用 `ctx.tools.restrict()`：当前排除的 `str_replace_editor` 和 `read`/`write`/`edit`/`apply_patch` 重叠，`workflow` 与 `ralph` 均不作为 Prime 编排入口；spawn/fork Subagent 仍复用内部 workflow provider，但该 backend 不向 Prime 暴露 `workflow` 工具。
+Prime Agent scope 的模型 catalog 只含一个执行工具 `repl`。prompt assembly 先走完整流程，再在 `next()` 之后把 tools 列表过滤到只剩 `repl`，同时删除固定 `harness:identity` 和名称以 `tool:` 开头的隐藏能力独立提示：identity 只陈述实现身份，不提供操作事实；工具提示按外层直接调用编写，会与 Prime 的唯一 `repl` 路由冲突。`refine`、Subagent、Jobs、文件系统、MCP 及其他工具不进入模型 schema，只作为 cell 内预加载的隐藏绑定出现，其生成 declaration/JSDoc 是模型使用能力的唯一工具级契约。模型直接调用 `repl` 之外的任何工具都会被 guard 拒绝，并返回包含被拒工具名及对应 `tools.<name>(args)` 恢复路径的纠错消息；组合不满足该不变量时，assembly 明确失败。Prime preset 的 `prime-tool-restrictions.config.deny` 声明要排除的 base 全局工具，scope-local 通用插件只负责调用 `ctx.tools.restrict()`：当前排除通用 `workflow`；上游已移除 `str_replace_editor` 并默认关闭 `ralph`；spawn/fork Subagent 仍复用内部 workflow provider，但该 backend 不向 Prime 暴露 `workflow` 工具。
 
 `repl` 的参数是单个 `code` 字符串。插件把官方“一次 async 函数”说明改写成持久 REPL cell 说明：
 
@@ -97,7 +97,7 @@ MCP 同样不进入 Realm runtime。profile 显式安装 DSH Host MCP client 后
 
 多文件写入是按 patch 顺序执行的多个正式 DSH `write` 调用，不是 batch transaction。后续 write 失败时工具返回 `PARTIAL_APPLY` 并列出此前成功路径，不伪装成成功，也不宣称自动回滚或 crash-atomic。当前 DSH 没有受策略保护且可组合的 delete/rename seam，因此本插件不通过 Node `fs`、shell、`git apply` 或空文件写入模拟这些操作。
 
-`apply_patch` 在工具定义 seam 上实现标准 `DiffCallView` / `DiffResultView`。调用阶段从 patch 解析出按文件、按 hunk 排列的 `{ path, oldText, newText }` 与可打开位置；成功结果优先使用持久化 `presentationMeta`，nested dispatch 没有 result metadata 时从同一 durable patch 参数重建等价视图。Prime REPL bridge 不发明独立 UI metadata，而是与官方 `run_code` 一样，在真实开始与结算时写入 `tool/code-dispatch-start` / `tool/code-dispatch`，携带 root/parent/sub-call identity、JSON arguments、`content` 与 `isError`。官方 Web 直接把这些事件折叠成递归 `subCalls`；TUI 通过同一协议和工具 presenter 渲染。失败、旧日志或无法解析的参数仍走 generic error fallback，绝不把失败意图渲染成已应用差异。
+`apply_patch` 在工具定义 seam 上实现标准 `DiffCallView` / `DiffResultView`。调用阶段从 patch 解析出按文件、按 hunk 排列的 `{ path, oldText, newText }` 与可打开位置；成功结果优先使用持久化 `presentationMeta`，nested dispatch 没有 result metadata 时从同一 durable patch 参数重建等价视图。Prime REPL bridge 不发明独立 UI metadata，而是与官方 `run_code` 一样，在真实开始与结算时写入 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`，携带 root/parent/sub-call identity、JSON arguments、`content` 与 `isError`。官方 Web 直接把这些事件折叠成递归 `subCalls`；TUI 通过同一协议和工具 presenter 渲染。失败、旧日志或无法解析的参数仍走 generic error fallback，绝不把失败意图渲染成已应用差异。
 
 `edit` 仍保留：它的窄 interface 对一次 literal replacement 更省 token、更容易审阅，也能保持 `old_string` 唯一匹配约束；`apply_patch` 用于相关的多 hunk 或多文件 Add/Update。`write` 只用于有意替换完整文件。模型 policy 按这三个粒度选择工具，不做 alias 或兼容 shim。
 
@@ -131,7 +131,7 @@ Prime agent-plane 组合不挂载 Plan Mode。它用 `dsh-prime-agent/context-ma
 
 ### 可回取历史与任务笔记
 
-`src/context/history.ts` 使用 owning `Agent.session` 的 `eventAt` 读取原始 append-origin 消息与 `tool/code-dispatch`，不从已缩减 surface 反推历史，也不扫描其他 Session 或直接打开 `~/.dsh` 日志文件。已授权的 fork 历史属于 child 的 Session 前缀，可由 child 回查；其他会话不可见。返回保留 role/source kind 的内容 JSON 投影，排除私有 reasoning 和 provider replay state；请求头、授权记录等非对话事件不可读。嵌套日志已 spill 时只回原有 locator，图片保持附件引用，不复制外部 artifact 或保证其永久存活。
+`src/context/history.ts` 使用 owning `Agent.session` 的 `eventAt` 读取原始 append-origin 消息与 `tool/ptc-dispatch`，不从已缩减 surface 反推历史，也不扫描其他 Session 或直接打开 `~/.dsh` 日志文件。已授权的 fork 历史属于 child 的 Session 前缀，可由 child 回查；其他会话不可见。返回保留 role/source kind 的内容 JSON 投影，排除私有 reasoning 和 provider replay state；请求头、授权记录等非对话事件不可读。嵌套日志已 spill 时只回原有 locator，图片保持附件引用，不复制外部 artifact 或保证其永久存活。
 
 `tools.history_search({ query?, before?, limit? })` 使用大小写不敏感的字面量查询，默认从最新向前扫描，单页最多扫描 1000 个事件、返回 10 条（上限 20），每条 preview 最多 240 字符。`nextBefore` 是下一页的排他事件偏移；空页不等于耗尽，只有 null 才表示到达日志起点。`tools.history_read({ seq, offset?, limit? })` 返回精确 JSON 字符切片，默认及上限 8000 字符；`nextOffset` 非 null 时继续读取，拼完后才解析。字符单位是 JavaScript UTF-16 字符串索引，seq 来自同 Session 搜索或目录。
 
@@ -139,11 +139,11 @@ Prime agent-plane 组合不挂载 Plan Mode。它用 `dsh-prime-agent/context-ma
 
 部分 TUI 组合会在挂载 Agent preset 的同时保留 base Host compactor；Host listener 注册更早时会先执行旧摘要，甚至在失败后才轮到 Prime。context-manager 因而在同一个 Agent-scope `ctx` 上额外注册 `prepend` pressure pass，并捕获刚挂载的隔离 `HistoryWindowEngine`：Prime 成功替换后，后续 Host 与引擎自带的 pressure listener 重新计量并跳过；Prime 失败时仍调用 `next()`，保留继承链作为可用性回退。作用域过滤使该顺序只覆盖 Prime Agent，非 Prime Session 继续使用 Host 行为。引擎自带的 `auto` 保持开启，因此官方 provider-overflow recovery 未被复制或关闭；本次顺序修复只覆盖 step-boundary pressure。
 
-`tools.notes_read()` / `tools.notes_write({ revision, content })` 使用 `src/context/notes.ts` 的单份 Session 任务笔记，6000 字符硬上限。空内容用于清空；写入要求读到的 revision，以 DSH `withFileLock` 串行跨进程修改、锁内复查 revision，再由 `writeFileAtomic` 发布。Session id 哈希构造文件名，路径不接收模型输入；文件位于配置 `stateDirectory/context-notes`，默认 preset 与 Prime runtime 的 stateDirectory 表达式一致。笔记独立于 Realm、continual store 和工作区文件；child 默认空笔记，不继承 parent 的独立文件。取消发生在原子发布期间时仍可能已经写入，调用方须先回读；底层原子写不承诺掉电 fsync 耐久性。
+`tools.notes_read()` / `tools.notes_write({ revision, content })` 使用 `src/context/notes.ts` 的单份 Session 任务笔记，6000 字符硬上限。它是可替换的当前恢复快照，不是追加式 chronology；原始顺序仍由 Session history 保存。空内容用于清空；写入要求读到的 revision，以 DSH `withFileLock` 串行跨进程修改、锁内复查 revision，再由 `writeFileAtomic` 发布。Host 同时记录调用开始时的排他 Session offset 为 `updatedAtSessionOffset`；模型不能提交该字段，它只表示该 revision 的写入位置而不背书内容，也不与缓冲发布的 Session 日志形成事务；崩溃恢复后该 offset 可能暂时超过已恢复日志。旧文件缺少字段时读作 null，并在下一次 CAS 写入升级。Session id 哈希构造文件名，路径不接收模型输入；文件位于配置 `stateDirectory/context-notes`，默认 preset 与 Prime runtime 的 stateDirectory 表达式一致。笔记独立于 Realm、continual store 和工作区文件；child 默认空笔记，不继承 parent 的独立文件。取消发生在原子发布期间时仍可能已经写入，调用方须先回读；底层原子写不承诺掉电 fsync 耐久性。
 
 `tools.new_context({})` 只登记本进程内、按 Session 隔离的待处理请求，返回 queued；下一 `agent/pre-step` 在整个 cell 及其工具结果结算后处理。若 DSH 自动处理已替换窗口，就不再重复；否则调用公开 `compactIfNeeded(..., 'context-overflow', ...)` 使用 DSH 最小安全尾部选择。没有可缩减范围或范围太小时保留当前窗口并提供当次通知，其他错误保持显式失败。排队请求不跨进程恢复，已保存的笔记可恢复；它不结束 turn、不创建新 Session、不销毁 Realm。
 
-context-manager 配置：`stateDirectory` 必填；`thresholdRatio` 默认 0.8、`retainTokens` 默认 16000，`modelPolicies` 复用 DSH 精确路由策略的校验。Prime preset 为 `deepseek-official/deepseek-v4-flash` 配置 thresholdRatio 0.3；正常压力下 recent-tail 预算由配对边界修正，主动切换和真正溢出按 DSH 的最小安全尾部策略处理。没有关闭自动生命周期后留着无人处理的溢出，也不额外调用学习或摘要模型。
+context-manager 配置：`stateDirectory` 必填；`thresholdRatio` 默认 0.8、`retainTokens` 默认 16000，`modelPolicies` 复用 DSH 精确路由策略的校验。`checkpointReminderTokens` 未配置时关闭，配置值至少为 512；启用后，Prime-first pressure pass 先运行，继承的 Basic/Host listener 链结算后再根据最终 surface、最近已解析的 routed request context、精确 model policy、模型容量和本 step 待进入消息计算 threshold headroom。只有提醒消息本身仍装得进该 headroom 时，才把它作为最后一条 admitted message 返回，确保它跟在触发本 step 的用户/动态上下文之后进入下一次模型请求，而不会在同一 pre-step 被压缩掉。专用 plugin source 与当前 model-visible surface 上的 Session 自有事件共同恢复“每工作窗口至多一次”状态；局部 replacement 未移除旧提醒时不会重复注入，fork 也不继承 parent 的抑制状态。提醒不延迟或绕过 DSH pressure compaction，突发大输出直接跨过阈值时仍按原流程切窗。Prime preset 配置 16384 作为保守的阈值前 lead（不是阈值后的 fallback buffer），且为 `deepseek-official/deepseek-v4-flash` 配置 thresholdRatio 0.3；正常压力下 recent-tail 预算由配对边界修正，主动切换和真正溢出按 DSH 的最小安全尾部策略处理。没有关闭自动生命周期后留着无人处理的溢出，也不额外调用学习或摘要模型。
 
 固定 policy 把变量复用限制为输入与来源仍有效；编辑、构建、外部写入或用户纠正后，刷新受影响证据并重新判断派生索引和计划。重要进展与用户纠正时更新现有任务笔记，主动切窗前保持笔记当前；自动 checkpoint 后若笔记为空或过时，使用历史原文恢复并核对当前目标与约束。Host 不自动撰写任务笔记，目录也不替模型选择证据。新上下文工具的细节仅放在生成 SDK；policy 只保留跨工具的恢复与材料信任说明。入口示例以保留来源、关键例外和未决项为准，不把单调用或输出压缩比当作失败判据。
 
@@ -161,7 +161,7 @@ context-manager 配置：`stateDirectory` 必填；`thresholdRatio` 默认 0.8�
 
 ### 子模型调用 `agents.query` / `agents.queryMany`
 
-`agents` 命名空间在委派别名之外还带两个私有成员：`agents.query({ prompt, system?, maxTokens? })` 返回 `{ text, truncated }`，`agents.queryMany({ prompts, system?, maxTokens? })` 按输入顺序返回 `{ replies }`。它们与 `refine` 走同一条私有 binding 路径：不注册为 DSH tool、不进入 `tools.*`/`ToolArgsMap`、不产生 `tool/code-dispatch` 记录，但写进生成的 `agents` 声明及其 JSDoc（上游 Prime 明令不得发明未声明的 wrapper）。每次调用用 `ctx.llm.stream()` 对当前 Agent 的路由（最近一次请求 envelope，否则创建选项）发起无工具的一次性请求，`sessionId` 归属当前 Session，取消信号来自本次 cell；回复至 `maxTokens` 截断时返回 `truncated: true` 而不是失败。预算由插件 `llm` 配置约束：单条 prompt/system 上限 `maxPromptChars`（默认 200,000 字符）、单批 `maxBatchSize`（默认 20）、批内并发 `maxConcurrency`（默认 8）、`maxTokens` 默认且上限 4096；越界在调用模型前拒绝，批内单条失败带下标整批拒绝。这是 RLM 范式里「对 N 个 chunk 各做一次无状态子调用并把结果收进变量」的原语；与 `agents.spawn` 的分工由声明的 JSDoc 说明：需要工具或多步推理的子任务用 `spawn`，对已在变量里的文本做语义归约用 `query`。它不经过 approval（不是工具调用），计费归当前 Session；UI 当前看不到这些子调用，是已知缺口。bridge 只允许把这类额外成员加到 `agents` 上，且不得与委派别名同名。
+`agents` 命名空间在委派别名之外还带两个私有成员：`agents.query({ prompt, system?, maxTokens? })` 返回 `{ text, truncated }`，`agents.queryMany({ prompts, system?, maxTokens? })` 按输入顺序返回 `{ replies }`。它们与 `refine` 走同一条私有 binding 路径：不注册为 DSH tool、不进入 `tools.*`/`ToolArgsMap`、不产生 `tool/ptc-dispatch` 记录，但写进生成的 `agents` 声明及其 JSDoc（上游 Prime 明令不得发明未声明的 wrapper）。每次调用用 `ctx.llm.stream()` 对当前 Agent 的路由（最近一次请求 envelope，否则创建选项）发起无工具的一次性请求，`sessionId` 归属当前 Session，取消信号来自本次 cell；回复至 `maxTokens` 截断时返回 `truncated: true` 而不是失败。预算由插件 `llm` 配置约束：单条 prompt/system 上限 `maxPromptChars`（默认 200,000 字符）、单批 `maxBatchSize`（默认 20）、批内并发 `maxConcurrency`（默认 8）、`maxTokens` 默认且上限 4096；越界在调用模型前拒绝，批内单条失败带下标整批拒绝。这是 RLM 范式里「对 N 个 chunk 各做一次无状态子调用并把结果收进变量」的原语；与 `agents.spawn` 的分工由声明的 JSDoc 说明：需要工具或多步推理的子任务用 `spawn`，对已在变量里的文本做语义归约用 `query`。它不经过 approval（不是工具调用），计费归当前 Session；UI 当前看不到这些子调用，是已知缺口。bridge 只允许把这类额外成员加到 `agents` 上，且不得与委派别名同名。
 
 `queryMany` 保持整批成功或失败的契约。每批持有独立取消控制器：首个失败停止队列领取，取消同批在途请求，等待所有已启动请求完成清理后才报告原始失败下标；父 cell 取消会转发并在收尾后报告取消。结束时移除父取消监听，批间不会相互取消，失败后可在同一 cell 捕获错误并发起修正后的调用。已完成项不作为部分结果返回。取消是协作式的，底层 adapter 若忽略 signal，收尾仍需等它自然结束，已产生的 provider 用量也不会撤销。
 
@@ -231,7 +231,7 @@ handoff file 是写入时刻的快照；“写后不改”由 policy 约束，�
 
 ## Continual Harness
 
-`refine` 是控制面之后的次级学习层。Prime scope 向 DSH Skill Registry 注册随包、model-invocable/user-non-invocable 的 `refine` provider，并增加 scoped filesystem provider；Host 唯一的 `dsh-tool-skill` 注册负责在首个模型请求前发布合并目录并按需加载 `skills/refine/SKILL.md`。Prime preset 不注册第二个同名 tool-skill，避免 scoped tool shadow 令 Host 的 visibility-matched pre-step hook 跳过目录。Skill 说明 Realm 预加载的 leased `refine.status()` / `refine.run(instructions?, options?)` 客户端。该 namespace 经 Realm 私有 Host binding 调度，不注册 DSH tool、不进入 `tools.*` 或生成 SDK，也不写入 `tool/code-dispatch`。模型不会获得 store 的 inspect/apply/rollback、revision、transaction 或 edit schema。
+`refine` 是控制面之后的次级学习层。Prime scope 向 DSH Skill Registry 注册随包、model-invocable/user-non-invocable 的 `refine` provider，并增加 scoped filesystem provider；Host 唯一的 `dsh-tool-skill` 注册负责在首个模型请求前发布合并目录并按需加载 `skills/refine/SKILL.md`。Prime preset 不注册第二个同名 tool-skill，避免 scoped tool shadow 令 Host 的 visibility-matched pre-step hook 跳过目录。Skill 说明 Realm 预加载的 leased `refine.status()` / `refine.run(instructions?, options?)` 客户端。该 namespace 经 Realm 私有 Host binding 调度，不注册 DSH tool、不进入 `tools.*` 或生成 SDK，也不写入 `tool/ptc-dispatch`。模型不会获得 store 的 inspect/apply/rollback、revision、transaction 或 edit schema。
 
 `run` 将请求按 Agent 保存在内存中并立即返回；同一 turn 的后续调用覆盖待处理请求。`agent/turn-stopping` serial listener 取出请求，运行同一个无工具 refinement planner；成功、no-op 或失败结果都通过 `agent.steer()` 送回当前 Agent，使下一步使用重建后的 prompt。一次 refinement 恢复后的同 turn 重复调度被拒绝，Agent 进入 idle 后重新开放。插件卸载或 Session 消失时，WeakMap/WeakSet 不产生独立持久任务。
 
@@ -298,3 +298,5 @@ runtime row 与 Prime preset 的 `stateDirectory` 必须相同，否则身份记
 仓库测试覆盖：Realm identity 稳定解析与持久化、多个 host 共享状态、同 Realm 跨进程互斥与接管、Session 隔离、跨 cell binding 连续性、调用顺序、binding lease、host-call 预算、超时/abort/Worker 换代、namespace-loss notice、completion 单槽预算、输出上限与 Unicode、工具失败恢复、approval escalation、Subagent Job 编排、官方 report 组合边界、preset 落位和 bundle patch 结构。
 
 Prime REPL 的固定提示、completion metadata 与 notebook renderer 契约见 [Prime REPL Notebook 呈现规格](repl-notebook-presentation.zh.md)；上游行为映射与同步流程见 [Prime Agent 学习笔记](prime-agent-learnings.md) 和 [上游同步与差异对照手册](upstream-sync.zh.md)。
+
+当前 DSH 依赖基线为 `0.1.6-alpha.2`。官方 one-shot 运行时使用 `ctx.ptcRuntime`；Prime 仍使用独立 Realm 服务。DSH summarizer 输入额外前置保留的 system head，Prime 计算可移除内容时排除该项，避免将小窗口误判为值得缩减。

@@ -4,11 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { CodeBindingErrorClass, CodeBindingFunction, CodeBindingNamespace, CodeJsonValue, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcBindingErrorClass, PtcBindingFunction, PtcBindingNamespace, PtcJsonValue, PtcRunResult } from '@deepseek-ai/dsh-ptc-runtime'
 import * as primeRuntime from '../src/runtime.js'
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- test bindings receive already-validated JSON */
-type Binding = (args: any) => Promise<CodeJsonValue>
+type Binding = (args: any) => Promise<PtcJsonValue>
 
 const RETENTION_CONFIG_FIELDS = [
   'maxCompletionRetainedBytes',
@@ -64,35 +64,35 @@ function realmId(seed: string): string {
 }
 
 /** One `tools` namespace, optionally with a frozen error-class descriptor. */
-function toolsBindings(functions: Record<string, Binding>, errorClass?: CodeBindingErrorClass): CodeBindingNamespace[] {
+function toolsBindings(functions: Record<string, Binding>, errorClass?: PtcBindingErrorClass): PtcBindingNamespace[] {
   return [errorClass === undefined
-    ? { global: 'tools', functions: functions as Record<string, CodeBindingFunction> }
-    : { global: 'tools', functions: functions as Record<string, CodeBindingFunction>, errorClass }]
+    ? { global: 'tools', functions: functions as Record<string, PtcBindingFunction> }
+    : { global: 'tools', functions: functions as Record<string, PtcBindingFunction>, errorClass }]
 }
 
-function bindingNamespace(global: string, functions: Record<string, Binding>): CodeBindingNamespace {
-  return { global, functions: functions as Record<string, CodeBindingFunction> }
+function bindingNamespace(global: string, functions: Record<string, Binding>): PtcBindingNamespace {
+  return { global, functions: functions as Record<string, PtcBindingFunction> }
 }
 
 /** The runtime's own namespace notices, separate from program output. */
-function notices(result: CodeRunResult): string[] {
+function notices(result: PtcRunResult): string[] {
   return result.logs.filter(line => line.startsWith('[prime-realm] '))
 }
 
 /** The single namespace notice, or `undefined` when this run needs no notice. */
-function notice(result: CodeRunResult): string | undefined {
+function notice(result: PtcRunResult): string | undefined {
   const lines = notices(result)
   return lines.length === 1 ? lines[0] : undefined
 }
 
-function expectFreshNamespaceNotice(result: CodeRunResult): void {
+function expectFreshNamespaceNotice(result: PtcRunResult): void {
   expect(notices(result)).toHaveLength(1)
   expect(notice(result)).toContain('namespace')
   expect(notice(result)).toContain('empty')
   expect(notice(result)).not.toContain('lost')
 }
 
-function expectLostNamespaceNotice(result: CodeRunResult): void {
+function expectLostNamespaceNotice(result: PtcRunResult): void {
   expect(notices(result)).toHaveLength(1)
   expect(notice(result)).toContain('namespace')
   expect(notice(result)).toContain('lost')
@@ -243,7 +243,7 @@ describe('prime realm runtime routing', () => {
   it('serializes cells for one realm in run call order', async () => {
     await makeRoot('dsh-prime-admission-order-')
     const ctx = await startHost()
-    const parked = deferred<CodeJsonValue>()
+    const parked = deferred<PtcJsonValue>()
 
     const first = ctx.primeRealmRuntime.run(realmId('session-ordered'), {
       program: 'globalThis.order = ["first"]\nawait tools.park({})',
@@ -263,7 +263,7 @@ describe('prime realm runtime routing', () => {
   it('does not serialize execution across different realms', async () => {
     await makeRoot('dsh-prime-cross-realm-order-')
     const ctx = await startHost()
-    const parked = deferred<CodeJsonValue>()
+    const parked = deferred<PtcJsonValue>()
     const alphaStarted = deferred<void>()
 
     const alpha = ctx.primeRealmRuntime.run(realmId('session-order-alpha'), {
@@ -435,7 +435,7 @@ describe('prime realm abort semantics', () => {
   it('cancels only the queued cell whose signal fires', async () => {
     await makeRoot('dsh-prime-abort-queued-')
     const ctx = await startHost()
-    const parked = deferred<CodeJsonValue>()
+    const parked = deferred<PtcJsonValue>()
     const controller = new AbortController()
 
     const held = ctx.primeRealmRuntime.run(realmId('session-abort-queued'), {
@@ -624,7 +624,7 @@ describe('realm pool governance', () => {
   it('refuses admission rather than reclaiming a realm with a run in flight', async () => {
     await makeRoot('dsh-prime-admission-')
     const ctx = await startHost({ maxActiveRealms: 1 })
-    const parked = deferred<CodeJsonValue>()
+    const parked = deferred<PtcJsonValue>()
 
     const held = ctx.primeRealmRuntime.run(realmId('session-held'), {
       program: 'await tools.park({})',
@@ -699,7 +699,7 @@ describe('realm pool governance', () => {
   it('refuses binding calls past the in-flight ceiling', async () => {
     await makeRoot('dsh-prime-parallel-')
     const ctx = await startHost({ maxParallelHostCallsPerRun: 1 })
-    const parked = deferred<CodeJsonValue>()
+    const parked = deferred<PtcJsonValue>()
 
     const running = ctx.primeRealmRuntime.run(realmId('session-parallel'), {
       program: `
@@ -781,17 +781,22 @@ describe('cross-process Realm ownership', () => {
 describe('host composition', () => {
   it('mounts beside the official code runtime without touching it', async () => {
     await makeRoot('dsh-prime-coexists-')
-    const { default: WorkerThreadCodeRuntime } = await import('@deepseek-ai/dsh-code-runtime-worker-thread')
+    const { default: WorkerThreadCodeRuntime } = await import('@deepseek-ai/dsh-ptc-runtime-node')
     const ctx = new Context()
     contexts.push(ctx)
+    await ctx.plugin((await import('@deepseek-ai/dsh-session-projection')).default)
+    await ctx.plugin((await import('@deepseek-ai/dsh-fs-sandbox')).default, { cwd: root! })
+    await ctx.plugin((await import('@deepseek-ai/dsh-subprocess-local')).default)
+    await ctx.plugin((await import('@deepseek-ai/dsh-sandbox-local')).default)
+    await ctx.plugin((await import('@deepseek-ai/dsh-sandbox-policy')).default, { mode: 'danger-full-access', workspaceRoot: root! })
     await ctx.plugin(WorkerThreadCodeRuntime, {})
     await ctx.plugin(primeRuntime, { stateDirectory: stateDirectory() })
 
     // The official one-shot runtime keeps its shipped semantics untouched.
-    const first = await ctx.codeRuntime.run({ program: 'globalThis.carried = "one-shot"\nreturn 1', bindings: [] })
+    const first = await ctx.ptcRuntime.run(ctx.ptcRuntime.resolve({ program: 'globalThis.carried = "one-shot"\nreturn 1', bindings: [] }))
     expect(first.error).toBeUndefined()
     expect(first.value).toBe(1)
-    const second = await ctx.codeRuntime.run({ program: 'return typeof globalThis.carried', bindings: [] })
+    const second = await ctx.ptcRuntime.run(ctx.ptcRuntime.resolve({ program: 'return typeof globalThis.carried', bindings: [] }))
     expect(second.error).toBeUndefined()
     expect(second.value).toBe('undefined')
 
@@ -861,7 +866,7 @@ describe('runtime disposal', () => {
   it('settles a run admitted around teardown with an abort, leaving no orphan worker', async () => {
     await makeRoot('dsh-prime-dispose-race-')
     const ctx = await startHost()
-    const gate = deferred<CodeJsonValue>()
+    const gate = deferred<PtcJsonValue>()
 
     // The program cannot finish before teardown: either the admission loses the
     // race and resolves 'runtime disposed', or the realm was built and its
@@ -884,7 +889,7 @@ describe('runtime disposal', () => {
   it('settles a run that was in flight when the runtime was disposed', async () => {
     await makeRoot('dsh-prime-dispose-inflight-')
     const ctx = await startHost()
-    const parked = deferred<CodeJsonValue>()
+    const parked = deferred<PtcJsonValue>()
 
     const held = ctx.primeRealmRuntime.run(realmId('session-inflight'), {
       program: 'await tools.park({})',

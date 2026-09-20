@@ -162,8 +162,8 @@ function expectDispatchEvents(events: LoggedEvent[], names: string[]): void {
     const name = typeof data === 'object' && data !== null && 'name' in data ? data.name : undefined
     return { type: event.type, name }
   })).toEqual(names.flatMap(name => [
-    { type: 'tool/code-dispatch-start', name },
-    { type: 'tool/code-dispatch', name },
+    { type: 'tool/ptc-dispatch-start', name },
+    { type: 'tool/ptc-dispatch', name },
   ]))
 }
 
@@ -334,7 +334,7 @@ describe('scenario 2: oversized outer completion', () => {
     // This fixture has no agent loop, so it must not pretend a durable outer
     // `tool/result` was committed; the bridge appends no dispatch projections.
     expect(events.map(event => event.type).filter(type => type.startsWith('tool/result'))).toEqual([])
-    expect(events.filter(event => event.type === 'tool/code-dispatch')).toEqual([])
+    expect(events.filter(event => event.type === 'tool/ptc-dispatch')).toEqual([])
   })
 
   it('spills notebook text without adding a JSON escape layer to Windows paths', async () => {

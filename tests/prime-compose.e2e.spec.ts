@@ -93,7 +93,23 @@ async function bootPrimeHost(includeOfficialRuntime: boolean): Promise<{
   await writeFile(patchPath, (await readFile(PATCH_PATH, 'utf8'))
     .replace('name: dsh-prime-agent/runtime', `name: ${PRIME_RUNTIME_URL}`))
   const officialRuntime = includeOfficialRuntime
-    ? "- id: code-runtime\n  name: '@deepseek-ai/dsh-code-runtime-worker-thread'\n"
+    ? `- id: session-projection
+  name: '@deepseek-ai/dsh-session-projection'
+- id: fs-sandbox
+  name: '@deepseek-ai/dsh-fs-sandbox'
+  config:
+    cwd: ${JSON.stringify(hostRoot)}
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-local'
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
+- id: sandbox-policy
+  name: '@deepseek-ai/dsh-sandbox-policy'
+  config:
+    mode: danger-full-access
+- id: ptc-runtime
+  name: '@deepseek-ai/dsh-ptc-runtime-node'
+`
     : ''
   await writeFile(configPath, `
 - id: system-prompt
@@ -150,8 +166,8 @@ describe('Prime host patch composition', () => {
     // The patch is a pure insert: the official row stays enabled and mounted,
     // and the Prime row lands beside it.
     expect(rows).toContainEqual({
-      id: 'code-runtime',
-      name: '@deepseek-ai/dsh-code-runtime-worker-thread',
+      id: 'ptc-runtime',
+      name: '@deepseek-ai/dsh-ptc-runtime-node',
       disabled: false,
       mounted: true,
     })
@@ -161,6 +177,8 @@ describe('Prime host patch composition', () => {
       disabled: false,
       mounted: true,
     })
+
+    expect(ctx.ptcRuntime).toBeDefined()
 
     // The model-facing REPL persists state while the official runtime row remains mounted independently.
     const alpha = testAgent('compose-alpha', hostRoot)
@@ -228,14 +246,14 @@ describe('Prime host patch composition', () => {
       mounted: Boolean(entry.fiber),
     }))
 
-    expect(rows.some(row => row.id === 'code-runtime')).toBe(false)
+    expect(rows.some(row => row.id === 'ptc-runtime')).toBe(false)
     expect(rows).toContainEqual({
       id: 'prime-code-runtime',
       name: PRIME_RUNTIME_URL,
       mounted: true,
     })
 
-    // The trusted realm service works without any codeRuntime provider: the
+    // The trusted realm service works without any ptcRuntime provider: the
     // official one-shot seam is nobody's business here.
     const seeded = await ctx.primeRealmRuntime.run(realmId('compose-tui'), {
       program: 'const retained = 20260825; retained',

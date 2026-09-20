@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { CodeBindingFunction } from '@deepseek-ai/dsh-code-runtime'
+import type { PtcBindingFunction } from '@deepseek-ai/dsh-ptc-runtime'
 import LlmRuntime, { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { createLlmFunctions, LLM_BINDING_DEFAULTS, LLM_NAMESPACE_DOC, renderLlmMembers, type LlmBindingLimits } from '../src/llm/binding.js'
@@ -48,7 +48,7 @@ afterEach(async () => {
   ctx = undefined
 })
 
-async function harness(signal: AbortSignal = new AbortController().signal, adapter: EchoAdapter = new EchoAdapter()): Promise<{ agent: Agent; adapter: EchoAdapter; query: CodeBindingFunction; queryMany: CodeBindingFunction }> {
+async function harness(signal: AbortSignal = new AbortController().signal, adapter: EchoAdapter = new EchoAdapter()): Promise<{ agent: Agent; adapter: EchoAdapter; query: PtcBindingFunction; queryMany: PtcBindingFunction }> {
   ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(LlmRuntime)

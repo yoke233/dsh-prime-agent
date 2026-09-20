@@ -1,7 +1,7 @@
 /** Secondary continual-learning layer for the Prime RLM workspace. */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import type { CodeBindingNamespace } from '@deepseek-ai/dsh-code-runtime';
+import type { PtcBindingNamespace } from '@deepseek-ai/dsh-ptc-runtime';
 import { HarnessStore } from './store.js';
 import type { HarnessLimits } from './types.js';
 export interface ContinualConfig {
@@ -19,7 +19,7 @@ export interface RefineStatus {
 }
 export interface ContinualRuntime {
     store: HarnessStore;
-    bindingFor(agent: Agent): CodeBindingNamespace;
+    bindingFor(agent: Agent): PtcBindingNamespace;
 }
 /** Register replayable learning context, the packaged Skill provider, and its private Realm bridge. */
 export declare function registerContinual(ctx: Context, config: ContinualConfig): ContinualRuntime;

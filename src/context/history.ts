@@ -25,7 +25,7 @@ function record(seq: number, kind: string, body: unknown) {
 export function historyRecord(session: Session, seq: number): { seq: number; kind: string; text: string; searchText: string } | undefined {
   const event = session.eventAt(SessionSeq(seq))
   if (event === undefined) return undefined
-  if (event.type === 'tool/code-dispatch') {
+  if (event.type === 'tool/ptc-dispatch') {
     return record(seq, event.type, {
       name: event.data.name, arguments: event.data.arguments,
       content: visibleContent(event.data.content), isError: event.data.isError,
